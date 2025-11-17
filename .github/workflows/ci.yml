@@ -52,6 +52,20 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: activekg
+          POSTGRES_PASSWORD: activekg
+          POSTGRES_DB: activekg
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       
@@ -66,13 +80,27 @@ jobs:
           pip install --upgrade pip
           pip install pytest pytest-cov pytest-timeout
           pip install -r requirements.txt
+
+      - name: Wait for PostgreSQL and initialize schema
+        env:
+          PGPASSWORD: activekg
+        run: |
+          until pg_isready -h localhost -p 5432 -U activekg; do
+            echo "Waiting for PostgreSQL..."; sleep 2; done
+          psql -h localhost -U activekg -d activekg -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          psql -h localhost -U activekg -d activekg -f db/init.sql
+          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
+          psql -h localhost -U activekg -d activekg -f db/migrations/add_text_search.sql || true
       
       - name: Run unit tests
+        env:
+          ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
         run: |
-          pytest tests/test_phase1_complete.py \
-                 tests/test_phase1_plus.py \
-                 tests/test_base_engine_gaps.py \
-                 -v --tb=short --timeout=30
+          pytest \
+            tests/test_phase1_complete.py \
+            tests/test_phase1_plus.py \
+            tests/test_base_engine_gaps.py \
+            -v --tb=short --timeout=60
         continue-on-error: false
 
   # ============================================================================

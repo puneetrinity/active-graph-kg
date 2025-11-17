@@ -564,7 +564,8 @@ def get_config_store(dsn: str | None = None, redis_url: str | None = None) -> Co
     if _config_store is None:
         if dsn is None:
             # Accept Railway/Heroku style DATABASE_URL as fallback
-            dsn = os.getenv("ACTIVEKG_DSN") or os.getenv("DATABASE_URL")
+            from activekg.common.env import env_str
+            dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])  # empty string if not set
             if not dsn:
                 raise ValueError("ACTIVEKG_DSN/DATABASE_URL not set")
 

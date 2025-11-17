@@ -13,7 +13,8 @@ from psycopg.rows import dict_row
 
 
 def _get_dsn() -> str:
-    dsn = os.getenv("ACTIVEKG_DSN") or os.getenv("DATABASE_URL")
+    from activekg.common.env import env_str
+    dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])  # empty string if not set
     if not dsn:
         raise RuntimeError("ACTIVEKG_DSN/DATABASE_URL not set for cursor store")
     return dsn

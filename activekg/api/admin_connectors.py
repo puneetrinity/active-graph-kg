@@ -238,7 +238,8 @@ def get_drive_cursor(tenant_id: str, claims: JWTClaims | None = Depends(get_jwt_
     from psycopg.rows import dict_row
 
     # Get updated_at timestamp from database
-    dsn = os.getenv("ACTIVEKG_DSN") or os.getenv("DATABASE_URL")
+    from activekg.common.env import env_str
+    dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])  # empty string if not set
     if not dsn:
         raise HTTPException(status_code=500, detail="ACTIVEKG_DSN/DATABASE_URL not configured")
 
