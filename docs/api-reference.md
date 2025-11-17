@@ -1,5 +1,8 @@
 # Active Graph KG API Reference
 
+**Status:** ✅ Production Ready
+**Last Updated:** 2025-11-17
+
 ## Overview
 
 Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgvector. It provides semantic search, LLM-powered Q&A with citations, automatic embedding refresh, lineage tracking, and semantic triggers.
@@ -13,6 +16,8 @@ Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgv
 - Lineage tracking with provenance chains
 - Semantic trigger patterns
 - Prometheus metrics integration
+- Dual ANN indexing (IVFFLAT/HNSW)
+- DSN fallback for PaaS (DATABASE_URL for Railway/Heroku)
 
 ## Authentication
 
@@ -41,9 +46,13 @@ When `JWT_ENABLED=false`, authentication is disabled and `tenant_id` can be prov
 Default: `http://localhost:8000`
 
 Configure via environment variables:
-- `ACTIVEKG_DSN`: PostgreSQL connection string
+- `ACTIVEKG_DSN`: PostgreSQL connection string (fallback: `DATABASE_URL` for PaaS)
 - `EMBEDDING_BACKEND`: Embedding provider (default: `sentence-transformers`)
+- `EMBEDDING_MODEL`: Model name (default: `all-MiniLM-L6-v2`)
 - `LLM_BACKEND`: LLM provider for `/ask` (default: `groq`)
+- `RUN_SCHEDULER`: Run scheduler on exactly one instance (default: `true`)
+- `PGVECTOR_INDEXES`: ANN index types (e.g., `ivfflat,hnsw`)
+- `SEARCH_DISTANCE`: Distance metric (default: `cosine`)
 
 ## Rate Limiting
 

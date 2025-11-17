@@ -1,11 +1,116 @@
 # Active Graph KG - Operations Guide
 
+**Last Updated**: 2025-11-17
+
 ## Table of Contents
 
+- [Runtime & Config](#runtime--config)
+- [Database & Indexing](#database--indexing)
 - [Admin API Reference](#admin-api-reference)
 - [Operational Runbook](#operational-runbook)
 - [Monitoring & Metrics](#monitoring--metrics)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## Runtime & Config
+
+### Core Application
+
+- **API Entry Point**: `activekg/api/main.py` (uvicorn, FastAPI)
+- **Standard Port**: 5432 (Postgres), 8000 (API)
+
+### DSN Fallback
+
+DSN is resolved using `ACTIVEKG_DSN` or `DATABASE_URL` fallback for PaaS compatibility:
+
+```python
+# Resolved in:
+# - activekg/api/main.py:58
+# - activekg/api/admin_connectors.py:241
+# - activekg/connectors/config_store.py:562
+# - activekg/connectors/cursor_store.py:16
+# - activekg/connectors/worker.py:270
+```
+
+### Key Environment Variables
+
+```bash
+# Database (fallback: DATABASE_URL for Railway/Heroku)
+export ACTIVEKG_DSN='postgresql://activekg:activekg@localhost:5432/activekg'
+
+# Embedding
+export EMBEDDING_BACKEND='sentence-transformers'
+export EMBEDDING_MODEL='all-MiniLM-L6-v2'
+
+# Scheduler (run on exactly one instance)
+export RUN_SCHEDULER=true  # false on replicas
+
+# JWT Auth (HS256 for dev, RS256 in prod via JWT_PUBLIC_KEY)
+export JWT_ENABLED=true
+export JWT_SECRET_KEY='your-32-char-secret'
+export JWT_ALGORITHM=HS256
+export JWT_AUDIENCE=activekg
+export JWT_ISSUER=https://auth.yourcompany.com
+
+# Rate Limiting (optional)
+export RATE_LIMIT_ENABLED=true
+export REDIS_URL='redis://localhost:6379/0'
+
+# ANN Configuration (dual-mode supported)
+export PGVECTOR_INDEX=ivfflat            # or hnsw
+export PGVECTOR_INDEXES=ivfflat,hnsw     # both present
+export SEARCH_DISTANCE=cosine            # must match index opclass
+export IVFFLAT_LISTS=100
+export IVFFLAT_PROBES=4
+export HNSW_M=16
+export HNSW_EF_CONSTRUCTION=128
+export HNSW_EF_SEARCH=80
+```
+
+---
+
+## Database & Indexing
+
+### Schema Initialization
+
+```bash
+# Schema init
+psql $ACTIVEKG_DSN -f db/init.sql
+
+# RLS policies
+psql $ACTIVEKG_DSN -f enable_rls_policies.sql
+
+# Hybrid text search (BM25)
+psql $ACTIVEKG_DSN -f db/migrations/add_text_search.sql
+
+# Vector index (IVFFLAT default; HNSW optional)
+psql $ACTIVEKG_DSN -f enable_vector_index.sql
+```
+
+### Admin Index Management
+
+```bash
+# List indexes
+curl -X POST $API/admin/indexes -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"list"}'
+
+# Ensure indexes exist (no auto-drop; concurrent builds)
+curl -X POST $API/admin/indexes -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"ensure","types":["ivfflat","hnsw"],"metric":"cosine"}'
+
+# Rebuild
+curl -X POST $API/admin/indexes -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"rebuild","types":["ivfflat"],"metric":"cosine"}'
+
+# Drop (careful!)
+curl -X POST $API/admin/indexes -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"drop","types":["hnsw"]}'
+```
 
 ---
 
@@ -723,5 +828,51 @@ curl -X POST http://prod.example.com/_admin/connectors/rotate_keys \
 
 - [PHASE_3_ROTATION_COMPLETE.md](PHASE_3_ROTATION_COMPLETE.md) - Implementation details
 - [activekg/connectors/README.md](activekg/connectors/README.md) - Connector architecture
-- [test_phase3_rotation.py](test_phase3_rotation.py) - Rotation test suite
-- [test_phase2_hardening.py](test_phase2_hardening.py) - Pub/sub test suite
+- [tests/test_phase3_rotation.py](tests/test_phase3_rotation.py) - Rotation test suite
+- [tests/test_phase2_hardening.py](tests/test_phase2_hardening.py) - Pub/sub test suite
+- [docs/operations/SELF_SERVE_RAILWAY.md](docs/operations/SELF_SERVE_RAILWAY.md) - Railway deployment guide
+- [scripts/README.md](scripts/README.md) - Validation scripts catalog
+
+### Core Admin Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/refresh` | POST | Trigger on-demand refresh |
+| `/admin/indexes` | POST | List/ensure/rebuild/drop ANN indexes |
+| `/_admin/embed_info` | GET | Embedding health |
+| `/_admin/embed_class_coverage` | GET | Per-class embedding coverage |
+| `/_admin/metrics_summary` | GET | Scheduler/trigger snapshots |
+| `/_admin/drift_histogram` | GET | Drift distribution (bucketed) |
+| `/_admin/connectors/cache/health` | GET | Cache subscriber health |
+| `/_admin/connectors/rotate_keys` | POST | Key rotation |
+
+### Debug Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/debug/embed_info` | GET | Embedding backend status |
+| `/debug/search_explain` | GET | Query plan analysis |
+| `/debug/search_sanity` | GET | Sanity checks |
+| `/debug/dbinfo` | GET | Database metadata |
+
+### Governance Metrics
+
+New metrics for auth/tenant governance:
+- `activekg_access_violations_total{type="missing_token"}` - Requests without JWT
+- `activekg_access_violations_total{type="scope_denied"}` - Insufficient scopes
+- `activekg_access_violations_total{type="cross_tenant_query"}` - RLS violations
+
+### Observability
+
+- **JSON metrics**: `GET /metrics`
+- **Prometheus format**: `GET /prometheus`
+- **Grafana dashboard**: `http://localhost:3000/d/activekg-ops`
+- **Make targets**: `make open-grafana`
+
+New metrics include:
+- Trigger latency/fired
+- Scheduler inter-run timing
+- Refresh per node/cycle
+- Vector index build histogram (type/metric/result)
+- Ask first-token SSE latency
+- Retrieval uplift gauge (from nightly eval publish)

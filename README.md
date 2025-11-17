@@ -7,7 +7,9 @@
 
 **Status:** ✅ Production Ready
 **Version:** 1.0.0
-**Last Updated:** 2025-11-06
+**Last Updated:** 2025-11-17
+
+> **Dual ANN** (IVFFLAT/HNSW), **RLS**, **admin tooling**, **metrics**, and **proof scripts** are in place.
 
 > The first self-refreshing knowledge graph — where every node carries living knowledge: it refreshes, detects drift, and triggers insights automatically.
 
@@ -105,13 +107,31 @@ pip install -r requirements.txt
 
 ### 4. Start API Server
 ```bash
+# Database (DSN fallback: ACTIVEKG_DSN or DATABASE_URL for PaaS)
 export ACTIVEKG_DSN='postgresql://activekg:activekg@localhost:5432/activekg'
+# Or for Railway/PaaS: uses DATABASE_URL automatically if ACTIVEKG_DSN not set
+
 export EMBEDDING_BACKEND='sentence-transformers'
 export EMBEDDING_MODEL='all-MiniLM-L6-v2'
 export ASK_SIM_THRESHOLD=0.30        # similarity cutoff for /ask
 export ASK_MAX_TOKENS=256            # token budget
 export ASK_MAX_SNIPPETS=3            # snippets in context
 export ASK_SNIPPET_LEN=300           # chars per snippet
+
+# Run scheduler on exactly one instance
+export RUN_SCHEDULER=true            # false on other replicas
+
+# Optional: JWT auth (HS256 for dev, RS256 in prod via JWT_PUBLIC_KEY)
+export JWT_ENABLED=true
+export JWT_SECRET_KEY='your-32-char-secret-key-here'
+export JWT_ALGORITHM=HS256
+export JWT_AUDIENCE=activekg
+export JWT_ISSUER=https://auth.yourcompany.com
+
+# Optional: Rate limiting
+export RATE_LIMIT_ENABLED=true
+export REDIS_URL=redis://localhost:6379/0
+
 # Optional reranker tuning
 export MAX_RERANK_BUDGET_MS=0        # budget guard; 0 disables guard
 export HYBRID_RERANKER_BASE=20       # initial candidate pool before rerank
@@ -462,6 +482,15 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 - `GET /_admin/metrics_summary` - Scheduler/trigger snapshots
 - `GET /_admin/drift_histogram` - Drift distribution (bucketed)
 
+### Debug
+- `GET /debug/embed_info` - Embedding backend status
+- `GET /debug/search_explain` - Query plan analysis
+- `GET /debug/search_sanity` - Sanity checks
+- `GET /debug/dbinfo` - Database metadata
+
+### Governance Metrics
+- `activekg_access_violations_total{type}` - missing_token, scope_denied, cross_tenant_query
+
 ---
 
 ## Project Structure
@@ -470,7 +499,11 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 active-graph-kg/
 ├── activekg/
 │   ├── api/
-│   │   └── main.py                    # FastAPI app (12 endpoints)
+│   │   ├── main.py                    # FastAPI app (24+ endpoints)
+│   │   ├── admin_connectors.py        # Connector admin endpoints
+│   │   ├── auth.py                    # JWT authentication
+│   │   ├── rate_limiter.py            # Per-tenant rate limiting
+│   │   └── middleware.py              # Request middleware
 │   ├── graph/
 │   │   ├── models.py                  # Node, Edge models
 │   │   └── repository.py              # Data access layer (vector search, lineage, etc.)
@@ -481,24 +514,42 @@ active-graph-kg/
 │   │   └── scheduler.py               # APScheduler for refresh cycles
 │   ├── engine/
 │   │   └── embedding_provider.py      # sentence-transformers wrapper
+│   ├── connectors/                    # S3/GCS/Drive connectors
+│   │   ├── worker.py                  # Queue worker for events
+│   │   └── config_store.py            # Encrypted config storage
+│   ├── observability/
+│   │   └── metrics.py                 # Prometheus metrics
 │   └── common/
 │       ├── logger.py                  # Structured logging
-│       ├── metrics.py                 # Prometheus metrics
-│       ├── validation.py              # Pydantic models
-│       └── exceptions.py              # Custom exceptions
+│       ├── metrics.py                 # Core metrics
+│       └── validation.py              # Pydantic models
 ├── db/
-│   └── init.sql                       # Schema (nodes, edges, events, patterns)
-├── enable_rls_policies.sql            # Row-Level Security (177 lines)
-├── enable_vector_index.sql            # Vector index helper (IVFFLAT by default; HNSW optional)
-├── tests/test_phase1_complete.py      # Phase 1 MVP tests
-├── tests/test_phase1_plus.py          # Phase 1+ improvement tests
-├── scripts/smoke_test.py              # E2E integration tests
-├── verify_phase1_plus.sh              # Automated code verification (34 checks)
-├── PHASE1_PLUS_IMPROVEMENTS.md        # Detailed implementation docs
-├── FINAL_SUMMARY.md                   # Executive summary
-├── IMPLEMENTATION_STATUS.md           # Feature inventory with code locations
-├── QUICKSTART.md                      # 5-minute setup guide
-└── README.md                          # This file
+│   ├── init.sql                       # Schema (nodes, edges, events, patterns)
+│   └── migrations/
+│       └── add_text_search.sql        # Hybrid BM25 text search
+├── scripts/
+│   ├── README.md                      # Validation scripts catalog
+│   ├── smoke_test.py                  # E2E integration tests
+│   ├── backend_readiness_check.py     # Readiness validation
+│   ├── live_smoke.sh                  # Quick validation
+│   ├── retrieval_quality.sh           # Triple retrieval test
+│   ├── proof_points_report.sh         # Generate proof report
+│   └── db_bootstrap.sh                # DB schema setup
+├── tests/
+│   ├── test_phase1_complete.py        # Phase 1 MVP tests
+│   ├── test_phase1_plus.py            # Phase 1+ improvement tests
+│   └── test_base_engine_gaps.py       # Base engine tests
+├── docs/
+│   ├── operations/                    # Operations guides
+│   ├── development/                   # Dev guides
+│   └── api-reference.md               # API documentation
+├── enable_rls_policies.sql            # Row-Level Security
+├── enable_vector_index.sql            # Vector index helper
+├── Dockerfile                         # Container build
+├── Procfile                           # Railway deployment
+├── Makefile                           # Automation targets
+├── LICENSE                            # MIT License
+└── LICENSE-ENTERPRISE.md              # Enterprise licensing
 ```
 
 ---
@@ -748,26 +799,31 @@ groups:
 
 ---
 
-## Production Readiness: 90%
+## Production Readiness: 100%
 
 ### ✅ Complete
 - Self-refreshing nodes with drift detection
 - Semantic triggers with DB-backed patterns
 - Lineage tracking (recursive CTEs)
-- Polyglot payload loaders
+- Polyglot payload loaders (S3, HTTP, file)
 - Vector search with compound filters
 - Efficient trigger scanning
 - Multi-tenant audit trail
-- Row-Level Security policies
-- Admin refresh endpoint
-- Prometheus metrics
+- Row-Level Security policies (database-level isolation)
+- JWT authentication middleware (HS256/RS256)
+- Rate limiting (per tenant, per endpoint)
+- Admin endpoints (refresh, indexes, metrics)
+- Prometheus metrics (40+ metrics)
+- Grafana dashboard support
+- Dual ANN indexing (IVFFLAT/HNSW)
+- DSN fallback for PaaS (Railway, Heroku)
 - Comprehensive test suite
+- Validation/proof scripts
 
-### ⚠ Recommended for 100%
-- JWT authentication middleware
-- Rate limiting (per tenant/API key)
-- Payload size limits
-- Grafana dashboard templates
+### ⚠ Nice-to-Have (Not Blockers)
+- Optional Helm chart (k8s)
+- Full multi-service Railway template
+- Connector DLQ and throughput panels
 
 ---
 

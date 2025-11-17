@@ -2,6 +2,9 @@
 
 **One-Line Definition:** A self-refreshing knowledge graph where nodes auto-refresh, track drift, and emit semantic triggers.
 
+**Status:** ✅ Production Ready (Dual ANN, RLS, JWT auth, rate limiting, metrics)
+**Last Updated:** 2025-11-17
+
 ---
 
 ## 🚀 Quick Sanity Steps (5 Minutes)
@@ -38,14 +41,31 @@ pip install -r requirements.txt
 
 ### **4. Start API**
 ```bash
+# Database (or use DATABASE_URL for Railway/Heroku)
 export ACTIVEKG_DSN="postgresql://activekg:activekg@localhost:5432/activekg"
+
+# Embedding config
 export EMBEDDING_BACKEND="sentence-transformers"
 export EMBEDDING_MODEL="all-MiniLM-L6-v2"
+
+# Ask endpoint tuning
 export ASK_SIM_THRESHOLD=0.30
 export ASK_MAX_TOKENS=256
 export ASK_MAX_SNIPPETS=3
 export ASK_SNIPPET_LEN=300
 export HYBRID_RERANKER_CANDIDATES=20
+
+# Run scheduler on exactly one instance
+export RUN_SCHEDULER=true  # false on replicas
+
+# Optional: JWT auth (disable for quick dev)
+export JWT_ENABLED=false
+# When enabled, use:
+# export JWT_ENABLED=true
+# export JWT_SECRET_KEY='your-32-char-secret-key-here'
+# export JWT_ALGORITHM=HS256
+# export JWT_AUDIENCE=activekg
+# export JWT_ISSUER=https://auth.yourcompany.com
 
 uvicorn activekg.api.main:app --reload
 ```
