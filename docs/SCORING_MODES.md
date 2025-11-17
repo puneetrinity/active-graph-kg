@@ -250,6 +250,6 @@ activekg_search_latency_ms{mode="hybrid",reranked="true"} - histogram
 ## References
 
 - [RRF Paper](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) - Original Reciprocal Rank Fusion algorithm
-- [activekg/graph/repository.py:555-650](../activekg/graph/repository.py) - RRF implementation
-- [activekg/api/main.py:1620-1800](../activekg/api/main.py) - Gating and metadata logic
-- [tests/test_scoring_modes.py](../tests/test_scoring_modes.py) - Comprehensive test coverage
+- `activekg/graph/repository.py:555-650` - RRF implementation
+- `activekg/api/main.py:1620-1800` - Gating and metadata logic
+- `tests/test_scoring_modes.py` - Comprehensive test coverage

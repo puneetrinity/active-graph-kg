@@ -1182,7 +1182,7 @@ curl http://localhost:8000/_admin/connectors/cache/health
 **Notes:**
 - `status: "ok"` when subscriber connected and operational
 - `status: "degraded"` when subscriber down or disconnected
-- See [OPERATIONS.md](../OPERATIONS.md) for complete operations guide
+- See [OPERATIONS.md](operations/OPERATIONS.md) for complete operations guide
 
 ---
 
@@ -1273,7 +1273,7 @@ curl -X POST http://localhost:8000/_admin/connectors/rotate_keys \
 - Decrypts with old key, re-encrypts with active key
 - Invalidates cache and publishes Redis pub/sub notification
 - Per-row error handling (one failure doesn't stop batch)
-- See [OPERATIONS.md](../OPERATIONS.md) for complete runbook
+- See [OPERATIONS.md](operations/OPERATIONS.md) for complete runbook
 
 ---
 

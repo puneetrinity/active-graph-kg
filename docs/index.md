@@ -8,13 +8,13 @@ Welcome to the **Active Graph KG** documentation — a production-ready knowledg
 
 <div class="grid cards" markdown>
 
--   :material-rocket-launch: **[Quickstart Guide](../QUICKSTART.md)**
+-   :material-rocket-launch: **Quickstart Guide**
 
     ---
 
     Get running in 5 minutes with PostgreSQL + pgvector
 
-    [:octicons-arrow-right-24: Start here](../QUICKSTART.md)
+    [:octicons-arrow-right-24: See setup below](#getting-started)
 
 -   :material-api: **[API Reference](api-reference.md)**
 
@@ -64,13 +64,13 @@ Welcome to the **Active Graph KG** documentation — a production-ready knowledg
 
     [:octicons-arrow-right-24: Understand the system](development/architecture.md)
 
--   :material-file-document: **[Implementation Status](../IMPLEMENTATION_STATUS.md)**
+-   :material-file-document: **Implementation Status**
 
     ---
 
     Complete feature inventory with exact code locations
 
-    [:octicons-arrow-right-24: View features](../IMPLEMENTATION_STATUS.md)
+    [:octicons-arrow-right-24: See features below](#key-features)
 
 </div>
 
@@ -120,7 +120,7 @@ export GROQ_API_KEY="your-key-here"
 uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-See the **[Quickstart Guide](../QUICKSTART.md)** for detailed setup instructions.
+See the setup instructions above for detailed configuration options.
 
 ### 2. Create Your First Node
 
@@ -185,20 +185,22 @@ Documentation for developers working with the codebase.
 
 ## Additional Resources
 
-- **[Phase 1+ Summary](../PHASE1_PLUS_SUMMARY.md)** - Executive summary with architecture overview
-- **[Phase 1+ Improvements](../PHASE1_PLUS_IMPROVEMENTS.md)** - Detailed implementation guide
-- **[Production Optimization Guide](../PRODUCTION_OPTIMIZATION_GUIDE.md)** - 7-phase optimization plan
-- **[Implementation Status](../IMPLEMENTATION_STATUS.md)** - Complete feature inventory with code locations
+- **Phase 1+ Summary** - Executive summary with architecture overview
+- **Phase 1+ Improvements** - Detailed implementation guide
+- **Production Optimization Guide** - 7-phase optimization plan
+- **Implementation Status** - Complete feature inventory with code locations
+
+See the repository root for these additional documents.
 
 ---
 
 ## Support & Community
 
-- **Questions?** Check the [Quickstart Guide](../QUICKSTART.md) first
+- **Questions?** Check the [Getting Started](#getting-started) section above
 - **API Issues?** See the [API Reference](api-reference.md)
 - **Deployment Issues?** Check [Deployment Guide](operations/deployment.md)
 - **Security Questions?** Review [Security Guide](operations/security.md)
-- **Bugs/Features?** Open an issue on [GitHub](https://github.com/yourusername/active-graph-kg/issues)
+- **Bugs/Features?** Open an issue on GitHub
 
 ---
 

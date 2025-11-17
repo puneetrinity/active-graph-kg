@@ -7,7 +7,7 @@ This directory contains the complete documentation for Active Graph KG.
 ### Operations Guides (Production)
 Production deployment, security, and monitoring documentation.
 
-- **[../OPERATIONS.md](../OPERATIONS.md)** - Complete operations runbook with admin API reference and key rotation procedures
+- **[operations/OPERATIONS.md](operations/OPERATIONS.md)** - Complete operations runbook with admin API reference and key rotation procedures
 - **[security.md](operations/security.md)** - Complete security guide including JWT authentication, Row-Level Security (RLS), rate limiting, and payload security
 - **[monitoring.md](operations/monitoring.md)** - Prometheus metrics, Grafana dashboards, and alerting rules for production monitoring
 - **[deployment.md](operations/deployment.md)** - Production deployment checklist, database tuning, and best practices
@@ -22,12 +22,12 @@ Documentation for developers working with the codebase.
 ## Additional Resources
 
 ### Root Documentation
-Key documentation files located in the project root:
+Key documentation files located in the project root (outside docs/):
 
-- **[../QUICKSTART.md](../QUICKSTART.md)** - 5-minute setup guide to get started quickly
-- **[../IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md)** - Complete feature inventory with code locations
-- **[../PHASE1_PLUS_SUMMARY.md](../PHASE1_PLUS_SUMMARY.md)** - Executive summary with architecture overview
-- **[../PHASE1_PLUS_IMPROVEMENTS.md](../PHASE1_PLUS_IMPROVEMENTS.md)** - Detailed implementation guide for Phase 1+ features
+- **QUICKSTART.md** - 5-minute setup guide to get started quickly
+- **IMPLEMENTATION_STATUS.md** - Complete feature inventory with code locations
+- **PHASE1_PLUS_SUMMARY.md** - Executive summary with architecture overview
+- **PHASE1_PLUS_IMPROVEMENTS.md** - Detailed implementation guide for Phase 1+ features
 
 ### Archive
 Historical documentation preserved in `../archive/`:
@@ -66,7 +66,7 @@ When adding new documentation:
 
 ## Getting Help
 
-- **Questions?** Check the [Quickstart Guide](../QUICKSTART.md) first
+- **Questions?** Check the main README.md in the project root
 - **API Issues?** See the [API Reference](api-reference.md)
 - **Deployment Issues?** Check [Deployment Guide](operations/deployment.md)
 - **Security Questions?** Review [Security Guide](operations/security.md)
