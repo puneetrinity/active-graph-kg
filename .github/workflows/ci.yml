@@ -69,9 +69,9 @@ jobs:
       
       - name: Run unit tests
         run: |
-          pytest test_phase1_complete.py \
-                 test_phase1_plus.py \
-                 test_base_engine_gaps.py \
+          pytest tests/test_phase1_complete.py \
+                 tests/test_phase1_plus.py \
+                 tests/test_base_engine_gaps.py \
                  -v --tb=short --timeout=30
         continue-on-error: false
 
