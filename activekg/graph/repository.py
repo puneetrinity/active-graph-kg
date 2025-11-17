@@ -5,7 +5,7 @@ import os
 import time
 from contextlib import contextmanager
 from datetime import UTC
-from typing import Any
+from typing import Any, TypedDict, NotRequired, cast, Sequence, Literal, Optional, Tuple
 
 import numpy as np
 import psycopg
@@ -14,6 +14,165 @@ from psycopg_pool import ConnectionPool
 
 from activekg.common.logger import get_enhanced_logger
 from activekg.graph.models import Edge, Node
+
+
+class RefreshPolicyTD(TypedDict, total=False):
+    interval: str
+    cron: str
+    drift_threshold: float
+
+
+class TriggerPatternTD(TypedDict, total=False):
+    name: str
+    threshold: float
+    description: NotRequired[str]
+
+
+# Row shape for core node selection queries
+# (id, tenant_id, classes, props, payload_ref, embedding, metadata, refresh_policy,
+#  triggers, version, last_refreshed, drift_score)
+NodeRow = tuple[
+    str,
+    Optional[str],
+    list[str],
+    dict[str, Any],
+    Optional[str],
+    Any,  # pgvector array / list
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    int,
+    Any,  # datetime | None
+    Optional[float],
+]
+
+
+class LineageRecordTD(TypedDict):
+    id: str
+    depth: int
+    edge_props: dict[str, Any] | None
+    classes: list[str]
+    props: dict[str, Any]
+    created_at: str | None
+
+
+class NodeVersionTD(TypedDict):
+    version_index: int
+    drift_score: float | None
+    created_at: str | None
+    embedding_ref: str | None
+
+
+class DriftSpikeAnomalyTD(TypedDict):
+    type: Literal["drift_spike"]
+    node_id: str
+    spike_count: int
+    avg_drift: float
+    drift_scores: list[float]
+    mean_drift: float
+    spike_threshold: float
+    classes: list[str]
+    props: dict[str, Any]
+
+
+class TriggerStormAnomalyTD(TypedDict):
+    type: Literal["trigger_storm"]
+    node_id: str
+    event_count: int
+    first_event: str | None
+    last_event: str | None
+    recent_events: list[Any]
+    event_threshold: int
+    classes: list[str]
+    props: dict[str, Any]
+
+
+class SchedulerLagAnomalyTD(TypedDict):
+    type: Literal["scheduler_lag"]
+    node_id: str
+    expected_interval_seconds: float | int | None
+    actual_lag_seconds: float | None
+    lag_ratio: float
+    lag_multiplier: float
+    last_refreshed: str | None
+    classes: list[str]
+    props: dict[str, Any]
+
+
+# Extended row shapes for specific SELECTs (extra computed columns)
+# Node with appended vec_similarity (float) at index 12
+NodeVecSimRow = Tuple[
+    str,
+    Optional[str],
+    list[str],
+    dict[str, Any],
+    Optional[str],
+    Any,
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    int,
+    Any,
+    Optional[float],
+    float,
+]
+
+# Node with appended vec_similarity (float) and ts_rank (float) at indexes 12 and 13
+NodeHybridRow = Tuple[
+    str,
+    Optional[str],
+    list[str],
+    dict[str, Any],
+    Optional[str],
+    Any,
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    int,
+    Any,
+    Optional[float],
+    float,
+    float,
+]
+
+# Node with a single relevance float appended at the end
+NodeRelevanceRow = Tuple[
+    str,
+    Optional[str],
+    list[str],
+    dict[str, Any],
+    Optional[str],
+    Any,
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    int,
+    Any,
+    Optional[float],
+    float,
+]
+
+
+# Event payloads (best-effort typed shapes)
+class TriggerFiredPayloadTD(TypedDict, total=False):
+    pattern: str
+    score: float
+    node_id: str
+
+
+class RefreshedPayloadTD(TypedDict, total=False):
+    drift_score: float
+    previous_ref: Optional[str]
+    embedding_ref: Optional[str]
+
+
+class RecentEventTD(TypedDict, total=False):
+    type: str
+    created_at: Optional[str]
+    payload: dict[str, Any]
+
+
+EventPayloadTD = dict[str, Any] | TriggerFiredPayloadTD | RefreshedPayloadTD
 
 
 class GraphRepository:
@@ -64,6 +223,39 @@ class GraphRepository:
     def _configure_connection(self, conn):
         """Configure each new connection from the pool."""
         register_vector(conn)
+
+    def _build_node_from_row(self, row: Sequence[Any]) -> Node:
+        """Safely construct a Node from a DB row with type guards and casts."""
+        emb: np.ndarray | None
+        raw_emb = row[5]
+        if raw_emb is None:
+            emb = None
+        else:
+            # pgvector returns a list/Vector that can be cast to ndarray
+            try:
+                emb = np.array(raw_emb, dtype=np.float32)
+            except Exception:
+                emb = None
+
+        props = cast(dict[str, Any], row[3] or {})
+        metadata = cast(dict[str, Any], row[6] or {})
+        refresh_policy = cast(RefreshPolicyTD, cast(dict[str, Any], row[7] or {}))
+        triggers = cast(list[TriggerPatternTD], cast(list[dict[str, Any]], row[8] or []))
+
+        return Node(
+            id=str(row[0]),
+            tenant_id=cast(str | None, row[1]),
+            classes=cast(list[str], row[2] or []),
+            props=props,
+            payload_ref=cast(str | None, row[4]),
+            embedding=emb,
+            metadata=metadata,
+            refresh_policy=refresh_policy,
+            triggers=triggers,
+            version=cast(int, row[9]),
+            last_refreshed=cast(Any, row[10]),
+            drift_score=cast(float | None, row[11]),
+        )
 
     @contextmanager
     def _conn(self, tenant_id: str | None = None):
@@ -400,23 +592,7 @@ class GraphRepository:
 
                 out: list[Node] = []
                 for row in cur.fetchall():
-                    emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                    out.append(
-                        Node(
-                            id=str(row[0]),
-                            tenant_id=row[1],
-                            classes=row[2],
-                            props=row[3],
-                            payload_ref=row[4],
-                            embedding=emb,
-                            metadata=row[6],
-                            refresh_policy=row[7],
-                            triggers=row[8],
-                            version=row[9],
-                            last_refreshed=row[10],
-                            drift_score=row[11],
-                        )
-                    )
+                    out.append(self._build_node_from_row(cast(Sequence[Any], row)))
                 return out
 
     # --- Nodes ---
@@ -459,35 +635,21 @@ class GraphRepository:
                     """,
                     (node_id,),
                 )
-                row = cur.fetchone()
+                row = cast(NodeRow | None, cur.fetchone())
                 if not row:
                     return None
-                emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                return Node(
-                    id=str(row[0]),
-                    tenant_id=row[1],
-                    classes=row[2],
-                    props=row[3],
-                    payload_ref=row[4],
-                    embedding=emb,
-                    metadata=row[6],
-                    refresh_policy=row[7],
-                    triggers=row[8],
-                    version=row[9],
-                    last_refreshed=row[10],
-                    drift_score=row[11],
-                )
+                return self._build_node_from_row(row)
 
     def update_node(
         self,
         node_id: str,
         *,
         classes: list[str] | None = None,
-        props: dict | None = None,
+        props: dict[str, Any] | None = None,
         payload_ref: str | None = None,
-        metadata: dict | None = None,
-        refresh_policy: dict | None = None,
-        triggers: list[dict] | None = None,
+        metadata: dict[str, Any] | None = None,
+        refresh_policy: RefreshPolicyTD | None = None,
+        triggers: list[TriggerPatternTD] | None = None,
         tenant_id: str | None = None,
     ) -> bool:
         """Update mutable fields for a node.
@@ -585,8 +747,8 @@ class GraphRepository:
         self,
         query_embedding: np.ndarray,
         top_k: int = 10,
-        metadata_filters: dict | None = None,
-        compound_filter: dict | None = None,
+        metadata_filters: dict[str, Any] | None = None,
+        compound_filter: dict[str, Any] | None = None,
         classes_filter: list[str] | None = None,
         tenant_id: str | None = None,
         use_weighted_score: bool = False,
@@ -683,22 +845,9 @@ class GraphRepository:
 
                 results: list[tuple[Node, float]] = []
                 for row in cur.fetchall():
-                    emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                    node = Node(
-                        id=str(row[0]),
-                        tenant_id=row[1],
-                        classes=row[2],
-                        props=row[3],
-                        payload_ref=row[4],
-                        embedding=emb,
-                        metadata=row[6],
-                        refresh_policy=row[7],
-                        triggers=row[8],
-                        version=row[9],
-                        last_refreshed=row[10],
-                        drift_score=row[11],
-                    )
-                    similarity = float(row[12])
+                    row_t = cast(NodeVecSimRow, row)
+                    node = self._build_node_from_row(cast(Sequence[Any], row_t))
+                    similarity = float(row_t[12])
                     results.append((node, similarity))
 
                 # Apply weighted scoring if enabled
@@ -744,8 +893,8 @@ class GraphRepository:
         query_text: str,
         query_embedding: np.ndarray,
         top_k: int = 10,
-        metadata_filters: dict | None = None,
-        compound_filter: dict | None = None,
+        metadata_filters: dict[str, Any] | None = None,
+        compound_filter: dict[str, Any] | None = None,
         classes_filter: list[str] | None = None,
         tenant_id: str | None = None,
         use_reranker: bool = True,
@@ -915,23 +1064,10 @@ class GraphRepository:
                 max_ts_rank = 0.0
 
                 for row in cur.fetchall():
-                    emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                    node = Node(
-                        id=str(row[0]),
-                        tenant_id=row[1],
-                        classes=row[2],
-                        props=row[3],
-                        payload_ref=row[4],
-                        embedding=emb,
-                        metadata=row[6],
-                        refresh_policy=row[7],
-                        triggers=row[8],
-                        version=row[9],
-                        last_refreshed=row[10],
-                        drift_score=row[11],
-                    )
-                    vec_sim = float(row[12])
-                    ts_rank = float(row[13])
+                    row_t = cast(NodeHybridRow, row)
+                    node = self._build_node_from_row(cast(Sequence[Any], row_t))
+                    vec_sim = float(row_t[12])
+                    ts_rank = float(row_t[13])
                     max_ts_rank = max(max_ts_rank, ts_rank)
                     candidates.append((node, vec_sim, ts_rank))
 
@@ -1146,7 +1282,7 @@ class GraphRepository:
 
     def get_lineage(
         self, node_id: str, max_depth: int = 5, tenant_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[LineageRecordTD]:
         """Recursively traverse DERIVED_FROM edges to build lineage graph.
 
         Returns list of ancestors with metadata: [{id, classes, props, depth, edge_props}, ...]
@@ -1179,17 +1315,19 @@ class GraphRepository:
                     (node_id, max_depth),
                 )
 
-                return [
-                    {
-                        "id": str(row[0]),
-                        "depth": row[1],
-                        "edge_props": row[2],
-                        "classes": row[3],
-                        "props": row[4],
-                        "created_at": row[5].isoformat() if row[5] else None,
-                    }
-                    for row in cur.fetchall()
-                ]
+                out: list[LineageRecordTD] = []
+                for row in cur.fetchall():
+                    out.append(
+                        {
+                            "id": str(row[0]),
+                            "depth": int(row[1]),
+                            "edge_props": cast(dict[str, Any] | None, row[2]),
+                            "classes": cast(list[str], row[3] or []),
+                            "props": cast(dict[str, Any], row[4] or {}),
+                            "created_at": row[5].isoformat() if row[5] else None,
+                        }
+                    )
+                return out
 
     def find_nodes_due_for_refresh(self, current_time: str | None = None) -> list[Node]:
         """Find nodes due for refresh based on their refresh_policy.
@@ -1215,23 +1353,7 @@ class GraphRepository:
 
                 out: list[Node] = []
                 for row in cur.fetchall():
-                    emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                    node = Node(
-                        id=str(row[0]),
-                        tenant_id=row[1],
-                        classes=row[2],
-                        props=row[3],
-                        payload_ref=row[4],
-                        embedding=emb,
-                        metadata=row[6],
-                        refresh_policy=row[7],
-                        triggers=row[8],
-                        version=row[9],
-                        last_refreshed=row[10],
-                        drift_score=row[11],
-                    )
-
-                    # Check if node is due for refresh
+                    node = self._build_node_from_row(cast(Sequence[Any], row))
                     if self._is_due_for_refresh(node):
                         out.append(node)
 
@@ -1341,23 +1463,7 @@ class GraphRepository:
                 )
                 out: list[Node] = []
                 for row in cur.fetchall():
-                    emb = np.array(row[5], dtype=np.float32) if row[5] is not None else None
-                    out.append(
-                        Node(
-                            id=str(row[0]),
-                            tenant_id=row[1],
-                            classes=row[2],
-                            props=row[3],
-                            payload_ref=row[4],
-                            embedding=emb,
-                            metadata=row[6],
-                            refresh_policy=row[7],
-                            triggers=row[8],
-                            version=row[9],
-                            last_refreshed=row[10],
-                            drift_score=row[11],
-                        )
-                    )
+                    out.append(self._build_node_from_row(cast(Sequence[Any], row)))
                 return out
 
     # --- Edges ---
@@ -1374,7 +1480,7 @@ class GraphRepository:
         self,
         node_id: str,
         event_type: str,
-        payload: dict,
+        payload: EventPayloadTD,
         tenant_id: str | None = None,
         actor_id: str | None = None,
         actor_type: str | None = None,
@@ -1384,7 +1490,7 @@ class GraphRepository:
         Args:
             node_id: Node this event relates to
             event_type: Type of event (refreshed, trigger_fired, etc.)
-            payload: Event data
+            payload: Event data (typed best-effort)
             tenant_id: Tenant ID for RLS
             actor_id: Who triggered this (user ID, api key, 'scheduler', 'trigger')
             actor_type: Type of actor (user, api_key, scheduler, trigger, system)
@@ -1497,7 +1603,7 @@ class GraphRepository:
         spike_threshold: float = 2.0,
         min_refreshes: int = 3,
         tenant_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[DriftSpikeAnomalyTD]:
         """Detect nodes with drift scores consistently above mean (drift spike anomaly).
 
         A drift spike is when a node's drift score exceeds spike_threshold * mean_drift
@@ -1568,7 +1674,7 @@ class GraphRepository:
                     (lookback_hours, spike_cutoff, min_refreshes, min_refreshes),
                 )
 
-                anomalies = []
+                anomalies: list[DriftSpikeAnomalyTD] = []
                 for row in cur.fetchall():
                     anomalies.append(
                         {
@@ -1588,7 +1694,7 @@ class GraphRepository:
 
     def detect_trigger_storms(
         self, lookback_hours: int = 1, event_threshold: int = 50, tenant_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[TriggerStormAnomalyTD]:
         """Detect trigger storm anomalies (excessive trigger_fired events).
 
         A trigger storm occurs when more than event_threshold trigger_fired events
@@ -1642,19 +1748,44 @@ class GraphRepository:
                     (lookback_hours, event_threshold),
                 )
 
-                anomalies = []
+                anomalies: list[TriggerStormAnomalyTD] = []
                 for row in cur.fetchall():
+                    # Normalize recent events structure
+                    recent: list[RecentEventTD] = []
+                    raw_recent = row[4] or []
+                    try:
+                        iterable = list(raw_recent)[:10]
+                    except Exception:
+                        iterable = []
+                    for ev in iterable:
+                        try:
+                            ev_type = str(ev.get("type")) if isinstance(ev, dict) else None
+                            created = ev.get("created_at") if isinstance(ev, dict) else None
+                            created_s = (
+                                created.isoformat() if hasattr(created, "isoformat") else (str(created) if created is not None else None)
+                            )
+                            payload = ev.get("payload") if isinstance(ev, dict) else {}
+                            recent.append(
+                                {
+                                    "type": ev_type or "unknown",
+                                    "created_at": created_s,
+                                    "payload": cast(dict[str, Any], payload or {}),
+                                }
+                            )
+                        except Exception:
+                            continue
+
                     anomalies.append(
                         {
                             "type": "trigger_storm",
                             "node_id": str(row[0]),
-                            "event_count": row[1],
+                            "event_count": int(row[1]),
                             "first_event": row[2].isoformat() if row[2] else None,
                             "last_event": row[3].isoformat() if row[3] else None,
-                            "recent_events": row[4][:10],  # Limit to 10 most recent
+                            "recent_events": recent,
                             "event_threshold": event_threshold,
-                            "classes": row[5],
-                            "props": row[6],
+                            "classes": cast(list[str], row[5] or []),
+                            "props": cast(dict[str, Any], row[6] or {}),
                         }
                     )
 
@@ -1662,7 +1793,7 @@ class GraphRepository:
 
     def detect_scheduler_lag(
         self, lag_multiplier: float = 2.0, tenant_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[SchedulerLagAnomalyTD]:
         """Detect nodes overdue for refresh (scheduler lag anomaly).
 
         A node is overdue if it hasn't been refreshed within lag_multiplier times
@@ -1701,7 +1832,7 @@ class GraphRepository:
                     node_id = str(row[0])
                     classes = row[1]
                     props = row[2]
-                    policy = row[3]
+                    policy = cast(RefreshPolicyTD, row[3] or {})
                     last_refreshed = row[4]
 
                     # Calculate expected interval in seconds
@@ -1777,7 +1908,7 @@ class GraphRepository:
 
     def get_node_versions(
         self, node_id: str, limit: int = 10, tenant_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[NodeVersionTD]:
         """Get embedding history versions for a node.
 
         RLS-aware: uses tenant-scoped connection when tenant_id is provided.
@@ -1806,17 +1937,16 @@ class GraphRepository:
                     (node_id, limit),
                 )
 
-                versions = []
+                versions: list[NodeVersionTD] = []
                 for idx, row in enumerate(cur.fetchall()):
                     versions.append(
                         {
-                            "version_index": idx,  # Synthetic version ID based on order
+                            "version_index": idx,
                             "drift_score": float(row[0]) if row[0] is not None else None,
                             "created_at": row[1].isoformat() if row[1] else None,
-                            "embedding_ref": row[2],
+                            "embedding_ref": cast(str | None, row[2]),
                         }
                     )
-
                 return versions
 
     def list_open_positions(
@@ -1896,23 +2026,11 @@ class GraphRepository:
                         (limit,),
                     )
 
-                results = []
+                results: list[tuple[Node, float]] = []
                 for row in cur.fetchall():
-                    node = Node(
-                        id=str(row[0]),
-                        tenant_id=row[1],
-                        classes=row[2],
-                        props=row[3],
-                        payload_ref=row[4],
-                        embedding=np.array(row[5]) if row[5] is not None else None,
-                        metadata=row[6],
-                        refresh_policy=row[7],
-                        triggers=row[8],
-                        version=row[9],
-                        last_refreshed=row[10],
-                        drift_score=row[11],
-                    )
-                    score = float(row[12]) if row[12] else 1.0
+                    row_t = cast(NodeRelevanceRow, row)
+                    node = self._build_node_from_row(cast(Sequence[Any], row_t))
+                    score = float(row_t[12]) if row_t[12] is not None else 1.0
                     results.append((node, score))
 
                 return results
@@ -1958,23 +2076,11 @@ class GraphRepository:
                     (perf_query, perf_query, lookback_days, limit),
                 )
 
-                results = []
+                results: list[tuple[Node, float]] = []
                 for row in cur.fetchall():
-                    node = Node(
-                        id=str(row[0]),
-                        tenant_id=row[1],
-                        classes=row[2],
-                        props=row[3],
-                        payload_ref=row[4],
-                        embedding=np.array(row[5]) if row[5] is not None else None,
-                        metadata=row[6],
-                        refresh_policy=row[7],
-                        triggers=row[8],
-                        version=row[9],
-                        last_refreshed=row[10],
-                        drift_score=row[11],
-                    )
-                    score = float(row[12]) if row[12] else 1.0
+                    row_t = cast(NodeRelevanceRow, row)
+                    node = self._build_node_from_row(cast(Sequence[Any], row_t))
+                    score = float(row_t[12]) if row_t[12] is not None else 1.0
                     results.append((node, score))
 
                 return results

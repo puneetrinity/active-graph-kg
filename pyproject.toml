@@ -136,3 +136,25 @@ skip-magic-trailing-comma = false
 
 # Respect magic trailing comma
 docstring-code-format = true
+
+# mypy configuration (optional, used when running mypy without CLI flags)
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+pretty = true
+
+[tool.mypy-activekg.common.*]
+no_implicit_optional = true
+warn_return_any = true
+strict_equality = true
+
+[tool.mypy-activekg.graph.*]
+no_implicit_optional = true
+warn_return_any = true
+strict_equality = true
+
+[tool.mypy-activekg.api.*]
+no_implicit_optional = true
+warn_return_any = true
+strict_equality = true

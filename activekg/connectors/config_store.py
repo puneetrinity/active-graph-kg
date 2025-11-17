@@ -21,6 +21,7 @@ from prometheus_client import Counter
 from psycopg.rows import dict_row
 
 from activekg.connectors.encryption import get_encryption, sanitize_config_for_logging
+from activekg.connectors.types import ConnectorConfigTD
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,7 @@ class ConnectorConfigStore:
             logger.error(f"Failed to set enabled: {e}")
             return False
 
-    def list_all(self, provider: str | None = None) -> list[dict[str, Any]]:
+    def list_all(self, provider: str | None = None) -> list[ConnectorConfigTD]:
         """List all connector configs.
 
         Does NOT decrypt secrets. Returns metadata only.
@@ -345,13 +346,20 @@ class ConnectorConfigStore:
 
                     rows = cur.fetchall()
 
-                    # Convert datetime to ISO strings
-                    configs = []
+                    # Convert to typed records (ISO timestamps)
+                    configs: list[ConnectorConfigTD] = []
                     for row in rows:
-                        config = dict(row)
-                        config["created_at"] = config["created_at"].isoformat()
-                        config["updated_at"] = config["updated_at"].isoformat()
-                        configs.append(config)
+                        created = row["created_at"]
+                        updated = row["updated_at"]
+                        configs.append(
+                            {
+                                "tenant_id": row["tenant_id"],
+                                "provider": row["provider"],
+                                "config": {},  # metadata listing excludes secrets
+                                "created_at": created.isoformat() if created else None,
+                                "updated_at": updated.isoformat() if updated else None,
+                            }
+                        )
 
                     return configs
 
@@ -407,7 +415,7 @@ class ConnectorConfigStore:
         tenants: list[str] | None = None,
         batch_size: int = 100,
         dry_run: bool = False,
-    ) -> dict[str, Any]:
+    ) -> RotationBatchResultTD:
         """Rotate encryption keys for connector configs.
 
         Selects rows where key_version != ACTIVE_VERSION, decrypts with old key,
