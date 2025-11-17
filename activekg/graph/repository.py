@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import timezone
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
+
+# NotRequired was added in Python 3.11, use typing_extensions for 3.10
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:
+    from typing_extensions import NotRequired
 
 import numpy as np
 import psycopg

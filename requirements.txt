@@ -53,3 +53,4 @@ tenacity==8.2.3       # Retry logic for connectors
 # numba
 # mmh3
 scikit-learn==1.6.1  # For evaluation metrics
+typing_extensions>=4.0.0
