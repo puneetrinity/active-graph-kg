@@ -211,8 +211,18 @@ def verify_retrieval(ground_truth: dict[str, Any], token: str) -> bool:
 
     all_passed = True
     for qid, qdata in ground_truth.items():
-        question = qdata.get("question", "")
-        expected_ext_ids = qdata.get("relevant_external_ids", [])
+        # Support both formats:
+        # 1. New format: {"q1": {"question": "...", "relevant_external_ids": [...]}}
+        # 2. Legacy format: {"question text": ["ext_id1", "ext_id2", ...]}
+        if isinstance(qdata, dict):
+            question = qdata.get("question", "")
+            expected_ext_ids = qdata.get("relevant_external_ids", [])
+        elif isinstance(qdata, list):
+            # Legacy format: key is the question, value is list of external IDs
+            question = qid
+            expected_ext_ids = qdata
+        else:
+            continue
 
         if not question or not expected_ext_ids:
             continue
@@ -221,7 +231,7 @@ def verify_retrieval(ground_truth: dict[str, Any], token: str) -> bool:
         r = req("POST", "/search", token, json={"query": question, "use_hybrid": True, "top_k": 10})
 
         if r.status_code != 200:
-            print(f"  ❌ {qid}: Search failed ({r.status_code})")
+            print(f"  ❌ {qid[:50]}: Search failed ({r.status_code})")
             all_passed = False
             continue
 
@@ -229,11 +239,11 @@ def verify_retrieval(ground_truth: dict[str, Any], token: str) -> bool:
 
         # Check if we got non-zero results
         if len(results) == 0:
-            print(f"  ❌ {qid}: Zero results for query: {question}")
+            print(f"  ❌ {qid[:50]}: Zero results for query: {question[:50]}")
             all_passed = False
         else:
             top_sim = results[0].get("similarity", 0)
-            print(f"  ✅ {qid}: Found {len(results)} results (top sim: {top_sim:.3f})")
+            print(f"  ✅ {qid[:50]}: Found {len(results)} results (top sim: {top_sim:.3f})")
 
     return all_passed
 
