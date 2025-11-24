@@ -25,6 +25,12 @@
 
 ---
 
+## Security
+
+- Weekly dependency scanning via Safety (see Security Scan badge); reports are archived per workflow run under Actions artifacts. Workflow: `.github/workflows/security-scan.yml`.
+- RLS enforced at the database layer; JWT auth and rate limiting documented in `SECURITY.md`.
+- Connector secrets are validated and cached via the config store; DLQ and retries are implemented for ingestion.
+
 ## What is Active Graph KG?
 
 Active Graph KG is a **self-refreshing knowledge graph** built on PostgreSQL + pgvector that automatically:
