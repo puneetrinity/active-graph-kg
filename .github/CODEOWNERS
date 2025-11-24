@@ -1,0 +1,53 @@
+# Code Owners for Active Graph KG
+# 
+# These owners will be requested for review when someone opens a pull request.
+# Order matters: Last matching pattern takes precedence.
+#
+# Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo
+* @puneetrinity
+
+# Core API and application logic
+/activekg/api/ @puneetrinity
+/activekg/engine/ @puneetrinity
+/activekg/graph/ @puneetrinity
+
+# Database schemas and migrations
+/db/ @puneetrinity
+*.sql @puneetrinity
+
+# Security-sensitive files
+/activekg/api/auth.py @puneetrinity
+/activekg/api/rate_limiter.py @puneetrinity
+/activekg/graph/repository.py @puneetrinity
+SECURITY.md @puneetrinity
+
+# Configuration files
+/.github/ @puneetrinity
+/requirements.txt @puneetrinity
+/pyproject.toml @puneetrinity
+/mkdocs.yml @puneetrinity
+/docker-compose.yml @puneetrinity
+/Dockerfile @puneetrinity
+
+# Documentation
+/docs/ @puneetrinity
+*.md @puneetrinity
+
+# Tests (can be reviewed by broader team)
+/tests/ @puneetrinity
+/evaluation/ @puneetrinity
+
+# Frontend (if you have a frontend team, update this)
+/frontend/ @puneetrinity
+
+# Observability and monitoring
+/observability/ @puneetrinity
+/activekg/observability/ @puneetrinity
+
+# Scripts and utilities
+/scripts/ @puneetrinity
+
+# Connectors (add connector-specific owners if needed)
+/activekg/connectors/ @puneetrinity
