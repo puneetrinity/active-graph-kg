@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/puneetrinity/active-graph-kg/actions/workflows/ci.yml/badge.svg)](https://github.com/puneetrinity/active-graph-kg/actions/workflows/ci.yml)
 [![Documentation](https://github.com/puneetrinity/active-graph-kg/actions/workflows/mkdocs.yml/badge.svg)](https://github.com/puneetrinity/active-graph-kg/actions/workflows/mkdocs.yml)
+[![Security Scan](https://github.com/puneetrinity/active-graph-kg/actions/workflows/security-scan.yml/badge.svg)](https://github.com/puneetrinity/active-graph-kg/actions/workflows/security-scan.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
@@ -19,6 +20,8 @@
 > **Dual ANN** (IVFFLAT/HNSW), **RLS**, **admin tooling**, **metrics**, and **proof scripts** are in place.
 
 > The first self-refreshing knowledge graph — where every node carries living knowledge: it refreshes, detects drift, and triggers insights automatically.
+
+> Security: Weekly Safety scans on dependencies (see Security Scan badge) with reports archived per run.
 
 ---
 
