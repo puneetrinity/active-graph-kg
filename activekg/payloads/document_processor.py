@@ -243,8 +243,8 @@ class DocumentProcessor:
                 pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
                 text_parts = []
 
-                for page in pdf_reader.pages:
-                    # PyPDF2 type stubs have inconsistencies, cast to Any to avoid false positives
+                # PyPDF2 type stubs have inconsistencies (PageObject vs Page)
+                for page in pdf_reader.pages:  # type: ignore[assignment]
                     page_text = cast(Any, page).extract_text()
                     if page_text:
                         text_parts.append(page_text)

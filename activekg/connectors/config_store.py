@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from prometheus_client import Counter
@@ -143,7 +143,8 @@ class ConnectorConfigStore:
         Returns:
             psycopg connection
         """
-        return psycopg.connect(self.dsn, row_factory=dict_row)
+        # dict_row type doesn't match RowFactory signature exactly, but works at runtime
+        return psycopg.connect(self.dsn, row_factory=dict_row)  # type: ignore[arg-type]
 
     def _is_cache_valid(self, cache_entry: tuple[dict[str, Any], datetime]) -> bool:
         """Check if cache entry is still valid.
@@ -222,11 +223,14 @@ class ConnectorConfigStore:
                         """,
                         (tenant_id, provider),
                     )
-                    row = cur.fetchone()
+                    result = cur.fetchone()
 
-                    if not row:
+                    if not result:
                         logger.debug(f"Config not found: {tenant_id}/{provider}")
                         return None
+
+                    # dict_row makes this a dict, but mypy infers tuple - cast it
+                    row = cast(dict[str, Any], result)
 
                     if not row["enabled"]:
                         logger.warning(f"Config disabled: {tenant_id}/{provider}")
@@ -394,11 +398,13 @@ class ConnectorConfigStore:
                             """
                         )
 
-                    rows = cur.fetchall()
+                    results = cur.fetchall()
 
                     # Convert to typed records (ISO timestamps)
                     configs: list[ConnectorConfigTD] = []
-                    for row in rows:
+                    for result in results:
+                        # dict_row makes this a dict, but mypy infers tuple - cast it
+                        row = cast(dict[str, Any], result)
                         created = row["created_at"]
                         updated = row["updated_at"]
                         configs.append(
@@ -528,7 +534,9 @@ class ConnectorConfigStore:
                         }
 
                     # Process each row
-                    for row in rows:
+                    for result in rows:
+                        # dict_row makes this a dict, but mypy infers tuple - cast it
+                        row = cast(dict[str, Any], result)
                         tenant_id = row["tenant_id"]
                         provider = row["provider"]
                         encrypted_config = row["config_json"]
