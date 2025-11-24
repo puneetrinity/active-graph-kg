@@ -45,6 +45,8 @@ markdown_extensions:
       permalink: true
       toc_depth: 3
   - admonition
+  - attr_list
+  - md_in_html
   - codehilite:
       guess_lang: false
   - pymdownx.highlight:
@@ -57,6 +59,9 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.tasklist:
       custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - def_list
   - footnotes
   - tables
