@@ -1,5 +1,10 @@
 # Active Graph KG — Self-Refreshing Knowledge Graph
 
+[![CI](https://github.com/puneetrinity/active-graph-kg/actions/workflows/ci.yml/badge.svg)](https://github.com/puneetrinity/active-graph-kg/actions/workflows/ci.yml)
+[![Documentation](https://github.com/puneetrinity/active-graph-kg/actions/workflows/mkdocs.yml/badge.svg)](https://github.com/puneetrinity/active-graph-kg/actions/workflows/mkdocs.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 [![Roadmap](https://img.shields.io/badge/Roadmap-View-blue)](ROADMAP.md)
 [![Contributing](https://img.shields.io/badge/Contributing-Guidelines-green)](CONTRIBUTING.md)
 [![Evaluation Setup](https://img.shields.io/badge/Evaluation-Setup_Guide-orange)](EVALUATION_SETUP_GUIDE.md)
