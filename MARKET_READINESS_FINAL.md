@@ -135,7 +135,7 @@ if not text or not text.strip():
 
 **Blocker:** Requires PostgreSQL + Redis + real Google service account + Drive folder
 
-**E2E Test Plan:** Documented in `/tmp/code_findings_response.md`
+**E2E Test Plan:** See `docs/DRIVE_E2E_CHECKLIST.md` for staging validation steps
 
 **Action:** Added to post-launch validation checklist
 

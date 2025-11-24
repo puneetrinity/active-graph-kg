@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Deque, Optional
 
 
 class ChangeType(str, Enum):
@@ -23,7 +23,7 @@ class DocumentChange:
     doc_id: str
     change_type: ChangeType
     document: dict[str, Any] | None = None
-    timestamp: float = None
+    timestamp: Optional[float] = None
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -39,17 +39,17 @@ class IncrementalIndexManager:
         self.max_queue_size = max_queue_size
 
         # Change tracking
-        self.change_queue: deque = deque(maxlen=max_queue_size)
+        self.change_queue: Deque[DocumentChange] = deque(maxlen=max_queue_size)
         self.pending_changes: dict[str, DocumentChange] = {}
         self.processing_lock = threading.RLock()
 
         # Background processing
-        self.is_processing = False
-        self.processing_task = None
-        self.last_batch_process = time.time()
+        self.is_processing: bool = False
+        self.processing_task: Optional[asyncio.Task[Any]] = None
+        self.last_batch_process: float = time.time()
 
         # Statistics
-        self.stats = {
+        self.stats: dict[str, Any] = {
             "total_changes_processed": 0,
             "successful_updates": 0,
             "failed_updates": 0,
