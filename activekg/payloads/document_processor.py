@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -244,7 +244,8 @@ class DocumentProcessor:
                 text_parts = []
 
                 for page in pdf_reader.pages:
-                    page_text = page.extract_text()
+                    # PyPDF2 type stubs have inconsistencies, cast to Any to avoid false positives
+                    page_text = cast(Any, page).extract_text()
                     if page_text:
                         text_parts.append(page_text)
 

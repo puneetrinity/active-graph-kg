@@ -12,7 +12,7 @@ import signal
 import sys
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import redis
 from prometheus_client import Counter, Gauge, Histogram
@@ -148,8 +148,8 @@ class ConnectorWorker:
         queue_key = f"connector:{provider}:{tenant_id}:queue"
 
         # Check queue depth
-        depth = self.redis_client.llen(queue_key)
-        worker_queue_depth.labels(tenant=tenant_id, provider=provider).set(depth)
+        depth = cast(int, self.redis_client.llen(queue_key))
+        worker_queue_depth.labels(tenant=tenant_id, provider=provider).set(float(depth))
 
         if depth == 0:
             return 0
@@ -158,7 +158,7 @@ class ConnectorWorker:
             # Pop batch
             batch = []
             for _ in range(min(self.batch_size, depth)):
-                item_json = self.redis_client.rpop(queue_key)
+                item_json = cast(bytes | None, self.redis_client.rpop(queue_key))
                 if item_json:
                     try:
                         batch.append(json.loads(item_json))
