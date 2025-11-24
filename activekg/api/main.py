@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, Response
@@ -592,6 +592,7 @@ def debug_dbinfo(http_request: Request | None = None, claims: JWTClaims | None =
           "server_port": Optional[int]
         }
     """
+    assert repo is not None, "GraphRepository not initialized"
     # Enforce admin scope when JWT is enabled
     if JWT_ENABLED:
         if not claims:
@@ -602,7 +603,6 @@ def debug_dbinfo(http_request: Request | None = None, claims: JWTClaims | None =
             )
 
     try:
-        assert repo is not None, "GraphRepository not initialized"
         # Use a pooled connection without setting tenant_id; report current tenant context from server
         with repo._conn() as conn:
             with conn.cursor() as cur:
@@ -651,6 +651,7 @@ def debug_search_sanity(
           "sample_nodes_without_embedding": List[{id, classes, has_text}]
         }
     """
+    assert repo is not None, "GraphRepository not initialized"
     # Enforce admin scope when JWT is enabled
     if JWT_ENABLED:
         if not claims:
@@ -770,6 +771,8 @@ def debug_search_explain(
           }
         }
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     # Enforce admin scope when JWT is enabled
     if JWT_ENABLED:
         if not claims:
@@ -906,6 +909,7 @@ def debug_embed_info(
           "sample": {"n": int, "norm_min": float, "norm_max": float, "norm_mean": float, "example_ids": List[str]}
         }
     """
+    assert repo is not None, "GraphRepository not initialized"
     # Enforce admin scope when JWT is enabled
     if JWT_ENABLED:
         if not claims:
@@ -1090,6 +1094,8 @@ def debug_intent(q: str):
 @app.get("/metrics", response_model=MetricsResponse)
 def get_metrics():
     """Get metrics in JSON format."""
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     return metrics.get_all_metrics()
 
 
@@ -1116,6 +1122,8 @@ async def prometheus_metrics():
 
 def _background_embed(node_id: str, tenant_id: str | None = None):
     """Background task to embed a node and persist embedding/drift/history."""
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     try:
         n = repo.get_node(node_id, tenant_id=tenant_id)
         if not n:
@@ -1162,11 +1170,12 @@ def create_node(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         When JWT_ENABLED=false (dev mode), tenant_id can be provided in request body.
     """
+    assert repo is not None, "GraphRepository not initialized"
     # Extract tenant_id from JWT (secure) or request body (dev mode only)
     if JWT_ENABLED and claims:
         tenant_id = claims.tenant_id
     else:
-        tenant_id = node.tenant_id
+        tenant_id = node.tenant_id or "default"
 
     n = Node(
         classes=node.classes,
@@ -1196,7 +1205,7 @@ def get_node(
     node_id: str,
     tenant_id: str | None = None,
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -1206,11 +1215,13 @@ def get_node(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         Query param tenant_id is IGNORED in production to prevent RLS bypass.
     """
+    assert repo is not None, "GraphRepository not initialized"
     # CRITICAL: Use JWT tenant_id in production, ignore query param
     if JWT_ENABLED and claims:
         effective_tenant_id = claims.tenant_id
     else:
-        effective_tenant_id = tenant_id  # Dev mode only
+
+        effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
 
     n = repo.get_node(node_id, tenant_id=effective_tenant_id)
     if not n:
@@ -1394,7 +1405,7 @@ def refresh_node(
     tenant_id: str | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Manually refresh a single node's embedding and write history/events.
@@ -1405,6 +1416,8 @@ def refresh_node(
         Requires JWT authentication when JWT_ENABLED=true.
         Tenant ID derived from JWT claims to prevent cross-tenant refresh.
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     # Require authentication for node refresh (modifies embeddings)
     if JWT_ENABLED and not claims:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -1414,7 +1427,8 @@ def refresh_node(
         effective_tenant_id = claims.tenant_id
         actor_id = claims.actor_id
     else:
-        effective_tenant_id = tenant_id  # Dev mode only
+
+        effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
         actor_id = "dev_user"
 
     try:
@@ -1482,6 +1496,8 @@ def search_nodes(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         Query param tenant_id is IGNORED in production to prevent RLS bypass.
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     try:
         # Start timing for latency tracking
         start_time = time.time()
@@ -1490,7 +1506,7 @@ def search_nodes(
         if JWT_ENABLED and claims:
             effective_tenant_id = claims.tenant_id
         else:
-            effective_tenant_id = search_request.tenant_id  # Dev mode only
+            effective_tenant_id = search_request.tenant_id if search_request.tenant_id else "default"  # Dev mode only
 
         # Apply rate limiting with headers
         if RATE_LIMIT_ENABLED:
@@ -1865,6 +1881,8 @@ async def ask_question(
             "metadata": {"searched_nodes": 5, "cited_nodes": 3}
         }
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     if not LLM_ENABLED or llm is None:
         raise HTTPException(
             status_code=503,
@@ -1895,7 +1913,10 @@ async def ask_question(
 
         # 0. Intent detection for structured queries
         intent_type, intent_params = detect_intent(request.question)
-        structured_results = []
+        # Ensure intent_params is not None for .get() calls
+        if intent_params is None:
+            intent_params = {}
+        structured_results: list[Any] = []
 
         # TRACK 1: Extract class filtering and term gating from intent
         classes_filter = None
@@ -2373,6 +2394,8 @@ async def ask_stream(
     )
 
     def sse(data: str, event: str | None = None) -> bytes:
+        assert repo is not None, "GraphRepository not initialized"
+        assert embedder is not None, "EmbeddingProvider not initialized"
         if event:
             return f"event: {event}\ndata: {data}\n\n".encode()
         return f"data: {data}\n\n".encode()
@@ -2534,7 +2557,7 @@ def create_edge(
     edge: EdgeCreate,
     _rl: None = Depends(require_rate_limit("default")),
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Create a relationship between two nodes with validated input.
@@ -2543,11 +2566,13 @@ def create_edge(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         When JWT_ENABLED=false (dev mode), tenant_id can be provided in request body.
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     # Extract tenant_id from JWT (secure) or request body (dev mode only)
     if JWT_ENABLED and claims:
         tenant_id = claims.tenant_id
     else:
-        tenant_id = edge.tenant_id
+        tenant_id = edge.tenant_id if edge.tenant_id else "default"
 
     try:
         e = Edge(
@@ -2569,7 +2594,7 @@ def register_trigger_pattern(
     pattern: dict[str, Any],
     _rl: None = Depends(require_rate_limit("default")),
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Register a semantic trigger pattern.
@@ -2580,6 +2605,8 @@ def register_trigger_pattern(
         Requires JWT authentication when JWT_ENABLED=true.
         Triggers are global resources (not tenant-scoped).
     """
+    assert embedder is not None, "EmbeddingProvider not initialized"
+    assert pattern_store is not None, "PatternStore not initialized"
     # Require authentication for trigger management
     if JWT_ENABLED and not claims:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -2610,7 +2637,7 @@ def register_trigger_pattern(
 @app.get("/triggers")
 def list_trigger_patterns(
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2620,6 +2647,7 @@ def list_trigger_patterns(
         Returns all patterns (no tenant filtering for system-level triggers).
         Rate limited for read protection.
     """
+    assert pattern_store is not None, "PatternStore not initialized"
     try:
         patterns = pattern_store.list_patterns()
         return {"patterns": patterns, "count": len(patterns)}
@@ -2633,7 +2661,7 @@ def delete_trigger_pattern(
     name: str,
     _rl: None = Depends(require_rate_limit("default")),
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Delete a trigger pattern by name.
@@ -2641,6 +2669,8 @@ def delete_trigger_pattern(
     Security:
         Requires JWT authentication when JWT_ENABLED=true.
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert pattern_store is not None, "PatternStore not initialized"
     # Require authentication for trigger management
     if JWT_ENABLED and not claims:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -2663,7 +2693,7 @@ def list_events(
     tenant_id: str | None = None,
     limit: int = 100,
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2673,11 +2703,13 @@ def list_events(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         Query param tenant_id is IGNORED in production to prevent RLS bypass.
     """
+    assert repo is not None, "GraphRepository not initialized"
     # CRITICAL: Use JWT tenant_id in production, ignore query param
     if JWT_ENABLED and claims:
         effective_tenant_id = claims.tenant_id
     else:
-        effective_tenant_id = tenant_id  # Dev mode only
+
+        effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
 
     try:
         # Use repo connection for RLS support
@@ -2695,7 +2727,7 @@ def list_events(
                     params.append(event_type)
 
                 query += " ORDER BY created_at DESC LIMIT %s"
-                params.append(min(limit, 1000))  # Cap at 1000
+                params.append(str(min(limit, 1000)))  # Cap at 1000
 
                 cur.execute(query, params)
 
@@ -2723,7 +2755,7 @@ def get_lineage(
     max_depth: int = 5,
     tenant_id: str | None = None,
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2735,11 +2767,13 @@ def get_lineage(
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         Query param tenant_id is IGNORED in production to prevent RLS bypass.
     """
+    assert repo is not None, "GraphRepository not initialized"
     # CRITICAL: Use JWT tenant_id in production, ignore query param
     if JWT_ENABLED and claims:
         effective_tenant_id = claims.tenant_id
     else:
-        effective_tenant_id = tenant_id  # Dev mode only
+
+        effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
 
     try:
         lineage = repo.get_lineage(node_id, max_depth, tenant_id=effective_tenant_id)
@@ -2759,7 +2793,7 @@ async def admin_refresh(
         default=None, description='Either ["id", ...] or {"node_ids": ["id", ...]}'
     ),
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Trigger on-demand refresh cycle.
@@ -2772,6 +2806,8 @@ async def admin_refresh(
     Returns:
         Summary of refresh operation
     """
+    assert repo is not None, "GraphRepository not initialized"
+    assert embedder is not None, "EmbeddingProvider not initialized"
     # Require admin:refresh scope when JWT is enabled
     if JWT_ENABLED and claims and "admin:refresh" not in claims.scopes:
         raise HTTPException(
@@ -2780,7 +2816,7 @@ async def admin_refresh(
 
     # Extract tenant context
     tenant_id, actor_id, actor_type = get_tenant_context(
-        http_request, claims, allow_override=not JWT_ENABLED
+        cast(Request, http_request), claims, allow_override=not JWT_ENABLED
     )
 
     # Apply rate limiting (lighter limits for admin endpoints)
@@ -2891,7 +2927,7 @@ def get_anomalies(
     scheduler_lag_multiplier: float = 2.0,
     tenant_id: str | None = None,
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2913,13 +2949,14 @@ def get_anomalies(
     Returns:
         Dictionary with anomaly type as key, list of detected anomalies as value
     """
+    assert repo is not None, "GraphRepository not initialized"
     try:
         # Parse requested types (default: all)
         requested_types = (
             set(types.split(",")) if types else {"drift_spike", "trigger_storm", "scheduler_lag"}
         )
 
-        results = {}
+        results: dict[str, Any] = {}
 
         # Detect drift spikes
         if "drift_spike" in requested_types:
@@ -2969,7 +3006,7 @@ def get_node_versions(
     node_id: str,
     limit: int = 10,
     http_request: Request | None = None,
-    http_response: Response = None,
+    http_response: Response | None = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2988,6 +3025,7 @@ def get_node_versions(
     Returns:
         List of version records with version_index, drift_score, created_at, embedding_ref
     """
+    assert repo is not None, "GraphRepository not initialized"
     try:
         # Validate limit
         if limit < 1 or limit > 100:
