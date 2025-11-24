@@ -7,6 +7,7 @@ Supports OpenAI-compatible APIs (OpenAI, Azure, local models via LiteLLM).
 import os
 import time
 from collections.abc import Iterable
+from typing import Any
 
 from activekg.common.logger import get_enhanced_logger
 from activekg.common.metrics import metrics
@@ -42,7 +43,8 @@ class LLMProvider:
         self.backend = backend
         self.model = model
 
-        # Set API key from env if not provided
+        # Set API key from env if not provided (can be None)
+        self.api_key: str | None
         if api_key:
             self.api_key = api_key
         elif backend == "groq":
@@ -50,7 +52,8 @@ class LLMProvider:
         else:
             self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
 
-        # Set base URL
+        # Set base URL (can be None)
+        self.base_url: str | None
         if base_url:
             self.base_url = base_url
         elif backend == "groq":
@@ -137,7 +140,7 @@ class LLMProvider:
                 # Both OpenAI and Groq use the same SDK (OpenAI-compatible)
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
+                    messages=messages,  # type: ignore[arg-type]
                     max_tokens=max_tokens,
                     temperature=temperature,
                     stop=stop,
@@ -157,7 +160,7 @@ class LLMProvider:
                         labels={"backend": self.backend, "model": self.model, "type": "output"},
                     )
 
-                return response.choices[0].message.content
+                return response.choices[0].message.content or ""
 
             elif self.backend == "litellm":
                 response = self.litellm.completion(
@@ -181,7 +184,10 @@ class LLMProvider:
                         labels={"backend": self.backend, "model": self.model, "type": "output"},
                     )
 
-                return response.choices[0].message.content
+                return response.choices[0].message.content or ""
+
+            # This should never happen since __init__ validates backend
+            raise RuntimeError(f"Unsupported backend: {self.backend}")
 
         except Exception as e:
             status = "error"
@@ -229,11 +235,14 @@ class LLMProvider:
                 if attempt < max_retries - 1:
                     time.sleep(2**attempt)  # Exponential backoff
 
+        error_msg = f"LLM generation failed after {max_retries} retries"
         logger.error(
-            "LLM generation failed after all retries",
+            error_msg,
             extra_fields={"error": str(last_error), "max_retries": max_retries},
         )
-        raise last_error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(error_msg)
 
     def generate_stream(
         self,
@@ -266,7 +275,7 @@ class LLMProvider:
                 # OpenAI-compatible streaming
                 stream = self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
+                    messages=messages,  # type: ignore[arg-type]
                     max_tokens=max_tokens,
                     temperature=temperature,
                     stream=True,
@@ -274,7 +283,8 @@ class LLMProvider:
                 )
                 for chunk in stream:
                     try:
-                        delta = chunk.choices[0].delta
+                        # OpenAI streaming returns ChatCompletionChunk objects
+                        delta = chunk.choices[0].delta  # type: ignore[union-attr]
                         piece = getattr(delta, "content", None)
                         if piece:
                             yield piece
@@ -331,7 +341,7 @@ def extract_citation_numbers(text: str) -> list[int]:
 
 
 def calculate_confidence(
-    answer: str, search_results: list, citation_indices: list[int], intent_type: str = None
+    answer: str, search_results: list, citation_indices: list[int], intent_type: str | None = None
 ) -> float:
     """Calculate confidence score for LLM answer.
 
