@@ -149,7 +149,7 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
                 return message
 
             # Monkey-patch receive for this request scope
-            request._receive = limited_receive  # type: ignore[attr-defined]
+            request._receive = limited_receive
 
         return await call_next(request)
 
@@ -186,14 +186,14 @@ def get_route_name(request: Request) -> str:
         if hasattr(request, "scope") and "route" in request.scope:
             route = request.scope["route"]
             if hasattr(route, "path"):
-                return route.path
+                return cast(str, route.path)
 
         # Fallback: try to match against app routes
         for route in request.app.routes:
             match, _ = route.matches(request.scope)
             if match.name == "full":  # Full match
                 if hasattr(route, "path"):
-                    return route.path
+                    return cast(str, route.path)
 
         # Final fallback to raw path
         return request.url.path
@@ -251,10 +251,10 @@ TEST_MODE = os.getenv("ACTIVEKG_TEST_NO_DB", "false").lower() == "true"
 
 if TEST_MODE:
     # Test mode: defer initialization, use None/mocks
-    repo = None  # type: ignore[assignment]
-    embedder = None  # type: ignore[assignment]
-    pattern_store = None  # type: ignore[assignment]
-    trigger_engine = None  # type: ignore[assignment]
+    repo = None
+    embedder = None
+    pattern_store = None
+    trigger_engine = None
     scheduler: RefreshScheduler | None = None
     logger.warning("Running in TEST_MODE - DB connections deferred")
 else:
@@ -263,7 +263,7 @@ else:
     embedder = EmbeddingProvider(backend=EMBEDDING_BACKEND, model_name=EMBEDDING_MODEL)
     pattern_store = PatternStore(DSN)
     trigger_engine = TriggerEngine(pattern_store, repo)
-    scheduler: RefreshScheduler | None = None
+    scheduler = None
 
 # Mount admin connectors router (minimal MVP)
 app.include_router(connectors_admin_router)
@@ -508,7 +508,7 @@ def connector_rotate_keys(
             dry_run=request.dry_run,
         )
 
-        return result
+        return cast("dict[str, Any]", result)
 
     except Exception as e:
         logger.error(f"Key rotation failed: {e}")
@@ -577,7 +577,7 @@ def get_security_limits(claims: JWTClaims | None = Depends(get_jwt_claims)) -> d
 
 
 @app.get("/debug/dbinfo")
-def debug_dbinfo(http_request: Request = None, claims: JWTClaims | None = Depends(get_jwt_claims)):
+def debug_dbinfo(http_request: Request | None = None, claims: JWTClaims | None = Depends(get_jwt_claims)):
     """Debug endpoint to inspect DB and tenant context.
 
     Security:
@@ -602,6 +602,7 @@ def debug_dbinfo(http_request: Request = None, claims: JWTClaims | None = Depend
             )
 
     try:
+        assert repo is not None, "GraphRepository not initialized"
         # Use a pooled connection without setting tenant_id; report current tenant context from server
         with repo._conn() as conn:
             with conn.cursor() as cur:
@@ -627,7 +628,7 @@ def debug_dbinfo(http_request: Request = None, claims: JWTClaims | None = Depend
 
 @app.get("/debug/search_sanity")
 def debug_search_sanity(
-    http_request: Request = None, claims: JWTClaims | None = Depends(get_jwt_claims)
+    http_request: Request | None = None, claims: JWTClaims | None = Depends(get_jwt_claims)
 ):
     """Debug endpoint for retrieval sanity checks.
 
@@ -728,7 +729,7 @@ def debug_search_explain(
     query: str = Body(..., embed=True),
     use_hybrid: bool = Body(False, embed=True),
     top_k: int = Body(5, embed=True),
-    http_request: Request = None,
+    http_request: Request | None = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
     """Debug endpoint for detailed search result triage.
@@ -888,7 +889,7 @@ def debug_search_explain(
 
 @app.get("/debug/embed_info")
 def debug_embed_info(
-    http_request: Request = None, claims: JWTClaims | None = Depends(get_jwt_claims)
+    http_request: Request | None = None, claims: JWTClaims | None = Depends(get_jwt_claims)
 ):
     """Debug endpoint to inspect embedding configuration and stored vectors.
 
@@ -1194,7 +1195,7 @@ def create_node(
 def get_node(
     node_id: str,
     tenant_id: str | None = None,
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
@@ -1392,7 +1393,7 @@ def refresh_node(
     node_id: str,
     tenant_id: str | None = None,
     _rl: None = Depends(require_rate_limit("default")),
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2532,7 +2533,7 @@ async def ask_stream(
 def create_edge(
     edge: EdgeCreate,
     _rl: None = Depends(require_rate_limit("default")),
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2567,7 +2568,7 @@ def create_edge(
 def register_trigger_pattern(
     pattern: dict[str, Any],
     _rl: None = Depends(require_rate_limit("default")),
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2608,7 +2609,7 @@ def register_trigger_pattern(
 
 @app.get("/triggers")
 def list_trigger_patterns(
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
@@ -2631,7 +2632,7 @@ def list_trigger_patterns(
 def delete_trigger_pattern(
     name: str,
     _rl: None = Depends(require_rate_limit("default")),
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2661,7 +2662,7 @@ def list_events(
     event_type: str | None = None,
     tenant_id: str | None = None,
     limit: int = 100,
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
@@ -2721,7 +2722,7 @@ def get_lineage(
     node_id: str,
     max_depth: int = 5,
     tenant_id: str | None = None,
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
@@ -2757,7 +2758,7 @@ async def admin_refresh(
     payload: Any | None = Body(
         default=None, description='Either ["id", ...] or {"node_ids": ["id", ...]}'
     ),
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
@@ -2889,7 +2890,7 @@ def get_anomalies(
     trigger_storm_threshold: int = 50,
     scheduler_lag_multiplier: float = 2.0,
     tenant_id: str | None = None,
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
@@ -2967,7 +2968,7 @@ def get_anomalies(
 def get_node_versions(
     node_id: str,
     limit: int = 10,
-    http_request: Request = None,
+    http_request: Request | None = None,
     http_response: Response = None,
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
