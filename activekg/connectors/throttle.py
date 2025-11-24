@@ -1,8 +1,12 @@
 """Per-tenant throttling to prevent ingestion overload."""
 
 import time
+from typing import TYPE_CHECKING, cast
 
 import redis
+
+if TYPE_CHECKING:
+    from redis import Redis
 
 
 class IngestionThrottle:
@@ -11,14 +15,14 @@ class IngestionThrottle:
     Limits ingestion rate per tenant to prevent DB/embedding service overload.
     """
 
-    def __init__(self, redis_client: redis.Redis, max_per_sec: int = 50):
+    def __init__(self, redis_client: "Redis[bytes]", max_per_sec: int = 50):
         """Initialize throttle.
 
         Args:
             redis_client: Redis client instance
             max_per_sec: Maximum documents per second per tenant
         """
-        self.redis = redis_client
+        self.redis: "Redis[bytes]" = redis_client
         self.max_per_sec = max_per_sec
 
     def acquire(self, tenant_id: str, provider: str) -> bool:
@@ -35,7 +39,7 @@ class IngestionThrottle:
 
         while True:
             # Try to increment counter
-            current = self.redis.incr(key)
+            current = cast(int, self.redis.incr(key))
 
             if current == 1:
                 # First request in this second - set expiry
@@ -61,7 +65,7 @@ class IngestionThrottle:
         """
         key = f"throttle:ingest:{provider}:{tenant_id}"
 
-        current = self.redis.incr(key)
+        current = cast(int, self.redis.incr(key))
 
         if current == 1:
             self.redis.expire(key, 1)

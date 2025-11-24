@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import redis
 from prometheus_client import Counter, Gauge
@@ -132,7 +132,7 @@ def _send_to_dlq(
 
     # Update metrics
     dlq_total.labels(provider=provider, tenant=tenant_id, reason=reason).inc()
-    dlq_depth.labels(provider=provider, tenant=tenant_id).set(redis_client.llen(dlq_key))
+    dlq_depth.labels(provider=provider, tenant=tenant_id).set(float(cast(int, redis_client.llen(dlq_key))))
 
     logger.error(f"Sent to DLQ: {dlq_key} - {operation} - {error}")
 
@@ -150,7 +150,7 @@ def inspect_dlq(redis_client: redis.Redis, provider: str, tenant_id: str, limit:
         List of DLQ items
     """
     dlq_key = f"dlq:{provider}:{tenant_id}"
-    items = redis_client.lrange(dlq_key, 0, limit - 1)
+    items = cast(list[bytes], redis_client.lrange(dlq_key, 0, limit - 1))
     return [json.loads(item) for item in items]
 
 

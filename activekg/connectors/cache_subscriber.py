@@ -150,6 +150,10 @@ class CacheSubscriber:
 
             try:
                 # Listen for messages
+                if self._pubsub is None:
+                    logger.error("PubSub connection is None, reconnecting...")
+                    continue
+
                 for message in self._pubsub.listen():
                     if not self._running or self._stop_event.is_set():
                         break
