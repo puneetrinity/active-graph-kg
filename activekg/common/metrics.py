@@ -4,14 +4,17 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import redis
 
 try:
     import redis as _redis
 except Exception:  # pragma: no cover
-    _redis = None  # type: ignore
+    _redis = None
 
 
 @dataclass
@@ -26,10 +29,10 @@ class MetricsCollector:
 
     def __init__(self, max_history: int = 1000):
         self.max_history = max_history
-        self._metrics: dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
+        self._metrics: dict[str, deque[MetricPoint]] = defaultdict(lambda: deque(maxlen=max_history))
         self._counters: dict[str, float] = defaultdict(float)
         self._gauges: dict[str, float] = defaultdict(float)
-        self._histograms: dict[str, list] = defaultdict(list)
+        self._histograms: dict[str, list[float]] = defaultdict(list)
         self._lock = threading.RLock()
 
     def increment_counter(
@@ -134,7 +137,7 @@ class PerformanceTimer:
 _redis_client = None
 
 
-def get_redis_client() -> "_redis.Redis":
+def get_redis_client() -> "redis.Redis[bytes]":
     """Return a Redis client from REDIS_URL.
 
     Falls back to redis://localhost:6379/0 if REDIS_URL is unset.
