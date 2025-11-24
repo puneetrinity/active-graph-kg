@@ -22,7 +22,7 @@ from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.common.env import env_str
-from activekg.common.logger import get_enhanced_logger, set_log_context, clear_log_context
+from activekg.common.logger import clear_log_context, get_enhanced_logger, set_log_context
 from activekg.common.metrics import metrics
 from activekg.common.validation import (
     AskRequest,
