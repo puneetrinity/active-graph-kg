@@ -261,8 +261,8 @@ class GraphRepository:
             payload_ref=cast(str | None, row[4]),
             embedding=emb,
             metadata=metadata,
-            refresh_policy=refresh_policy,
-            triggers=triggers,
+            refresh_policy=cast("dict[str, Any] | None", refresh_policy),
+            triggers=cast("list[dict[str, Any]] | None", triggers),
             version=cast(int, row[9]),
             last_refreshed=cast(Any, row[10]),
             drift_score=cast(float | None, row[11]),
@@ -510,7 +510,7 @@ class GraphRepository:
         self, types: list[str] | None = None, metric: str | None = None
     ) -> list[str]:
         """Compute expected ANN index names for given types and metric."""
-        metric = (metric or os.getenv("SEARCH_DISTANCE", "cosine")).lower()
+        metric = cast(str, metric or os.getenv("SEARCH_DISTANCE", "cosine")).lower()
         suffix = "l2" if metric == "l2" else "cos"
         types = (
             types
@@ -698,7 +698,7 @@ class GraphRepository:
                 sql = f"UPDATE nodes SET {', '.join(sets)} WHERE id = %s"
                 params.append(node_id)
                 cur.execute(sql, params)
-                return cur.rowcount > 0
+                return cast(int, cur.rowcount) > 0
 
     def delete_node(self, node_id: str, hard: bool = False, tenant_id: str | None = None) -> bool:
         """Delete a node.
@@ -710,7 +710,7 @@ class GraphRepository:
             with conn.cursor() as cur:
                 if hard:
                     cur.execute("DELETE FROM nodes WHERE id = %s", (node_id,))
-                    return cur.rowcount > 0
+                    return cast(int, cur.rowcount) > 0
                 # Soft-delete: add Deleted class if absent, set deletion metadata
                 cur.execute(
                     """
@@ -726,7 +726,7 @@ class GraphRepository:
                     """,
                     (node_id,),
                 )
-                return cur.rowcount > 0
+                return cast(int, cur.rowcount) > 0
 
     def update_node_embedding(
         self,
@@ -1396,7 +1396,7 @@ class GraphRepository:
         # Parse cron policy: {"cron": "*/5 * * * *"}
         if "cron" in policy:
             try:
-                from croniter import croniter
+                from croniter import croniter  # type: ignore[import-untyped]
 
                 cron_expr = policy["cron"]
 
@@ -1418,7 +1418,7 @@ class GraphRepository:
                 )
 
                 # If current time is past next_run, it's due
-                return now >= next_run
+                return bool(now >= next_run)
 
             except Exception as e:
                 self.logger.warning(
@@ -1458,7 +1458,7 @@ class GraphRepository:
                 return True  # Never refreshed, so it's due
 
             elapsed = (now - last_refreshed).total_seconds()
-            return elapsed >= interval_seconds
+            return bool(elapsed >= interval_seconds)
 
         return False
 
@@ -1546,7 +1546,7 @@ class GraphRepository:
                 return self._load_from_file(node.payload_ref)
 
         # Fallback to inline text
-        return (node.props or {}).get("text", "")
+        return cast(str, (node.props or {}).get("text", ""))
 
     def _load_from_file(self, file_path: str) -> str:
         """Load text from local file."""
@@ -1613,7 +1613,7 @@ class GraphRepository:
             bucket, key = parts
             s3_client = boto3.client("s3")
             response = s3_client.get_object(Bucket=bucket, Key=key)
-            return response["Body"].read().decode("utf-8", errors="ignore")
+            return cast(str, response["Body"].read().decode("utf-8", errors="ignore"))
 
         except ImportError:
             self.logger.warning("boto3 not installed, cannot load from S3")
@@ -1876,7 +1876,7 @@ class GraphRepository:
                             ev_type = str(ev.get("type")) if isinstance(ev, dict) else None
                             created = ev.get("created_at") if isinstance(ev, dict) else None
                             created_s = (
-                                created.isoformat()
+                                created.isoformat()  # type: ignore[union-attr]
                                 if hasattr(created, "isoformat")
                                 else (str(created) if created is not None else None)
                             )
@@ -2020,7 +2020,7 @@ class GraphRepository:
 
                 # Sort by lag_ratio descending (worst first)
                 anomalies.sort(key=lambda x: x["lag_ratio"], reverse=True)
-                return anomalies
+                return cast("list[SchedulerLagAnomalyTD]", anomalies)
 
     def get_node_versions(
         self, node_id: str, limit: int = 10, tenant_id: str | None = None
