@@ -355,8 +355,9 @@ def startup_event():
 
     # Log runtime ML dependencies to verify loaded versions
     try:
-        import torch
         import sentence_transformers
+        import torch
+
         logger.info(
             "ML runtime versions loaded",
             extra_fields={

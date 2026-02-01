@@ -26,7 +26,6 @@ class EmbeddingProvider:
             return
         if self.backend == "sentence-transformers":
             try:
-                import torch
                 from sentence_transformers import SentenceTransformer
             except Exception as e:
                 raise ImportError("sentence-transformers not installed") from e
