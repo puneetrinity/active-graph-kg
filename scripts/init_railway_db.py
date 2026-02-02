@@ -91,6 +91,7 @@ def main():
                 ]
                 applied = 0
                 skipped = 0
+
                 def execute_sql(sql_text: str, *, split_statements: bool = False) -> None:
                     if not split_statements:
                         cur.execute(sql_text)
