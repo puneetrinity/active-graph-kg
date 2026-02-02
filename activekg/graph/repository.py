@@ -1340,10 +1340,20 @@ class GraphRepository:
         """
         try:
             from sentence_transformers import CrossEncoder
+            import torch
 
             # Lazy load cross-encoder (caches after first load)
             if not hasattr(self, "_cross_encoder"):
-                self._cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                automodel_args = {
+                    "device_map": None,
+                    "low_cpu_mem_usage": False,
+                    "torch_dtype": torch.float32,
+                }
+                self._cross_encoder = CrossEncoder(
+                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                    device="cpu",
+                    automodel_args=automodel_args,
+                )
 
             # Prepare pairs for cross-encoder
             pairs = []

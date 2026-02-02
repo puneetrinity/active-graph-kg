@@ -29,13 +29,21 @@ class EmbeddingProvider:
                 from sentence_transformers import SentenceTransformer
             except Exception as e:
                 raise ImportError("sentence-transformers not installed") from e
+            import torch
             # Fix for sentence-transformers 5.x meta tensor issue
             # Load without device parameter first, then move to CPU
             # This avoids the meta tensor initialization issue
             import os
 
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-            self._model = SentenceTransformer(self.model_name, device="cpu")
+            model_kwargs = {
+                "device_map": None,
+                "low_cpu_mem_usage": False,
+                "torch_dtype": torch.float32,
+            }
+            self._model = SentenceTransformer(
+                self.model_name, device="cpu", model_kwargs=model_kwargs
+            )
         elif self.backend == "ollama":
             try:
                 import ollama

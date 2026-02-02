@@ -91,6 +91,26 @@ def main():
                 ]
                 applied = 0
                 skipped = 0
+                def execute_sql(sql_text: str, *, split_statements: bool = False) -> None:
+                    if not split_statements:
+                        cur.execute(sql_text)
+                        return
+                    # Execute statements one-by-one (needed for CREATE INDEX CONCURRENTLY)
+                    for raw_stmt in sql_text.split(";"):
+                        stmt = raw_stmt.strip()
+                        if not stmt:
+                            continue
+                        # Skip chunks that are only comments
+                        has_sql = False
+                        for line in stmt.splitlines():
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith("--"):
+                                has_sql = True
+                                break
+                        if not has_sql:
+                            continue
+                        cur.execute(stmt)
+
                 for migration_file in migrations:
                     migration_path = os.path.join(
                         os.path.dirname(__file__), "..", "db", "migrations", migration_file
@@ -100,7 +120,8 @@ def main():
                         try:
                             with open(migration_path) as f:
                                 sql = f.read()
-                            cur.execute(sql)
+                            needs_split = "create index concurrently" in sql.lower()
+                            execute_sql(sql, split_statements=needs_split)
                             print(f"✓ Migration {migration_file} applied")
                             applied += 1
                         except Exception as e:
