@@ -31,5 +31,5 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 8000
 
-CMD bash -c "uvicorn activekg.api.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --workers ${WORKERS:-2}"
+CMD bash -c 'uvicorn activekg.api.main:app --host $HOST --port $PORT --workers $WORKERS'
 
