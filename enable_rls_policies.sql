@@ -33,6 +33,7 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO app_user;
 ALTER TABLE nodes ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Tenants can only see their own nodes
+DROP POLICY IF EXISTS tenant_isolation_nodes ON nodes;
 CREATE POLICY tenant_isolation_nodes ON nodes
     FOR ALL
     TO PUBLIC
@@ -42,6 +43,7 @@ CREATE POLICY tenant_isolation_nodes ON nodes
     );
 
 -- Policy: Super admins can see all nodes
+DROP POLICY IF EXISTS admin_all_nodes ON nodes;
 CREATE POLICY admin_all_nodes ON nodes
     FOR ALL
     TO admin_role
@@ -56,6 +58,7 @@ ALTER TABLE edges ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Tenants can only see edges within their tenant
 -- Note: For cross-tenant edges, both src and dst nodes must be accessible
+DROP POLICY IF EXISTS tenant_isolation_edges ON edges;
 CREATE POLICY tenant_isolation_edges ON edges
     FOR ALL
     TO PUBLIC
@@ -65,6 +68,7 @@ CREATE POLICY tenant_isolation_edges ON edges
     );
 
 -- Policy: Super admins can see all edges
+DROP POLICY IF EXISTS admin_all_edges ON edges;
 CREATE POLICY admin_all_edges ON edges
     FOR ALL
     TO admin_role
@@ -78,6 +82,7 @@ CREATE POLICY admin_all_edges ON edges
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Tenants can only see their own events
+DROP POLICY IF EXISTS tenant_isolation_events ON events;
 CREATE POLICY tenant_isolation_events ON events
     FOR ALL
     TO PUBLIC
@@ -87,6 +92,7 @@ CREATE POLICY tenant_isolation_events ON events
     );
 
 -- Policy: Super admins can see all events
+DROP POLICY IF EXISTS admin_all_events ON events;
 CREATE POLICY admin_all_events ON events
     FOR ALL
     TO admin_role
@@ -101,6 +107,7 @@ ALTER TABLE node_versions ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Tenants can only see versions of their own nodes
 -- This requires joining with nodes table in the policy
+DROP POLICY IF EXISTS tenant_isolation_versions ON node_versions;
 CREATE POLICY tenant_isolation_versions ON node_versions
     FOR ALL
     TO PUBLIC
@@ -113,6 +120,7 @@ CREATE POLICY tenant_isolation_versions ON node_versions
     );
 
 -- Policy: Super admins can see all versions
+DROP POLICY IF EXISTS admin_all_versions ON node_versions;
 CREATE POLICY admin_all_versions ON node_versions
     FOR ALL
     TO admin_role
@@ -134,6 +142,7 @@ CREATE POLICY admin_all_versions ON node_versions
 ALTER TABLE embedding_history ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Tenants can only see history of their own nodes
+DROP POLICY IF EXISTS tenant_isolation_history ON embedding_history;
 CREATE POLICY tenant_isolation_history ON embedding_history
     FOR ALL
     TO PUBLIC
@@ -146,6 +155,7 @@ CREATE POLICY tenant_isolation_history ON embedding_history
     );
 
 -- Policy: Super admins can see all history
+DROP POLICY IF EXISTS admin_all_history ON embedding_history;
 CREATE POLICY admin_all_history ON embedding_history
     FOR ALL
     TO admin_role

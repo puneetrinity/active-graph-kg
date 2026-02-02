@@ -69,8 +69,15 @@ def main():
                     print("Applying RLS policies...")
                     with open(rls_sql_path) as f:
                         sql = f.read()
-                    cur.execute(sql)
-                    print("✓ RLS policies applied")
+                    try:
+                        cur.execute(sql)
+                        print("✓ RLS policies applied")
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "already exists" in error_msg or "duplicate" in error_msg:
+                            print("⊙ RLS policies already applied (skipped)")
+                        else:
+                            raise
 
                 # Apply migrations (idempotent - safe to run multiple times)
                 migrations = [

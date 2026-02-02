@@ -293,6 +293,16 @@ curl -X POST "$API/admin/indexes" -H "Authorization: Bearer $TOKEN" \
 make open-grafana            # opens http://localhost:3000/d/activekg-ops
 ```
 
+## Railway DB Initialization
+
+For Railway deployments, initialize the database (pgvector + schema + migrations) using:
+
+```bash
+python3 scripts/init_railway_db.py
+```
+
+The script is safe to run multiple times and applies all migrations in `db/migrations/`.
+
 ### Demo Run (Quick)
 
 ```bash
