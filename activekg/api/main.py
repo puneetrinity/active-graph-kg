@@ -1285,18 +1285,15 @@ def list_nodes(
             rows = cur.fetchall()
 
             for row in rows:
-                nodes_list.append({
-                    "id": str(row[0]),
-                    "classes": row[1] if row[1] else [],
-                    "has_embedding": bool(row[2])
-                })
+                nodes_list.append(
+                    {
+                        "id": str(row[0]),
+                        "classes": row[1] if row[1] else [],
+                        "has_embedding": bool(row[2]),
+                    }
+                )
 
-    return {
-        "nodes": nodes_list,
-        "total": total,
-        "limit": limit,
-        "offset": offset
-    }
+    return {"nodes": nodes_list, "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/nodes/{node_id}", response_model=None)
