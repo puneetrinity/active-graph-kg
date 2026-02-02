@@ -29,11 +29,12 @@ class EmbeddingProvider:
                 from sentence_transformers import SentenceTransformer
             except Exception as e:
                 raise ImportError("sentence-transformers not installed") from e
-            import torch
             # Fix for sentence-transformers 5.x meta tensor issue
             # Load without device parameter first, then move to CPU
             # This avoids the meta tensor initialization issue
             import os
+
+            import torch
 
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             model_kwargs = {

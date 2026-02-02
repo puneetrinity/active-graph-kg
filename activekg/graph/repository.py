@@ -1339,8 +1339,8 @@ class GraphRepository:
             where hybrid_score is preserved for thresholding and rerank_score is for ordering
         """
         try:
-            from sentence_transformers import CrossEncoder
             import torch
+            from sentence_transformers import CrossEncoder
 
             # Lazy load cross-encoder (caches after first load)
             if not hasattr(self, "_cross_encoder"):
