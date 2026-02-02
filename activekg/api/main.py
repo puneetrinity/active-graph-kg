@@ -1219,6 +1219,86 @@ def create_node(
     return {"id": node_id}
 
 
+@app.get("/nodes", response_model=None)
+def list_nodes(
+    limit: int = 100,
+    offset: int = 0,
+    has_embedding: bool | None = None,
+    tenant_id: str | None = None,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """List all nodes with optional filtering by embedding status.
+
+    Args:
+        limit: Maximum number of nodes to return (default 100)
+        offset: Number of nodes to skip for pagination (default 0)
+        has_embedding: Filter by embedding status (None=all, True=with embedding, False=without)
+        tenant_id: Tenant ID (ignored when JWT_ENABLED)
+
+    Security:
+        When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
+        Query param tenant_id is IGNORED in production to prevent RLS bypass.
+
+    Returns:
+        {
+            "nodes": [{"id": str, "classes": List[str], "has_embedding": bool}, ...],
+            "total": int,
+            "limit": int,
+            "offset": int
+        }
+    """
+    assert repo is not None, "GraphRepository not initialized"
+
+    # CRITICAL: Use JWT tenant_id in production, ignore query param
+    if JWT_ENABLED and claims:
+        effective_tenant_id = claims.tenant_id
+    else:
+        effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
+
+    nodes_list = []
+    total = 0
+
+    with repo._conn(tenant_id=effective_tenant_id) as conn:
+        with conn.cursor() as cur:
+            # Build query based on filter
+            where_clause = ""
+            if has_embedding is True:
+                where_clause = "WHERE embedding IS NOT NULL"
+            elif has_embedding is False:
+                where_clause = "WHERE embedding IS NULL"
+
+            # Get total count
+            count_query = f"SELECT COUNT(*) FROM nodes {where_clause}"
+            cur.execute(count_query)
+            total = int(cur.fetchone()[0])
+
+            # Get nodes with pagination
+            query = f"""
+                SELECT id, classes, embedding IS NOT NULL as has_embedding
+                FROM nodes
+                {where_clause}
+                ORDER BY id
+                LIMIT %s OFFSET %s
+            """
+            cur.execute(query, (limit, offset))
+            rows = cur.fetchall()
+
+            for row in rows:
+                nodes_list.append({
+                    "id": str(row[0]),
+                    "classes": row[1] if row[1] else [],
+                    "has_embedding": bool(row[2])
+                })
+
+    return {
+        "nodes": nodes_list,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
 @app.get("/nodes/{node_id}", response_model=None)
 def get_node(
     node_id: str,

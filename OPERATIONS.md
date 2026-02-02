@@ -893,6 +893,10 @@ curl -X POST http://prod.example.com/_admin/connectors/rotate_keys \
 | `/debug/search_sanity` | GET | Sanity checks |
 | `/debug/dbinfo` | GET | Database metadata |
 
+**/ask metadata interpretation:**
+- `top_similarity` is the gating score (RRF/weighted/cosine depending on mode)
+- `top_vector_similarity` / `max_vector_similarity` are true cosine similarities
+
 ### Governance Metrics
 
 New metrics for auth/tenant governance:

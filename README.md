@@ -235,6 +235,19 @@ curl -N -X POST http://localhost:8000/ask/stream \
   -H "Content-Type: application/json" \
   -d '{"question": "What vector databases are discussed?", "max_results": 3}'
 
+# Note: /ask metadata
+# - top_similarity is the gating score (RRF/weighted/cosine depending on mode)
+# - top_vector_similarity / max_vector_similarity are true cosine similarities
+# Example (RRF mode):
+# {
+#   "metadata": {
+#     "top_similarity": 0.033,
+#     "top_vector_similarity": 0.583,
+#     "max_vector_similarity": 0.583,
+#     "gating_score_type": "rrf_fused"
+#   }
+# }
+
 # Prometheus metrics
 curl http://localhost:8000/prometheus
 ```
