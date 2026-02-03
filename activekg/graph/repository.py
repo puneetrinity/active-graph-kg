@@ -723,8 +723,8 @@ class GraphRepository:
                 emb = node.embedding.tolist() if isinstance(node.embedding, np.ndarray) else None
                 cur.execute(
                     """
-                    INSERT INTO nodes (id, tenant_id, classes, props, payload_ref, embedding, metadata, refresh_policy, triggers, version, last_refreshed, drift_score)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO nodes (id, tenant_id, classes, props, payload_ref, embedding, metadata, refresh_policy, triggers, version, last_refreshed, drift_score, embedding_status, embedding_error, embedding_attempts, embedding_updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -740,6 +740,10 @@ class GraphRepository:
                         node.version,
                         node.last_refreshed,
                         node.drift_score,
+                        node.embedding_status or "queued",
+                        node.embedding_error,
+                        node.embedding_attempts or 0,
+                        node.embedding_updated_at,
                     ),
                 )
                 new_id = cur.fetchone()[0]
@@ -751,7 +755,8 @@ class GraphRepository:
                 cur.execute(
                     """
                     SELECT id, tenant_id, classes, props, payload_ref, embedding, metadata,
-                           refresh_policy, triggers, version, last_refreshed, drift_score
+                           refresh_policy, triggers, version, last_refreshed, drift_score,
+                           embedding_status, embedding_error, embedding_attempts, embedding_updated_at
                     FROM nodes WHERE id = %s
                     """,
                     (node_id,),
