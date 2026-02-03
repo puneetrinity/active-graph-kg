@@ -1,7 +1,13 @@
 """Comprehensive input validation for all API endpoints."""
 
 import re
-from enum import StrEnum
+from enum import Enum
+try:
+    from enum import StrEnum  # Python 3.11+
+except Exception:  # pragma: no cover - fallback for Python < 3.11
+    class StrEnum(str, Enum):
+        """Fallback StrEnum for Python < 3.11."""
+        pass
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
