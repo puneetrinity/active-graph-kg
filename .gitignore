@@ -19,9 +19,14 @@ __pycache__/
 
 # Test/evaluation results (generated)
 *.log
+*:Zone.Identifier
 evaluation/results.json
 evaluation/*_results.json
 evaluation/datasets/id_map.json
+evaluation/build_resume_queries.py
+evaluation/resume_eval.py
+evaluation/railway_eval_bundle/
+evaluation/railway_eval_bundle.zip
 llm_qa_results*.json
 
 # IDE
@@ -113,6 +118,7 @@ evaluation/datasets/generate_ground_truth.py
 scripts/test_jwt_rate_limit.sh
 scripts/test_prometheus_integration.sh
 verify_phase1_plus.sh
+railway.worker.json
 
 # Pre-commit config (optional)
 .pre-commit-config.yaml
