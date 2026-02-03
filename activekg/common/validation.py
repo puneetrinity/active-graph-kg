@@ -2,15 +2,18 @@
 
 import re
 from enum import Enum
-try:
-    from enum import StrEnum  # Python 3.11+
-except Exception:  # pragma: no cover - fallback for Python < 3.11
-    class StrEnum(str, Enum):
-        """Fallback StrEnum for Python < 3.11."""
-        pass
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+
+try:
+    from enum import StrEnum  # Python 3.11+
+except Exception:  # pragma: no cover - fallback for Python < 3.11
+
+    class StrEnum(str, Enum):  # noqa: UP042
+        """Fallback StrEnum for Python < 3.11."""
+
+        pass
 
 
 class SeniorityLevel(StrEnum):

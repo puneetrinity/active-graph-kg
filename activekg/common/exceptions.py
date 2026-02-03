@@ -11,7 +11,7 @@ try:
     from enum import StrEnum  # Python 3.11+
 except Exception:  # pragma: no cover - fallback for Python < 3.11
 
-    class StrEnum(str, Enum):
+    class StrEnum(str, Enum):  # noqa: UP042
         """Fallback StrEnum for Python < 3.11."""
 
         pass
