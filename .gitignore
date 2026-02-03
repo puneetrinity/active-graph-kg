@@ -118,7 +118,6 @@ evaluation/datasets/generate_ground_truth.py
 scripts/test_jwt_rate_limit.sh
 scripts/test_prometheus_integration.sh
 verify_phase1_plus.sh
-railway.worker.json
 
 # Pre-commit config (optional)
 .pre-commit-config.yaml
