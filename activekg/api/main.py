@@ -12,7 +12,7 @@ from typing import Any, cast
 import numpy as np
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from activekg.api.admin_connectors import router as connectors_admin_router
@@ -112,16 +112,16 @@ class EmbeddingRequeueRequest(BaseModel):
 
     tenant_id: str | None = None
     node_ids: list[str] | None = None
-    status: str = Field(
-        "failed", description="Filter nodes by status (failed, queued, etc.)"
+    status: str | None = Field(
+        "failed", description="Filter nodes by status (failed, queued, ready, etc.)"
     )
     only_missing_embedding: bool = Field(
         False, description="Only requeue nodes without embeddings (embedding IS NULL)"
     )
     backfill_ready: bool = Field(
-        False, description="Mark nodes with embeddings as 'ready' before requeuing"
+        True, description="Mark nodes with embeddings as 'ready' before requeuing"
     )
-    limit: int = 100
+    limit: int = 2000
 
 
 APP_VERSION = os.getenv("ACTIVEKG_VERSION", "1.0.0")
@@ -3317,25 +3317,44 @@ def embedding_requeue(
                 cur.execute(
                     f"""
                     UPDATE nodes
-                    SET embedding_status = 'ready', embedding_updated_at = NOW()
+                    SET embedding_status = 'ready',
+                        embedding_error = NULL,
+                        embedding_updated_at = NOW(),
+                        updated_at = NOW()
                     {where}
                     RETURNING id
                     """,
                     params,
                 )
                 backfilled = cur.rowcount
-                conn.commit()
 
     # Determine nodes to requeue
     nodes_to_requeue: list[tuple[str, str | None]] = []
     if request.node_ids:
-        for node_id in request.node_ids:
-            nodes_to_requeue.append((node_id, effective_tenant_id))
+        with repo._conn(tenant_id=effective_tenant_id) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, tenant_id, embedding IS NULL AS missing
+                    FROM nodes
+                    WHERE id = ANY(%s)
+                    """,
+                    (request.node_ids,),
+                )
+                for row in cur.fetchall():
+                    missing = bool(row[2])
+                    if request.only_missing_embedding and not missing:
+                        continue
+                    nodes_to_requeue.append((str(row[0]), row[1]))
     else:
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                where = f"WHERE embedding_status = %s"
-                params: list[Any] = [request.status]
+                where = "WHERE 1=1"
+                params: list[Any] = []
+
+                if request.status and request.status.lower() != "all":
+                    where += " AND embedding_status = %s"
+                    params.append(request.status)
 
                 if request.only_missing_embedding:
                     where += " AND embedding IS NULL"

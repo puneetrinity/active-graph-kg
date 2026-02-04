@@ -1265,19 +1265,25 @@ Requeue failed embeddings (moves nodes back to queue).
 {
   "tenant_id": "default",
   "node_ids": ["node_123", "node_456"],
-  "limit": 100
+  "status": "queued",
+  "only_missing_embedding": true,
+  "backfill_ready": true,
+  "limit": 2000
 }
 ```
 
 **Notes:**
-- If `node_ids` is omitted, up to `limit` failed nodes are requeued.
+- If `node_ids` is omitted, nodes are selected by `status` (default: `failed`).
+- Use `status: "all"` to ignore status filtering.
+- `only_missing_embedding=true` requeues only nodes with `embedding IS NULL`.
+- `backfill_ready=true` marks nodes with embeddings as `ready` before requeueing.
 
 **Example:**
 ```bash
 curl -X POST http://localhost:8000/admin/embedding/requeue \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
-  -d '{"tenant_id":"default","limit":100}'
+  -d '{"tenant_id":"default","status":"queued","only_missing_embedding":true,"backfill_ready":true,"limit":2000}'
 ```
 
 ---

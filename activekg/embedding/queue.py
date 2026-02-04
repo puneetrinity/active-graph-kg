@@ -64,7 +64,7 @@ def enqueue_embedding_job(
     """Enqueue an embedding job. Returns job_id if enqueued, else None (deduped)."""
     pending_key = _pending_key(node_id)
     if force:
-        redis_client.delete(pending_key)
+        clear_pending(redis_client, node_id, tenant_id=tenant_id)
 
     # Prevent duplicate enqueues for the same node
     if not redis_client.set(pending_key, "1", nx=True, ex=PENDING_TTL_SECONDS):
