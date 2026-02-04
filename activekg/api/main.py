@@ -108,10 +108,19 @@ class RotateKeysRequest(BaseModel):
 
 
 class EmbeddingRequeueRequest(BaseModel):
-    """Request model to requeue failed embeddings."""
+    """Request model to requeue embeddings and backfill statuses."""
 
     tenant_id: str | None = None
     node_ids: list[str] | None = None
+    status: str = Field(
+        "failed", description="Filter nodes by status (failed, queued, etc.)"
+    )
+    only_missing_embedding: bool = Field(
+        False, description="Only requeue nodes without embeddings (embedding IS NULL)"
+    )
+    backfill_ready: bool = Field(
+        False, description="Mark nodes with embeddings as 'ready' before requeuing"
+    )
     limit: int = 100
 
 
@@ -3274,7 +3283,13 @@ def embedding_requeue(
     request: EmbeddingRequeueRequest,
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
-    """Requeue failed embedding jobs."""
+    """Requeue embedding jobs and backfill statuses.
+
+    Supports:
+    - Requeuing by status (failed, queued, etc.)
+    - Filtering nodes without embeddings (only_missing_embedding=true)
+    - Backfilling status='ready' for nodes with embeddings (backfill_ready=true)
+    """
     assert repo is not None, "GraphRepository not initialized"
     if JWT_ENABLED and claims and "admin:refresh" not in claims.scopes:
         raise HTTPException(
@@ -3287,7 +3302,29 @@ def embedding_requeue(
 
     # Restrict tenant scope under JWT
     effective_tenant_id = claims.tenant_id if (JWT_ENABLED and claims) else request.tenant_id
-    limit = max(1, min(1000, int(request.limit)))
+    limit = max(1, min(2000, int(request.limit)))
+
+    # Backfill status='ready' for nodes with embeddings if requested
+    backfilled = 0
+    if request.backfill_ready:
+        with repo._conn(tenant_id=effective_tenant_id) as conn:
+            with conn.cursor() as cur:
+                where = "WHERE embedding IS NOT NULL AND embedding_status != 'ready'"
+                params: list[Any] = []
+                if effective_tenant_id:
+                    where += " AND tenant_id = %s"
+                    params.append(effective_tenant_id)
+                cur.execute(
+                    f"""
+                    UPDATE nodes
+                    SET embedding_status = 'ready', embedding_updated_at = NOW()
+                    {where}
+                    RETURNING id
+                    """,
+                    params,
+                )
+                backfilled = cur.rowcount
+                conn.commit()
 
     # Determine nodes to requeue
     nodes_to_requeue: list[tuple[str, str | None]] = []
@@ -3297,11 +3334,16 @@ def embedding_requeue(
     else:
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                where = "WHERE embedding_status = 'failed'"
-                params: list[Any] = []
+                where = f"WHERE embedding_status = %s"
+                params: list[Any] = [request.status]
+
+                if request.only_missing_embedding:
+                    where += " AND embedding IS NULL"
+
                 if effective_tenant_id:
                     where += " AND tenant_id = %s"
                     params.append(effective_tenant_id)
+
                 cur.execute(
                     f"""
                     SELECT id, tenant_id
@@ -3327,7 +3369,11 @@ def embedding_requeue(
                 extra_fields={"node_id": node_id, "error": str(e)},
             )
 
-    return {"requested": len(nodes_to_requeue), "enqueued": enqueued}
+    return {
+        "backfilled": backfilled,
+        "requested": len(nodes_to_requeue),
+        "enqueued": enqueued,
+    }
 
 
 @app.get("/admin/anomalies", response_model=None)
