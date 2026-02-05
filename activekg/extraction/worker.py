@@ -11,8 +11,10 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, cast
 
 import redis
@@ -31,6 +33,36 @@ from activekg.extraction.schema import ExtractionStatus
 from activekg.graph.repository import GraphRepository
 
 logger = logging.getLogger(__name__)
+
+# Healthcheck port (configurable via env)
+HEALTHCHECK_PORT = int(os.getenv("EXTRACTION_HEALTHCHECK_PORT", "8080"))
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for healthcheck endpoint."""
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"healthy","service":"extraction-worker"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # Suppress default logging
+        pass
+
+
+def start_healthcheck_server() -> HTTPServer:
+    """Start healthcheck HTTP server in background thread."""
+    server = HTTPServer(("0.0.0.0", HEALTHCHECK_PORT), HealthCheckHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info(f"Healthcheck server started on port {HEALTHCHECK_PORT}")
+    return server
 
 
 class ExtractionWorker:
@@ -300,6 +332,9 @@ def start_extraction_worker() -> None:
     if not groq_key:
         logger.error("GROQ_API_KEY not set")
         sys.exit(1)
+
+    # Start healthcheck server for Railway
+    start_healthcheck_server()
 
     redis_client = get_redis_client()
     repo = GraphRepository(dsn)
