@@ -89,6 +89,7 @@ def main():
                     "007_add_provider_check.sql",
                     "008_connector_cursors_table.sql",
                     "009_embedding_queue_status.sql",
+                    "010_update_text_search_vector.sql",
                 ]
                 applied = 0
                 skipped = 0
