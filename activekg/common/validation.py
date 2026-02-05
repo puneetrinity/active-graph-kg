@@ -2,18 +2,21 @@
 
 import re
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_validator
 
-try:
-    from enum import StrEnum  # Python 3.11+
-except Exception:  # pragma: no cover - fallback for Python < 3.11
+if TYPE_CHECKING:
+    from enum import StrEnum as StrEnum
+else:  # pragma: no cover - runtime fallback for Python < 3.11
+    try:
+        from enum import StrEnum as StrEnum  # Python 3.11+
+    except Exception:
 
-    class StrEnum(str, Enum):  # noqa: UP042
-        """Fallback StrEnum for Python < 3.11."""
+        class StrEnum(str, Enum):  # noqa: UP042
+            """Fallback StrEnum for Python < 3.11."""
 
-        pass
+            pass
 
 
 class SeniorityLevel(StrEnum):
@@ -254,6 +257,12 @@ class NodeCreate(BaseModel):
         max_length=100,
         description="Tenant ID (dev mode only, overridden by JWT in production)",
     )
+    extract_before_embed: bool | None = Field(
+        None,
+        description="If true, extract structured fields before embedding. "
+        "If false, embed immediately and extract async. "
+        "Defaults to EXTRACTION_MODE env var (async if unset).",
+    )
 
     @field_validator("classes")
     @classmethod
@@ -319,6 +328,11 @@ class NodeBatchCreate(BaseModel):
         description="Tenant ID (dev mode only, overridden by JWT in production)",
     )
     continue_on_error: bool = Field(True, description="If false, abort on first error")
+    extract_before_embed: bool | None = Field(
+        None,
+        description="If true, extract structured fields before embedding for all nodes. "
+        "Overrides per-node setting. Defaults to EXTRACTION_MODE env var.",
+    )
 
 
 class EdgeCreate(BaseModel):

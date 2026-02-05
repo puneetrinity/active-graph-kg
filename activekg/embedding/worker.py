@@ -5,6 +5,7 @@ Consumes embedding jobs, generates vectors, and updates node state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,10 @@ def _compute_drift(old: np.ndarray | None, new: np.ndarray) -> float:
     if denom == 0:
         return 0.0
     return 1.0 - float((old @ new) / denom)
+
+
+def _compute_content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class EmbeddingWorker:
@@ -103,8 +108,10 @@ class EmbeddingWorker:
                 clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
                 return
 
-            if action == "embed" and node.embedding is not None:
-                # Already embedded; mark ready and exit
+            current_version = os.getenv("EXTRACTION_VERSION", "1.0.0")
+            node_version = (node.props or {}).get("extraction_version")
+            if action == "embed" and node.embedding is not None and node_version == current_version:
+                # Already embedded with current extraction version
                 self.repo.mark_embedding_ready(node_id, tenant_id=tenant_id)
                 clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
                 return
@@ -115,11 +122,23 @@ class EmbeddingWorker:
                 clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
                 return
 
+            content_hash = None
+            if not (node.props or {}).get("content_hash"):
+                content_hash = _compute_content_hash(text)
+
             new = self.embedder.encode([text])[0]
             drift = _compute_drift(node.embedding, new)
             ts = datetime.now(timezone.utc).isoformat()
 
-            self.repo.update_node_embedding(node_id, new, drift, ts, tenant_id=tenant_id)
+            self.repo.update_node_embedding(
+                node_id,
+                new,
+                drift,
+                ts,
+                tenant_id=tenant_id,
+                content_hash=content_hash,
+                extraction_version=current_version,
+            )
             self.repo.write_embedding_history(
                 node_id, drift, embedding_ref=node.payload_ref, tenant_id=tenant_id
             )

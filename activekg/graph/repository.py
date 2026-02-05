@@ -850,26 +850,44 @@ class GraphRepository:
         drift: float,
         timestamp: str,
         tenant_id: str | None = None,
+        content_hash: str | None = None,
+        extraction_version: str | None = None,
     ) -> None:
         """Update node embedding, drift score, and last_refreshed timestamp.
 
         RLS-aware: uses tenant-scoped connection when tenant_id is provided.
         """
+        if extraction_version is None:
+            extraction_version = os.getenv("EXTRACTION_VERSION", "1.0.0")
+        extra_props: dict[str, Any] = {}
+        if content_hash:
+            extra_props["content_hash"] = content_hash
+        if extraction_version:
+            extra_props["extraction_version"] = extraction_version
+
         with self._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                sets = [
+                    "embedding = %s",
+                    "drift_score = %s",
+                    "last_refreshed = %s",
+                    "embedding_status = 'ready'",
+                    "embedding_error = NULL",
+                    "embedding_updated_at = now()",
+                    "updated_at = now()",
+                ]
+                params: list[Any] = [embedding.tolist(), drift, timestamp]
+                if extra_props:
+                    sets.append("props = COALESCE(props, '{}'::jsonb) || %s::jsonb")
+                    params.append(json.dumps(extra_props))
+                params.append(node_id)
                 cur.execute(
-                    """
+                    f"""
                     UPDATE nodes
-                    SET embedding = %s,
-                        drift_score = %s,
-                        last_refreshed = %s,
-                        embedding_status = 'ready',
-                        embedding_error = NULL,
-                        embedding_updated_at = now(),
-                        updated_at = now()
+                    SET {', '.join(sets)}
                     WHERE id = %s
                     """,
-                    (embedding.tolist(), drift, timestamp, node_id),
+                    params,
                 )
 
     def mark_embedding_queued(self, node_id: str, tenant_id: str | None = None) -> None:
@@ -1764,7 +1782,7 @@ class GraphRepository:
         for key in ("text", "resume_text", "content", "body", "description"):
             value = props.get(key)
             if value and isinstance(value, str):
-                return value
+                return cast(str, value)
         return ""
 
     def build_embedding_text(self, node: Node) -> str:

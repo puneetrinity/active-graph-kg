@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -47,6 +48,10 @@ from activekg.engine.llm_provider import (
     calculate_confidence,
     extract_citation_numbers,
     filter_context_by_similarity,
+)
+from activekg.extraction.queue import (
+    enqueue_extraction_job,
+    extraction_queue_depth,
 )
 from activekg.graph.models import Edge, Node
 from activekg.graph.repository import GraphRepository
@@ -143,6 +148,10 @@ EMBEDDING_QUEUE_MAX_DEPTH = int(os.getenv("EMBEDDING_QUEUE_MAX_DEPTH", "5000"))
 EMBEDDING_TENANT_MAX_PENDING = int(os.getenv("EMBEDDING_TENANT_MAX_PENDING", "2000"))
 EMBEDDING_QUEUE_REQUIRE_REDIS = os.getenv("EMBEDDING_QUEUE_REQUIRE_REDIS", "true").lower() == "true"
 NODE_BATCH_MAX = int(os.getenv("NODE_BATCH_MAX", "200"))
+
+# Extraction settings
+EXTRACTION_ENABLED = os.getenv("EXTRACTION_ENABLED", "false").lower() == "true"
+EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "async")  # "async" or "sync"
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "true").lower() == "true"
 
 # Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
@@ -1208,6 +1217,10 @@ def _background_embed(node_id: str, tenant_id: str | None = None):
         text = repo.build_embedding_text(n)
         if not text:
             return
+        content_hash = None
+        if not (n.props or {}).get("content_hash"):
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        extraction_version = os.getenv("EXTRACTION_VERSION", "1.0.0")
         old = n.embedding
         new = embedder.encode([text])[0]
         if old is None:
@@ -1216,7 +1229,15 @@ def _background_embed(node_id: str, tenant_id: str | None = None):
             denom = (float((old**2).sum()) ** 0.5) * (float((new**2).sum()) ** 0.5)
             drift = 0.0 if denom == 0 else 1.0 - float((old @ new) / denom)
         ts = datetime.now(timezone.utc).isoformat()
-        repo.update_node_embedding(node_id, new, drift, ts, tenant_id=n.tenant_id)
+        repo.update_node_embedding(
+            node_id,
+            new,
+            drift,
+            ts,
+            tenant_id=n.tenant_id,
+            content_hash=content_hash,
+            extraction_version=extraction_version,
+        )
         repo.write_embedding_history(
             node_id, drift, embedding_ref=n.payload_ref, tenant_id=n.tenant_id
         )
@@ -1250,6 +1271,12 @@ def create_node(
     Security:
         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
         When JWT_ENABLED=false (dev mode), tenant_id can be provided in request body.
+
+    Extraction:
+        When EXTRACTION_ENABLED=true, structured field extraction is available.
+        - extract_before_embed=true: Extract first, then embed (best quality)
+        - extract_before_embed=false: Embed immediately, extract async (faster)
+        - Default behavior controlled by EXTRACTION_MODE env var
     """
     assert repo is not None, "GraphRepository not initialized"
     # Extract tenant_id from JWT (secure) or request body (dev mode only)
@@ -1281,13 +1308,47 @@ def create_node(
     )
     node_id = repo.create_node(n)
 
+    # Determine extraction behavior
+    extract_sync = False
+    extraction_job_id = None
+    if EXTRACTION_ENABLED and redis_client:
+        # Determine if we should extract before embedding
+        if node.extract_before_embed is not None:
+            extract_sync = node.extract_before_embed
+        else:
+            extract_sync = EXTRACTION_MODE == "sync"
+
+        if extract_sync:
+            # Sync mode: queue extraction first, worker will trigger embed after
+            try:
+                extraction_job_id = enqueue_extraction_job(
+                    redis_client, node_id, tenant_id, priority="high"
+                )
+                # Mark extraction as queued
+                _update_extraction_status(node_id, tenant_id, "queued")
+                # Don't embed yet - extraction worker will trigger re-embed
+                return {
+                    "id": node_id,
+                    "extraction_status": "queued",
+                    "extraction_job_id": extraction_job_id,
+                    "embedding_status": "pending_extraction",
+                }
+            except Exception as e:
+                logger.error(
+                    "Failed to enqueue extraction job",
+                    extra_fields={"node_id": node_id, "error": str(e)},
+                )
+                # Fall through to normal embedding
+
     # Optionally auto-embed on create to make node searchable immediately
+    response: dict[str, Any] = {"id": node_id}
     if AUTO_EMBED_ON_CREATE:
         if EMBEDDING_ASYNC and redis_client:
             try:
                 job_id = enqueue_embedding_job(redis_client, node_id, n.tenant_id)
                 repo.mark_embedding_queued(node_id, tenant_id=n.tenant_id)
-                return {"id": node_id, "embedding_status": "queued", "job_id": job_id}
+                response["embedding_status"] = "queued"
+                response["job_id"] = job_id
             except Exception as e:
                 logger.error(
                     "Failed to enqueue embedding job",
@@ -1298,19 +1359,52 @@ def create_node(
                         status_code=503,
                         detail="Embedding queue unavailable",
                     )
-        try:
-            background_tasks.add_task(_background_embed, node_id, n.tenant_id)
-        except Exception as e:
-            logger.error(
-                "Failed to schedule background embed",
-                extra_fields={"node_id": node_id, "error": str(e)},
-            )
+        else:
+            try:
+                background_tasks.add_task(_background_embed, node_id, n.tenant_id)
+            except Exception as e:
+                logger.error(
+                    "Failed to schedule background embed",
+                    extra_fields={"node_id": node_id, "error": str(e)},
+                )
     else:
         try:
             repo.mark_embedding_skipped(node_id, "auto_embed_disabled", tenant_id=n.tenant_id)
         except Exception:
             pass
-    return {"id": node_id}
+
+    # Queue async extraction after embedding (if enabled and not sync mode)
+    if EXTRACTION_ENABLED and redis_client and not extract_sync:
+        try:
+            extraction_job_id = enqueue_extraction_job(
+                redis_client, node_id, tenant_id, priority="normal"
+            )
+            _update_extraction_status(node_id, tenant_id, "queued")
+            response["extraction_status"] = "queued"
+            response["extraction_job_id"] = extraction_job_id
+        except Exception as e:
+            logger.warning(
+                "Failed to enqueue extraction job (non-blocking)",
+                extra_fields={"node_id": node_id, "error": str(e)},
+            )
+
+    return response
+
+
+def _update_extraction_status(node_id: str, tenant_id: str | None, status: str) -> None:
+    """Update extraction status in node props."""
+    assert repo is not None
+    with repo._conn(tenant_id=tenant_id) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE nodes
+                SET props = COALESCE(props, '{}'::jsonb) || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (json.dumps({"extraction_status": status}), node_id),
+            )
 
 
 @app.post("/nodes/batch", response_model=None)
@@ -1320,7 +1414,14 @@ def create_nodes_batch(
     _rl: None = Depends(require_rate_limit("default")),
     claims: JWTClaims | None = Depends(get_jwt_claims),
 ):
-    """Create multiple nodes in a single request."""
+    """Create multiple nodes in a single request.
+
+    Extraction:
+        When EXTRACTION_ENABLED=true, structured field extraction is available.
+        - batch.extract_before_embed=true: Extract first for all nodes (best quality)
+        - batch.extract_before_embed=false: Embed immediately, extract async (faster)
+        - Default behavior controlled by EXTRACTION_MODE env var
+    """
     assert repo is not None, "GraphRepository not initialized"
 
     if not batch.nodes:
@@ -1350,6 +1451,14 @@ def create_nodes_batch(
                 redis_client, effective_tenant_id, requested=len(batch.nodes)
             )
 
+    # Determine batch-level extraction behavior
+    batch_extract_sync = False
+    if EXTRACTION_ENABLED and redis_client:
+        if batch.extract_before_embed is not None:
+            batch_extract_sync = batch.extract_before_embed
+        else:
+            batch_extract_sync = EXTRACTION_MODE == "sync"
+
     results: list[dict[str, Any]] = []
     created = 0
     failed = 0
@@ -1372,6 +1481,32 @@ def create_nodes_batch(
             node_id = repo.create_node(n)
             created += 1
 
+            result_item: dict[str, Any] = {"id": node_id, "tenant_id": tenant_id}
+
+            # Determine extraction mode for this item
+            item_extract_sync = batch_extract_sync
+            if item.extract_before_embed is not None:
+                item_extract_sync = item.extract_before_embed
+
+            # Handle sync extraction mode (extract first, then embed)
+            if EXTRACTION_ENABLED and redis_client and item_extract_sync:
+                try:
+                    extraction_job_id = enqueue_extraction_job(
+                        redis_client, node_id, tenant_id, priority="high"
+                    )
+                    _update_extraction_status(node_id, tenant_id, "queued")
+                    result_item["extraction_status"] = "queued"
+                    result_item["extraction_job_id"] = extraction_job_id
+                    result_item["embedding_status"] = "pending_extraction"
+                    results.append(result_item)
+                    continue  # Skip embedding - worker will trigger it
+                except Exception as e:
+                    logger.warning(
+                        "Failed to enqueue extraction, falling back to embed",
+                        extra_fields={"node_id": node_id, "error": str(e)},
+                    )
+
+            # Normal embedding flow
             embedding_status = None
             job_id = None
             if AUTO_EMBED_ON_CREATE:
@@ -1385,14 +1520,22 @@ def create_nodes_batch(
                 repo.mark_embedding_skipped(node_id, "auto_embed_disabled", tenant_id=tenant_id)
                 embedding_status = "skipped"
 
-            results.append(
-                {
-                    "id": node_id,
-                    "tenant_id": tenant_id,
-                    "embedding_status": embedding_status,
-                    "job_id": job_id,
-                }
-            )
+            result_item["embedding_status"] = embedding_status
+            result_item["job_id"] = job_id
+
+            # Queue async extraction (if enabled and not sync mode)
+            if EXTRACTION_ENABLED and redis_client and not item_extract_sync:
+                try:
+                    extraction_job_id = enqueue_extraction_job(
+                        redis_client, node_id, tenant_id, priority="normal"
+                    )
+                    _update_extraction_status(node_id, tenant_id, "queued")
+                    result_item["extraction_status"] = "queued"
+                    result_item["extraction_job_id"] = extraction_job_id
+                except Exception:
+                    pass  # Non-blocking
+
+            results.append(result_item)
         except Exception as e:
             failed += 1
             results.append({"error": str(e), "tenant_id": tenant_id})
@@ -3278,6 +3421,63 @@ def embedding_status(
     }
 
 
+@app.get("/admin/extraction/status", response_model=None)
+def extraction_status(
+    tenant_id: str | None = None,
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Return extraction queue status and DB counts.
+
+    Shows:
+    - Count of nodes by extraction_status (queued, processing, ready, failed, skipped)
+    - Extraction queue depth (if Redis available)
+    """
+    assert repo is not None, "GraphRepository not initialized"
+    if JWT_ENABLED and claims and "admin:refresh" not in claims.scopes:
+        raise HTTPException(
+            status_code=403, detail="Insufficient permissions. Required scope: admin:refresh"
+        )
+
+    effective_tenant_id = claims.tenant_id if (JWT_ENABLED and claims) else tenant_id
+
+    status_counts: dict[str, int] = {}
+    with repo._conn(tenant_id=effective_tenant_id) as conn:
+        with conn.cursor() as cur:
+            where = ""
+            params: list[Any] = []
+            if effective_tenant_id:
+                where = "WHERE tenant_id = %s"
+                params.append(effective_tenant_id)
+            cur.execute(
+                f"""
+                SELECT props->>'extraction_status' as status, COUNT(*)
+                FROM nodes
+                {where}
+                GROUP BY props->>'extraction_status'
+                """,
+                params,
+            )
+            for row in cur.fetchall():
+                status = row[0] or "none"
+                status_counts[status] = int(row[1])
+
+    redis_client = _get_embedding_redis()
+    queue_info: dict[str, int] | dict[str, str] | None = None
+    if redis_client:
+        try:
+            queue_info = extraction_queue_depth(redis_client)
+        except Exception as e:
+            queue_info = {"error": str(e)}
+
+    return {
+        "enabled": EXTRACTION_ENABLED,
+        "mode": EXTRACTION_MODE,
+        "tenant_id": effective_tenant_id,
+        "status_counts": status_counts,
+        "queue": queue_info,
+    }
+
+
 @app.post("/admin/embedding/requeue", response_model=None)
 def embedding_requeue(
     request: EmbeddingRequeueRequest,
@@ -3350,18 +3550,18 @@ def embedding_requeue(
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
                 where = "WHERE 1=1"
-                params: list[Any] = []
+                filter_params: list[Any] = []
 
                 if request.status and request.status.lower() != "all":
                     where += " AND embedding_status = %s"
-                    params.append(request.status)
+                    filter_params.append(request.status)
 
                 if request.only_missing_embedding:
                     where += " AND embedding IS NULL"
 
                 if effective_tenant_id:
                     where += " AND tenant_id = %s"
-                    params.append(effective_tenant_id)
+                    filter_params.append(effective_tenant_id)
 
                 cur.execute(
                     f"""
@@ -3371,7 +3571,7 @@ def embedding_requeue(
                     ORDER BY embedding_updated_at DESC NULLS LAST
                     LIMIT %s
                     """,
-                    (*params, limit),
+                    (*filter_params, limit),
                 )
                 for row in cur.fetchall():
                     nodes_to_requeue.append((str(row[0]), row[1]))
