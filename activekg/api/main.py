@@ -171,6 +171,7 @@ NODE_BATCH_MAX = int(os.getenv("NODE_BATCH_MAX", "200"))
 EXTRACTION_ENABLED = os.getenv("EXTRACTION_ENABLED", "false").lower() == "true"
 EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "async")  # "async" or "sync"
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "true").lower() == "true"
+RUN_GCS_POLLER = os.getenv("RUN_GCS_POLLER", "true").lower() == "true"
 
 # Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
 HYBRID_ROUTING_ENABLED = os.getenv("HYBRID_ROUTING_ENABLED", "false").lower() == "true"
@@ -433,6 +434,7 @@ def startup_event():
             "version": APP_VERSION,
             "weighted_search_candidate_factor": WEIGHTED_SEARCH_CANDIDATE_FACTOR,
             "run_scheduler": RUN_SCHEDULER,
+            "run_gcs_poller": RUN_GCS_POLLER,
             "rrf_low_sim_threshold": RRF_LOW_SIM_THRESHOLD,
             "raw_low_sim_threshold": RAW_LOW_SIM_THRESHOLD,
         },
@@ -508,7 +510,7 @@ def startup_event():
     global scheduler
     if RUN_SCHEDULER:
         try:
-            scheduler = RefreshScheduler(repo, embedder, trigger_engine=trigger_engine)
+            scheduler = RefreshScheduler(repo, embedder, trigger_engine=trigger_engine, gcs_poller_enabled=RUN_GCS_POLLER)
             scheduler.start()
             logger.info("RefreshScheduler started on startup")
         except Exception as e:

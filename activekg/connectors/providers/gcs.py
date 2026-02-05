@@ -182,29 +182,45 @@ class GCSConnector(BaseConnector):
             raise
 
     def list_changes(self, cursor: str | None = None) -> tuple[list[ChangeItem], str | None]:
-        """List objects in the configured bucket/prefix for backfill sync.
+        """List new/modified objects in the configured bucket/prefix.
 
-        This is a backfill operation that lists all objects. For true incremental sync,
-        you would need to implement change notifications or poll modified_at timestamps.
+        Uses a high-water mark timestamp to avoid re-queuing objects that have
+        already been ingested.  On the very first call (cursor=None) a full
+        backfill is performed.  Once all pages are consumed the maximum
+        ``modified_at`` seen is persisted in the cursor so that subsequent
+        polls only return objects modified after that point.
+
+        Cursor format (JSON):
+            - First run / backfill in progress:
+              ``{"page_token": "...", "high_water": "..."}``
+            - Incremental (backfill done):
+              ``{"high_water": "<ISO-8601>"}``
 
         Args:
-            cursor: JSON string with {"page_token": "..."} or None
+            cursor: JSON cursor string or None (first run).
 
         Returns:
-            Tuple of (list of ChangeItems, next_cursor)
-            - ChangeItems have operation="upsert" for all objects
-            - next_cursor is JSON with page_token or None if done
+            Tuple of (list of ChangeItems, next_cursor).
         """
+        from datetime import datetime, timezone
+
         bucket_name = self.config["bucket"]
         prefix = self.config.get("prefix", "")
         max_results = 1000  # GCS default page size
 
-        # Parse cursor to get page_token
+        # Parse cursor
         page_token = None
+        high_water = None  # datetime – only include blobs modified *after* this
         if cursor:
             try:
                 data = json.loads(cursor)
                 page_token = data.get("page_token")
+                hw_raw = data.get("high_water")
+                if hw_raw:
+                    high_water = datetime.fromisoformat(hw_raw)
+                    # Ensure timezone-aware for comparison
+                    if high_water.tzinfo is None:
+                        high_water = high_water.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logger.warning(
                     f"Invalid cursor format: {e}",
@@ -223,28 +239,49 @@ class GCSConnector(BaseConnector):
             page = next(iterator.pages)
 
             changes: list[ChangeItem] = []
+            max_modified = high_water  # track the max across all pages
             for blob in page:
                 # Skip directory markers (objects ending with /)
                 if blob.name.endswith("/"):
                     continue
 
+                updated = blob.updated  # datetime (tz-aware from GCS)
+
+                # Incremental filter: skip objects not modified since last scan
+                if high_water and updated and updated <= high_water:
+                    continue
+
                 uri = f"gs://{bucket_name}/{blob.name}"
                 etag = blob.etag
-                updated = blob.updated  # datetime
 
                 changes.append(
                     ChangeItem(
                         uri=uri,
-                        operation="upsert",  # GCS doesn't distinguish create/update in listing
+                        operation="upsert",
                         etag=etag,
                         modified_at=updated,
                     )
                 )
 
-            # Get next page token if available
-            next_cursor = None
-            if iterator.next_page_token:
-                next_cursor = json.dumps({"page_token": iterator.next_page_token})
+                # Track high-water mark
+                if updated and (max_modified is None or updated > max_modified):
+                    max_modified = updated
+
+            # Build next cursor
+            next_page_token = iterator.next_page_token
+            if next_page_token:
+                # More pages to go – carry high_water through pagination
+                cursor_data: dict = {"page_token": next_page_token}
+                if max_modified:
+                    cursor_data["high_water"] = max_modified.isoformat()
+                next_cursor = json.dumps(cursor_data)
+            else:
+                # All pages consumed – persist high-water mark for incremental
+                if max_modified:
+                    next_cursor = json.dumps({"high_water": max_modified.isoformat()})
+                else:
+                    # Nothing seen at all (empty bucket / prefix)
+                    next_cursor = cursor  # keep previous cursor as-is
 
             logger.info(
                 "GCS list_changes complete",
@@ -253,7 +290,8 @@ class GCSConnector(BaseConnector):
                     "bucket": bucket_name,
                     "prefix": prefix,
                     "changes_count": len(changes),
-                    "has_more": next_cursor is not None,
+                    "has_more": next_page_token is not None,
+                    "high_water": max_modified.isoformat() if max_modified else None,
                 },
             )
 
