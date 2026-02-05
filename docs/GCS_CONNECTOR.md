@@ -66,12 +66,10 @@ cat activekg-gcs-key.json | jq .type  # Should output "service_account"
 Register the GCS connector via the admin API:
 
 ```bash
-curl -X POST http://localhost:8000/_admin/connectors/configs \
-  -H "Authorization: Bearer $ADMIN_JWT" \
+curl -X POST http://localhost:8000/_admin/connectors/gcs/register \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_id": "acme_corp",
-    "provider": "gcs",
     "config": {
       "bucket": "my-documents-bucket",
       "prefix": "documents/",
@@ -85,19 +83,20 @@ curl -X POST http://localhost:8000/_admin/connectors/configs \
 
 ### 4. Test Connection
 
-Test the connector configuration:
+Test the connector by listing files (dry run):
 
 ```bash
-curl -X POST http://localhost:8000/_admin/connectors/configs/{config_id}/test \
-  -H "Authorization: Bearer $ADMIN_JWT"
+curl -X POST http://localhost:8000/_admin/connectors/gcs/backfill \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "acme_corp"}'
 ```
 
 Expected response:
 ```json
 {
-  "status": "success",
-  "message": "Successfully connected to GCS bucket",
-  "objects_found": 37
+  "status": "ok",
+  "found": 37,
+  "next_cursor": null
 }
 ```
 
@@ -195,39 +194,132 @@ gs://bucket-name/path/to/document.pdf
 
 ## Operations
 
-### Trigger Manual Sync
+### Trigger Ingestion (Queue Files for Processing)
 
-Force an immediate sync:
+Queue files from the GCS bucket for async ingestion. Requires `super_admin` scope.
 
+**Step 1: Preview (dry run, default)**
 ```bash
-curl -X POST http://localhost:8000/_admin/connectors/configs/{config_id}/sync \
-  -H "Authorization: Bearer $ADMIN_JWT"
-```
-
-### List Connector Runs
-
-View sync history:
-
-```bash
-curl http://localhost:8000/_admin/connectors/runs?config_id={config_id} \
-  -H "Authorization: Bearer $ADMIN_JWT"
-```
-
-### Update Configuration
-
-Update connector settings:
-
-```bash
-curl -X PUT http://localhost:8000/_admin/connectors/configs/{config_id} \
-  -H "Authorization: Bearer $ADMIN_JWT" \
+curl -X POST http://localhost:8000/_admin/connectors/gcs/ingest \
   -H "Content-Type: application/json" \
   -d '{
-    "config": {
-      "poll_interval_seconds": 600,
-      "prefix": "new-prefix/",
-      "enabled": true
-    }
+    "tenant_id": "default",
+    "dry_run": true
   }'
+```
+
+Response:
+```json
+{
+  "status": "dry_run",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dry_run": true,
+  "would_queue": 42,
+  "skipped_count": 8,
+  "total_found": 50,
+  "queue_key": "connector:gcs:default:queue",
+  "next_cursor": null
+}
+```
+
+**Step 2: Actually queue files**
+```bash
+curl -X POST http://localhost:8000/_admin/connectors/gcs/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "default",
+    "dry_run": false,
+    "max_items": 1000,
+    "batch_size": 100
+  }'
+```
+
+Response:
+```json
+{
+  "status": "queued",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dry_run": false,
+  "queued_count": 42,
+  "skipped_count": 8,
+  "total_found": 50,
+  "queue_key": "connector:gcs:default:queue",
+  "next_cursor": null
+}
+```
+
+**Parameters:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `dry_run` | `true` | Preview only, don't actually queue |
+| `max_items` | 1000 | Max total items (1-10000) |
+| `batch_size` | 100 | Items per batch (1-500) |
+| `skip_existing` | `true` | Skip already queued/processed items |
+| `cursor` | null | Pagination cursor for large buckets |
+
+For large buckets, use pagination:
+```bash
+# Continue with cursor from previous response
+curl -X POST http://localhost:8000/_admin/connectors/gcs/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "dry_run": false, "cursor": "eyJwYWdlX3Rva2VuIjogIkNnPT0ifQ=="}'
+```
+
+### Monitor Queue Status
+
+Check ingestion progress:
+
+```bash
+curl "http://localhost:8000/_admin/connectors/gcs/queue-status?tenant_id=default"
+```
+
+Response:
+```json
+{
+  "tenant_id": "default",
+  "provider": "gcs",
+  "queue_key": "connector:gcs:default:queue",
+  "pending": 15
+}
+```
+
+When `pending` reaches `0`, all files have been processed.
+
+### Start Workers
+
+The ingestion pipeline requires background workers to process queued files:
+
+```bash
+# Terminal 1: Start the connector worker (fetches files, extracts text, creates nodes)
+python -m activekg.connectors.worker
+
+# Terminal 2: Start the embedding worker (generates embeddings for nodes)
+# Required if EMBEDDING_ASYNC=true
+python -m activekg.embedding.worker
+```
+
+### List Files (Dry Run)
+
+Preview files without queuing them:
+
+```bash
+curl -X POST http://localhost:8000/_admin/connectors/gcs/backfill \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default"}'
+```
+
+### Enable/Disable Connector
+
+```bash
+# Enable
+curl -X POST http://localhost:8000/_admin/connectors/gcs/enable \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default"}'
+
+# Disable
+curl -X POST http://localhost:8000/_admin/connectors/gcs/disable \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default"}'
 ```
 
 ---
@@ -362,18 +454,15 @@ Then configure ActiveKG webhook endpoint to receive events.
 
 ```python
 import requests
-import os
+import time
 
 ADMIN_API = "http://localhost:8000"
-ADMIN_JWT = os.getenv("ADMIN_JWT")
 
-# Register GCS connector
+# 1. Register GCS connector
 response = requests.post(
-    f"{ADMIN_API}/_admin/connectors/configs",
-    headers={"Authorization": f"Bearer {ADMIN_JWT}"},
+    f"{ADMIN_API}/_admin/connectors/gcs/register",
     json={
         "tenant_id": "acme_corp",
-        "provider": "gcs",
         "config": {
             "bucket": "my-bucket",
             "prefix": "docs/",
@@ -384,9 +473,36 @@ response = requests.post(
         }
     }
 )
+print(f"Registered: {response.json()}")
 
-config_id = response.json()["id"]
-print(f"GCS Connector created: {config_id}")
+# 2. Preview what would be queued (dry run)
+response = requests.post(
+    f"{ADMIN_API}/_admin/connectors/gcs/ingest",
+    json={"tenant_id": "acme_corp", "dry_run": True}
+)
+preview = response.json()
+print(f"Would queue: {preview['would_queue']}, skip: {preview['skipped_count']}")
+
+# 3. Actually queue files
+response = requests.post(
+    f"{ADMIN_API}/_admin/connectors/gcs/ingest",
+    json={"tenant_id": "acme_corp", "dry_run": False, "max_items": 500}
+)
+result = response.json()
+print(f"Job {result['job_id']}: queued {result['queued_count']}, skipped {result['skipped_count']}")
+
+# 4. Monitor progress
+while True:
+    status = requests.get(
+        f"{ADMIN_API}/_admin/connectors/gcs/queue-status",
+        params={"tenant_id": "acme_corp"}
+    ).json()
+    print(f"Pending: {status['pending']}")
+    if status['pending'] == 0:
+        break
+    time.sleep(5)
+
+print("Ingestion complete!")
 ```
 
 ### Terraform Configuration
