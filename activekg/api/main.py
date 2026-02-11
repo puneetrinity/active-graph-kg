@@ -1237,10 +1237,11 @@ def _background_embed(node_id: str, tenant_id: str | None = None):
         text = repo.build_embedding_text(n)
         if not text:
             return
-        content_hash = None
-        if not (n.props or {}).get("content_hash"):
-            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         extraction_version = os.getenv("EXTRACTION_VERSION", "1.0.0")
+        node_version = (n.props or {}).get("extraction_version")
+        content_hash = None
+        if (not (n.props or {}).get("content_hash")) or (node_version != extraction_version):
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         old = n.embedding
         new = embedder.encode([text])[0]
         if old is None:

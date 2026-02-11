@@ -451,6 +451,31 @@ def _fire_trigger(self, node: Node, trigger: dict, similarity: float):
 
 ### Node Creation → Embedding → Refresh → Drift Detection
 
+There are two embedding modes:
+
+- **Async (recommended)**: `EMBEDDING_ASYNC=true` → enqueue Redis job → worker embeds → DB status updates
+- **Inline background**: `EMBEDDING_ASYNC=false` → FastAPI background task embeds in API process
+
+#### Async Embedding Queue (recommended)
+
+```
+┌─────────────────┐
+│ Client Request  │ POST /nodes or /nodes/batch
+└────────┬────────┘
+         ↓
+┌────────────────────┐
+│ Enqueue Job (Redis)│ embedding:queue
+└────────┬───────────┘
+         ↓
+┌────────────────────┐
+│ Embedding Worker   │ python -m activekg.embedding.worker
+└────────┬───────────┘
+         ↓
+┌────────────────────┐
+│ Update Node        │ embedding_status=ready, embedding_updated_at=now()
+└────────────────────┘
+```
+
 ```
 ┌─────────────────┐
 │ Client Request  │ POST /nodes {classes, props, refresh_policy}

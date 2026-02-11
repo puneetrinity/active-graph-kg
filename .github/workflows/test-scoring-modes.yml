@@ -96,12 +96,16 @@ jobs:
         run: |
           echo "ACTIVEKG_DSN=postgresql://postgres:postgres@localhost:5432/activekg" >> $GITHUB_ENV
           echo "REDIS_URL=redis://localhost:6379/0" >> $GITHUB_ENV
-          echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
           echo "JWT_ENABLED=false" >> $GITHUB_ENV
           echo "RATE_LIMIT_ENABLED=false" >> $GITHUB_ENV
-          echo "LLM_ENABLED=true" >> $GITHUB_ENV
-          echo "LLM_BACKEND=groq" >> $GITHUB_ENV
-          echo "LLM_MODEL=llama-3.1-8b-instant" >> $GITHUB_ENV
+          if [ -n "${{ secrets.GROQ_API_KEY }}" ]; then
+            echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
+            echo "LLM_ENABLED=true" >> $GITHUB_ENV
+            echo "LLM_BACKEND=groq" >> $GITHUB_ENV
+            echo "LLM_MODEL=llama-3.1-8b-instant" >> $GITHUB_ENV
+          else
+            echo "LLM_ENABLED=false" >> $GITHUB_ENV
+          fi
           echo "RUN_SCHEDULER=false" >> $GITHUB_ENV
           echo "AUTO_EMBED_ON_CREATE=true" >> $GITHUB_ENV
           echo "ACTIVEKG_DEV_TENANT=default" >> $GITHUB_ENV

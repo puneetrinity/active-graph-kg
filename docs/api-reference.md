@@ -206,6 +206,7 @@ Create a new knowledge graph node.
 | `refresh_policy` | object | No | Auto-refresh configuration |
 | `triggers` | array[string] | No | Trigger pattern names to activate |
 | `tenant_id` | string | No | Tenant ID (dev mode only, max 100 chars) |
+| `extract_before_embed` | bool | No | If true, extract structured fields before embedding (requires `EXTRACTION_ENABLED=true`) |
 
 **Response:**
 ```json
@@ -238,6 +239,12 @@ curl -X POST http://localhost:8000/nodes \
 - If `EMBEDDING_ASYNC=false`, embedding runs in-process via background task.
 - `tenant_id` from JWT overrides request body in production
 - Node ID is auto-generated UUID
+
+**Extraction (when `EXTRACTION_ENABLED=true`):**
+- `extract_before_embed=true`: Queue extraction first, embedding runs after extraction completes. Best quality (embedding includes extracted fields).
+- `extract_before_embed=false` (or omitted): Embed immediately, extraction runs async. Faster ingestion.
+- Default behavior controlled by `EXTRACTION_MODE` env var (`async` or `sync`).
+- Response includes `extraction_status` and `extraction_job_id` when extraction is queued.
 
 ---
 
@@ -1356,6 +1363,93 @@ curl -X POST http://localhost:8000/admin/embedding/requeue \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"tenant_id":"default","status":"queued","only_missing_embedding":true,"backfill_ready":true,"limit":2000}'
+```
+
+---
+
+#### GET /admin/extraction/status
+
+Get extraction queue depth (Redis) and extraction status counts (DB).
+
+**Authentication:** Required (scope: `admin:refresh`)
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tenant_id` | string | No | Tenant ID (dev mode only; ignored when JWT enabled) |
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "mode": "async",
+  "tenant_id": "default",
+  "status_counts": {"ready": 67, "none": 100, "failed": 2},
+  "queue": {"queue": 5, "retry": 1, "dlq": 0}
+}
+```
+
+**Notes:**
+- `status_counts` shows nodes grouped by `props->>'extraction_status'`
+- `"none"` indicates nodes that have never had extraction queued
+- `queue` shows Redis queue depths (main queue, retry ZSET, dead letter queue)
+
+---
+
+#### POST /admin/extraction/requeue
+
+Requeue extraction jobs for nodes.
+
+**Authentication:** Required (scope: `admin:refresh`)
+
+**Request Body:**
+```json
+{
+  "tenant_id": "default",
+  "node_ids": ["node_123", "node_456"],
+  "status": "failed",
+  "only_null_status": true,
+  "limit": 2000
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tenant_id` | string | null | Tenant ID to filter nodes |
+| `node_ids` | list[str] | null | Specific node IDs to requeue |
+| `status` | string | null | Filter by extraction_status ("failed", "queued", etc.) |
+| `only_null_status` | bool | true | Only requeue nodes that never had extraction |
+| `limit` | int | 2000 | Maximum nodes to requeue |
+
+**Notes:**
+- If `node_ids` is provided, only those nodes are requeued (still filtered by tenant_id)
+- If `status` is provided, `only_null_status` is auto-disabled
+- Use `status: "null"` to explicitly match nodes with no extraction_status
+
+**Example — Requeue nodes that never had extraction:**
+```bash
+curl -X POST http://localhost:8000/admin/extraction/requeue \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"tenant_id":"my_tenant","only_null_status":true,"limit":2000}'
+```
+
+**Example — Requeue failed extractions:**
+```bash
+curl -X POST http://localhost:8000/admin/extraction/requeue \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"tenant_id":"my_tenant","status":"failed","limit":500}'
+```
+
+**Response:**
+```json
+{
+  "requested": 67,
+  "enqueued": 67,
+  "tenant_id": "my_tenant"
+}
 ```
 
 ---

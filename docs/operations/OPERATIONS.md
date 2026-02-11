@@ -1,6 +1,6 @@
 # Active Graph KG Operations Guide
 
-**Last Updated**: 2025-11-12
+**Last Updated**: 2026-02-03
 **Target Audience**: SREs, DevOps, Production Support
 
 This guide covers operational procedures for Active Graph KG connector infrastructure including monitoring, troubleshooting, and maintenance tasks.
@@ -14,6 +14,7 @@ This guide covers operational procedures for Active Graph KG connector infrastru
 - [Webhook Troubleshooting](#webhook-troubleshooting)
 - [Worker Troubleshooting](#worker-troubleshooting)
 - [Ingestion Troubleshooting](#ingestion-troubleshooting)
+- [Embedding Queue](#embedding-queue)
 - [Purger Operations](#purger)
 - [Cache Subscriber](#cache-subscriber)
 - [Key Rotation](#key-rotation)
@@ -29,6 +30,8 @@ Active Graph KG connector system consists of:
 - **API Server**: Hosts webhook endpoints (`/_webhooks/s3`, `/_webhooks/gcs`)
 - **Queue (Redis)**: Stores connector events per tenant/provider (`connector:{provider}:{tenant}:queue`)
 - **Worker**: Background process that polls queues and processes changes
+- **Embedding Queue (Redis)**: Stores async embedding jobs (`embedding:queue`, `embedding:retry`, `embedding:dlq`)
+- **Embedding Worker**: Background process that generates embeddings and updates node status
 - **Scheduler**: APScheduler-based cron tasks (purger runs daily at 02:00 UTC)
 - **Config Store**: Encrypted connector configurations in PostgreSQL
 
@@ -36,6 +39,15 @@ Active Graph KG connector system consists of:
 
 ```
 Cloud Storage Event → Webhook (SNS/Pub/Sub) → API Server → Redis Queue → Worker → Graph DB
+```
+
+### Async Embedding Flow
+
+```
+POST /nodes or /nodes/batch
+  → enqueue Redis (embedding:queue)
+  → embedding worker generates vector
+  → DB update (embedding_status=ready)
 ```
 
 ### Key Metrics
@@ -418,6 +430,51 @@ SELECT pid, wait_event_type, wait_event, state, query
 FROM pg_stat_activity
 WHERE application_name = 'activekg' AND state != 'idle';
 ```
+
+---
+
+## Embedding Queue
+
+### Queue Keys
+
+- `embedding:queue` — main queue (LPUSH/BRPOP)
+- `embedding:retry` — delayed retry ZSET (score = run_at)
+- `embedding:dlq` — failed jobs after max attempts
+- `embedding:pending:{node_id}` — dedupe key per node
+- `embedding:tenant:pending:{tenant}` — per-tenant pending count
+
+### Node Status Lifecycle
+
+`queued` → `processing` → `ready`  
+`failed` on repeated errors  
+`skipped` if no text payload
+
+### Operational Endpoints
+
+- `GET /admin/embedding/status`  
+  Returns DB counts by status and Redis queue depth.
+
+- `POST /admin/embedding/requeue`  
+  Requeue failed/queued nodes, optionally backfill ready statuses.
+
+Example:
+```bash
+curl -X POST http://localhost:8000/admin/embedding/requeue \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"default","status":"queued","only_missing_embedding":true,"backfill_ready":true,"limit":2000}'
+```
+
+### Common Issues
+
+- **Many nodes `queued` but Redis queue empty**  
+  Nodes were created before async queue or when Redis unavailable.  
+  Fix: run `/admin/embedding/requeue` with `status="queued"` + `only_missing_embedding=true`.
+
+- **Nodes `ready` but `has_embedding=false`**  
+  Indicates embedding failed; check worker logs and DLQ.
+
+- **Large backlog**  
+  Increase worker replicas or reduce ingest rate; check `EMBEDDING_TENANT_MAX_PENDING`.
 
 ---
 

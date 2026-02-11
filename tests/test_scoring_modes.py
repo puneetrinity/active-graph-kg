@@ -14,6 +14,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+def _llm_available() -> bool:
+    enabled = os.getenv("LLM_ENABLED", "true").lower() == "true"
+    if not enabled:
+        return False
+    return bool(
+        os.getenv("GROQ_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("ANTHROPIC_API_KEY")
+    )
+
+
 @pytest.fixture(scope="module")
 def client_rrf():
     """Test client with RRF mode enabled."""
@@ -48,6 +59,8 @@ class TestAskEndpointScoring:
 
     def test_ask_rrf_mode_metadata(self, client_rrf):
         """Test that /ask returns correct metadata in RRF mode."""
+        if not _llm_available():
+            pytest.skip("LLM backend not configured")
         response = client_rrf.post(
             "/ask",
             json={
@@ -77,6 +90,8 @@ class TestAskEndpointScoring:
 
     def test_ask_cosine_mode_metadata(self, client_cosine):
         """Test that /ask returns correct metadata in cosine mode."""
+        if not _llm_available():
+            pytest.skip("LLM backend not configured")
         response = client_cosine.post(
             "/ask",
             json={
@@ -188,6 +203,8 @@ class TestThresholdBehavior:
         """Test that RRF uses the lower threshold (0.01) appropriately."""
         # Ensure RRF mode is set (fixtures are module-scoped so env can be overridden)
         os.environ["HYBRID_RRF_ENABLED"] = "true"
+        if not _llm_available():
+            pytest.skip("LLM backend not configured")
 
         response = client_rrf.post("/ask", json={"question": "machine learning frameworks"})
 
@@ -207,6 +224,8 @@ class TestThresholdBehavior:
         """Test that cosine mode uses appropriate threshold (0.15+)."""
         # Ensure cosine mode is set (fixtures are module-scoped so env can be overridden)
         os.environ["HYBRID_RRF_ENABLED"] = "false"
+        if not _llm_available():
+            pytest.skip("LLM backend not configured")
 
         response = client_cosine.post(
             "/ask", json={"question": "completely unrelated query about astronomy"}

@@ -53,6 +53,9 @@ Recommended
 - `RUN_SCHEDULER=true` (exactly one instance)
 - `WORKERS=2` (tune up/down based on CPU)
 - `TRANSFORMERS_CACHE=/workspace/cache` + attach a persistent volume to avoid re-downloading models
+- `EMBEDDING_ASYNC=true` (use Redis queue + worker)
+- `EMBEDDING_QUEUE_MAX_DEPTH=5000`
+- `EMBEDDING_TENANT_MAX_PENDING=2000`
 
 Security
 - Dev: `JWT_SECRET_KEY=<dev-secret>` and `JWT_ALGORITHM=HS256`
@@ -62,6 +65,25 @@ Security
 Rate Limiting (optional)
 - `RATE_LIMIT_ENABLED=true`
 - `REDIS_URL=redis://<host>:6379/0`
+
+### Async Embedding Worker (Recommended)
+
+Async embedding requires a **separate worker service** on Railway.
+
+1) Create a new Railway service from the same repo  
+2) Set **Railway Config File** to `railway.worker.json`  
+3) Set **Start Command**:
+```
+python -m activekg.embedding.worker
+```
+4) Set env vars (same DB + Redis as API):
+   - `ACTIVEKG_DSN`
+   - `REDIS_URL`
+   - `EMBEDDING_BACKEND`
+   - `EMBEDDING_MODEL`
+   - `EMBEDDING_MAX_ATTEMPTS`, `EMBEDDING_RETRY_BASE_SECONDS`, `EMBEDDING_RETRY_MAX_SECONDS`
+
+Note: the worker has no HTTP server, so healthcheck should be disabled (handled by `railway.worker.json`).
 
 ### Initialize the Database
 Option 1 (recommended): run the bootstrap helper (uses ACTIVEKG_DSN or DATABASE_URL automatically):
