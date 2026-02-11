@@ -9,16 +9,13 @@ Dependencies:
 
 from __future__ import annotations
 
-import io
 import os
 from datetime import datetime, timezone
 
 import boto3
-import pdfplumber
-from bs4 import BeautifulSoup
-from docx import Document as DocxDocument
 
 from activekg.connectors.base import BaseConnector, ChangeItem, ConnectorStats, FetchResult
+from activekg.connectors.extract import extract_text
 
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -79,7 +76,7 @@ class S3Connector(BaseConnector):
         content_type = obj.get("ContentType") or "application/octet-stream"
         title = os.path.basename(key)
 
-        text = self._extract_text(body, content_type)
+        text = extract_text(body, content_type)
         return FetchResult(
             text=text,
             title=title,
@@ -132,44 +129,3 @@ class S3Connector(BaseConnector):
 
         return changes, next_cursor
 
-    # ---------- helpers ----------
-    def _extract_text(self, data: bytes, content_type: str) -> str:
-        ct = (content_type or "").lower()
-        if "pdf" in ct:
-            return self._pdf_to_text(data)
-        if (
-            "word" in ct
-            or ct.endswith("/msword")
-            or ct.endswith("/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        ):
-            return self._docx_to_text(data)
-        if "html" in ct or "text/html" in ct:
-            return self._html_to_text(data)
-        # Default: try utf-8
-        try:
-            return data.decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-    def _pdf_to_text(self, data: bytes) -> str:
-        txt = []
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages:
-                try:
-                    txt.append(page.extract_text() or "")
-                except Exception:
-                    continue
-        return "\n".join(t for t in txt if t)
-
-    def _docx_to_text(self, data: bytes) -> str:
-        bio = io.BytesIO(data)
-        doc = DocxDocument(bio)
-        return "\n".join(p.text for p in doc.paragraphs if p.text)
-
-    def _html_to_text(self, data: bytes) -> str:
-        soup = BeautifulSoup(data, "html.parser")
-        # Remove scripts/styles
-        for tag in soup(["script", "style"]):
-            tag.decompose()
-        text = soup.get_text(" ")
-        return " ".join(text.split())

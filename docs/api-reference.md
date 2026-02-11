@@ -444,6 +444,78 @@ curl http://localhost:8000/nodes/01234567-89ab-cdef-0123-456789abcdef/versions?l
 
 ---
 
+#### POST /upload
+
+Upload PDF/DOCX files for text extraction, chunking, and embedding.
+
+**Authentication:** Required when JWT enabled
+
+**Content-Type:** `multipart/form-data`
+
+**Form Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `files` | file(s) | Yes | - | One or more files (PDF, DOCX, HTML, TXT). Max 50 files. |
+| `tenant_id` | string | No | "default" | Tenant ID (dev mode only, ignored when JWT enabled) |
+| `classes` | string | No | "Document,Resume" | Comma-separated node classes for created nodes |
+
+**Supported File Types:**
+- `.pdf` (application/pdf)
+- `.docx` (application/vnd.openxmlformats-officedocument.wordprocessingml.document)
+- `.doc` (application/msword)
+- `.html` / `.htm` (text/html)
+- `.txt` (text/plain)
+
+**Response:**
+```json
+{
+  "uploaded": 2,
+  "skipped": 1,
+  "chunks_created": 5,
+  "embeddings_queued": 5,
+  "files": [
+    {"filename": "resume.pdf", "chunks": 3, "status": "ok"},
+    {"filename": "cover_letter.docx", "chunks": 2, "status": "ok"},
+    {"filename": "empty.pdf", "chunks": 0, "status": "skipped"}
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uploaded` | integer | Number of files successfully processed |
+| `skipped` | integer | Number of files skipped (empty text or errors) |
+| `chunks_created` | integer | Total chunk nodes created across all files |
+| `embeddings_queued` | integer | Total embedding jobs enqueued |
+| `files` | array | Per-file status details |
+
+**Status Codes:**
+- `200 OK`: Upload processed
+- `400 Bad Request`: No files provided or too many files (max 50)
+- `401 Unauthorized`: Missing/invalid JWT
+- `429 Too Many Requests`: Rate limit or embedding queue capacity exceeded
+- `503 Service Unavailable`: Embedding queue unavailable (Redis not configured)
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "files=@resume1.pdf" \
+  -F "files=@resume2.docx" \
+  -F "classes=Document,Resume"
+```
+
+**Notes:**
+- Each file is text-extracted, split into chunks via `create_chunk_nodes()`, and embedding jobs are enqueued per chunk
+- Parent nodes are tagged with `source: "manual_upload"` in props for easy querying
+- External ID format: `upload:{tenant}:{filename}:{content_hash}` (deterministic, re-uploading the same file overwrites)
+- Content type is detected from the upload header or inferred from file extension
+- `tenant_id` from JWT overrides the form field in production
+- Max files per request controlled by `UPLOAD_MAX_FILES` env var (default: 50)
+
+---
+
 ### Edges
 
 #### POST /edges
@@ -1413,6 +1485,158 @@ curl -X POST http://localhost:8000/_admin/connectors/rotate_keys \
 - Invalidates cache and publishes Redis pub/sub notification
 - Per-row error handling (one failure doesn't stop batch)
 - See [OPERATIONS.md](operations/OPERATIONS.md) for complete runbook
+
+---
+
+#### POST /_admin/connectors/{provider}/ingest
+
+Queue files from a connector (S3/GCS/Drive) for async ingestion with safeguards.
+
+**Authentication:** JWT required with `super_admin` scope when `JWT_ENABLED=true`
+
+**Path Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | Yes | Connector provider: `s3`, `gcs`, or `drive` |
+
+**Request Body:**
+```json
+{
+  "tenant_id": "default",
+  "dry_run": true,
+  "max_items": 1000,
+  "batch_size": 100,
+  "skip_existing": true,
+  "cursor": null
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `tenant_id` | string | No | "default" | Tenant ID |
+| `dry_run` | boolean | No | true | Preview only, don't actually queue |
+| `max_items` | integer | No | 1000 | Max total items (1-10000) |
+| `batch_size` | integer | No | 100 | Items per batch (1-500) |
+| `skip_existing` | boolean | No | true | Skip already queued/processed items |
+| `cursor` | string | No | null | Pagination cursor (from previous response) |
+
+**Response (dry_run=true):**
+```json
+{
+  "status": "dry_run",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dry_run": true,
+  "would_queue": 42,
+  "skipped_count": 8,
+  "total_found": 50,
+  "queue_key": "connector:gcs:default:queue",
+  "next_cursor": null
+}
+```
+
+**Response (dry_run=false):**
+```json
+{
+  "status": "queued",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dry_run": false,
+  "queued_count": 42,
+  "skipped_count": 8,
+  "total_found": 50,
+  "queue_key": "connector:gcs:default:queue",
+  "next_cursor": null
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | "dry_run" or "queued" |
+| `job_id` | string | Unique identifier for this ingest job |
+| `dry_run` | boolean | Whether this was a preview only |
+| `queued_count` / `would_queue` | integer | Files queued or would be queued |
+| `skipped_count` | integer | Files skipped (already processed/queued) |
+| `total_found` | integer | Total files found in source |
+| `queue_key` | string | Redis queue key for monitoring |
+| `next_cursor` | string | Cursor for next page (null if done) |
+
+**Status Codes:**
+- `200 OK`: Success (dry run or queued)
+- `400 Bad Request`: Connector not registered or unsupported provider
+- `401 Unauthorized`: Missing/invalid JWT
+- `403 Forbidden`: Missing `super_admin` scope
+- `500 Internal Server Error`: Operation failed
+
+**Example (dry run first):**
+```bash
+# Preview what would be queued
+curl -X POST http://localhost:8000/_admin/connectors/gcs/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "dry_run": true}'
+
+# Actually queue files
+curl -X POST http://localhost:8000/_admin/connectors/gcs/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "default", "dry_run": false, "max_items": 500}'
+```
+
+**Notes:**
+- Default is `dry_run=true` to prevent accidental bulk operations
+- `skip_existing=true` dedupes against Redis queue and processed nodes in DB
+- `max_items` caps total work; `batch_size` chunks processing
+- Requires the ConnectorWorker to be running (`python -m activekg.connectors.worker`)
+- If `EMBEDDING_ASYNC=true`, also requires EmbeddingWorker (`python -m activekg.embedding.worker`)
+
+---
+
+#### GET /_admin/connectors/{provider}/queue-status
+
+Get current queue depth for a connector.
+
+**Authentication:** JWT required with `super_admin` scope when `JWT_ENABLED=true`
+
+**Path Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | Yes | Connector provider: `s3`, `gcs`, or `drive` |
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tenant_id` | string | Yes | Tenant ID |
+
+**Response:**
+```json
+{
+  "tenant_id": "default",
+  "provider": "gcs",
+  "queue_key": "connector:gcs:default:queue",
+  "pending": 15
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tenant_id` | string | Tenant ID |
+| `provider` | string | Connector provider |
+| `queue_key` | string | Redis queue key |
+| `pending` | integer | Number of files waiting to be processed |
+
+**Status Codes:**
+- `200 OK`: Status retrieved
+- `401 Unauthorized`: Missing/invalid JWT
+- `403 Forbidden`: Missing `super_admin` scope
+
+**Example:**
+```bash
+curl "http://localhost:8000/_admin/connectors/gcs/queue-status?tenant_id=default"
+```
+
+**Notes:**
+- When `pending` reaches 0, all queued files have been processed
+- Use with `/ingest` endpoint to monitor bulk ingestion progress
 
 ---
 

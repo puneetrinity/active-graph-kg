@@ -43,10 +43,11 @@ class RefreshScheduler:
     - Optionally runs trigger engine after refreshes
     """
 
-    def __init__(self, repository, embedding_provider, trigger_engine=None):
+    def __init__(self, repository, embedding_provider, trigger_engine=None, gcs_poller_enabled=True):
         self.repo = repository
         self.embedder = embedding_provider
         self.trigger_engine = trigger_engine
+        self.gcs_poller_enabled = gcs_poller_enabled
         self.scheduler = BackgroundScheduler()
         self.logger = get_enhanced_logger(__name__)
         # Track last run timestamps per job for inter-run observations
@@ -68,10 +69,18 @@ class RefreshScheduler:
         # Uses per-tenant Redis lock to honor tenant-specific poll_interval_seconds
         self.scheduler.add_job(self.run_drive_poller, "interval", seconds=60, id="drive_poller")
 
+        # Run GCS poller every 60s (mirrors Drive poller)
+        if self.gcs_poller_enabled:
+            self.scheduler.add_job(self.run_gcs_poller, "interval", seconds=60, id="gcs_poller")
+
         self.scheduler.start()
         self.logger.info(
             "RefreshScheduler started",
-            extra_fields={"has_triggers": self.trigger_engine is not None, "purge_enabled": True},
+            extra_fields={
+                "has_triggers": self.trigger_engine is not None,
+                "purge_enabled": True,
+                "gcs_poller_enabled": self.gcs_poller_enabled,
+            },
         )
 
     def shutdown(self):
@@ -400,3 +409,156 @@ class RefreshScheduler:
 
         except Exception as e:
             self.logger.error("Drive poller failed", extra_fields={"error": str(e)})
+
+    def run_gcs_poller(self):
+        """Poll GCS changes for all enabled tenants and enqueue events.
+
+        Strategy (mirrors run_drive_poller):
+        - List enabled GCS configs from config store
+        - For each tenant, acquire a Redis lock honoring poll_interval_seconds
+        - Instantiate GCSConnector and call list_changes(cursor)
+        - Enqueue ChangeItems to Redis queue connector:gcs:{tenant}:queue
+        - Update cursor in connector_cursors table
+        - Register tenant in active registry for worker discovery
+        """
+        try:
+            now_ts = _now()
+            last = self._last_times.get("gcs_poller")
+            try:
+                if last is not None:
+                    track_schedule_run(
+                        "gcs_poller", kind="interval", inter_run_s=max(0.0, now_ts - last)
+                    )
+                else:
+                    track_schedule_run("gcs_poller", kind="interval", inter_run_s=None)
+            except Exception:
+                pass
+            self._last_times["gcs_poller"] = now_ts
+            # Lazy imports to avoid hard deps if not used
+            import json
+            from datetime import datetime
+
+            from activekg.common.metrics import get_redis_client
+            from activekg.connectors.config_store import get_config_store
+            from activekg.connectors.cursor_store import get_cursor, set_cursor
+            from activekg.connectors.providers.gcs import GCSConnector
+
+            store = get_config_store()
+            redis_client = get_redis_client()
+
+            # List GCS configs (metadata), then fetch full config per tenant
+            meta = store.list_all(provider="gcs")
+            for entry in meta:
+                tenant_id = entry.get("tenant_id")
+                if not tenant_id or entry.get("enabled") is False:
+                    continue
+
+                cfg = store.get(tenant_id, "gcs")
+                if not cfg:
+                    continue
+
+                # Increment poller runs metric at start of processing
+                connector_poller_runs_total.labels(provider="gcs", tenant=tenant_id).inc()
+
+                # Start timer for latency tracking
+                poll_start_time = time.time()
+
+                # Per-tenant poll interval
+                interval = int(cfg.get("poll_interval_seconds", 300))
+                lock_key = f"connector:gcs:{tenant_id}:poll_lock"
+                # NX lock with TTL=interval to avoid per-tenant over-polling
+                try:
+                    if not redis_client.set(lock_key, "1", ex=interval, nx=True):
+                        continue  # respect interval
+                except Exception as e:
+                    # If Redis is unavailable, proceed (best effort)
+                    self.logger.warning(
+                        "GCS poller: Redis lock failed, proceeding",
+                        extra_fields={"tenant_id": tenant_id, "error": str(e)},
+                    )
+
+                try:
+                    connector = GCSConnector(tenant_id=tenant_id, config=cfg)
+                except Exception as e:
+                    connector_poller_errors_total.labels(
+                        provider="gcs", tenant=tenant_id, error_type="connector_init"
+                    ).inc()
+                    self.logger.error(
+                        "GCS poller: connector init failed",
+                        extra_fields={"tenant_id": tenant_id, "error": str(e)},
+                    )
+                    continue
+
+                # Get last cursor and poll changes
+                try:
+                    cursor = get_cursor(tenant_id, "gcs")
+                    changes, next_cursor = connector.list_changes(cursor)
+                except Exception as e:
+                    connector_poller_errors_total.labels(
+                        provider="gcs", tenant=tenant_id, error_type="list_changes"
+                    ).inc()
+                    self.logger.error(
+                        "GCS poller: list_changes failed",
+                        extra_fields={"tenant_id": tenant_id, "error": str(e)},
+                    )
+                    continue
+
+                # Enqueue changes
+                queued = 0
+                for ch in changes:
+                    try:
+                        item = {
+                            "uri": ch.uri,
+                            "operation": ch.operation,
+                            "etag": ch.etag,
+                            "modified_at": ch.modified_at.isoformat()
+                            if ch.modified_at
+                            else datetime.utcnow().isoformat(),
+                            "tenant_id": tenant_id,
+                        }
+                        redis_client.lpush(f"connector:gcs:{tenant_id}:queue", json.dumps(item))
+                        queued += 1
+                    except Exception as e:
+                        self.logger.error(
+                            "GCS poller: enqueue failed",
+                            extra_fields={"tenant_id": tenant_id, "error": str(e)},
+                        )
+
+                # Register tenant in active registry for worker discovery
+                try:
+                    registry_key = "connector:active_tenants"
+                    registry_entry = json.dumps({"provider": "gcs", "tenant_id": tenant_id})
+                    redis_client.sadd(registry_key, registry_entry)
+                except Exception:
+                    pass
+
+                # Persist next cursor
+                if next_cursor:
+                    try:
+                        set_cursor(tenant_id, "gcs", next_cursor)
+                    except Exception as e:
+                        connector_poller_errors_total.labels(
+                            provider="gcs", tenant=tenant_id, error_type="cursor_save"
+                        ).inc()
+                        self.logger.error(
+                            "GCS poller: save cursor failed",
+                            extra_fields={"tenant_id": tenant_id, "error": str(e)},
+                        )
+
+                self.logger.info(
+                    "GCS poll cycle",
+                    extra_fields={
+                        "tenant_id": tenant_id,
+                        "queued": queued,
+                        "had_next": bool(next_cursor),
+                    },
+                )
+
+                # Record latency
+                poll_duration = time.time() - poll_start_time
+                connector_poller_latency_seconds.labels(provider="gcs", tenant=tenant_id).observe(
+                    poll_duration
+                )
+
+        except Exception as e:
+            self.logger.error("GCS poller failed", extra_fields={"error": str(e)})

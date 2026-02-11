@@ -121,3 +121,8 @@ verify_phase1_plus.sh
 
 # Pre-commit config (optional)
 .pre-commit-config.yaml
+
+# local testing 
+prafulla_resumes/
+id_map.json
+gcs-credentials.json

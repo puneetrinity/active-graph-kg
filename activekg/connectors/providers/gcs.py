@@ -1,18 +1,15 @@
 """Google Cloud Storage connector implementation."""
 
-import io
 import json
 import os
 from typing import Any
 
-import pdfplumber
-from bs4 import BeautifulSoup
-from docx import Document as DocxDocument
 from google.api_core import exceptions as gcp_exceptions
 from google.cloud import storage
 
 from activekg.common.logger import get_enhanced_logger
 from activekg.connectors.base import BaseConnector, ChangeItem, ConnectorStats, FetchResult
+from activekg.connectors.extract import extract_text
 
 logger = get_enhanced_logger(__name__)
 
@@ -34,31 +31,42 @@ class GCSConnector(BaseConnector):
       - bucket: GCS bucket name
       - prefix: Optional prefix to filter objects (default: "")
       - project: GCP project ID (optional, can use GOOGLE_CLOUD_PROJECT env)
-      - credentials_path: Path to service account JSON (optional, uses GOOGLE_APPLICATION_CREDENTIALS env)
+      - credentials_json: Inline service account JSON (for production/PaaS)
+      - service_account_json_path: Path to service account JSON file
 
-    Authentication:
-      - Explicitly via credentials_path config
-      - Or GOOGLE_APPLICATION_CREDENTIALS environment variable
-      - Or gcloud default credentials
+    Authentication (checked in order):
+      1. credentials_json in config (inline JSON string)
+      2. GOOGLE_CREDENTIALS_JSON env var (inline JSON string)
+      3. service_account_json_path in config (file path)
+      4. GOOGLE_APPLICATION_CREDENTIALS env var (file path)
+      5. Default credentials (gcloud CLI, workload identity)
     """
 
     def __init__(self, tenant_id: str, config: dict[str, Any]):
         super().__init__(tenant_id, config)
 
-        # Get credentials path from config or environment
-        credentials_path = config.get("credentials_path") or os.getenv(
+        # Get credentials (priority: file path > inline JSON > default)
+        # File path is more reliable than inline JSON with dotenv
+        credentials_path = config.get("service_account_json_path") or os.getenv(
             "GOOGLE_APPLICATION_CREDENTIALS"
         )
+        credentials_json = config.get("credentials_json") or os.getenv("GOOGLE_CREDENTIALS_JSON")
         project = config.get("project") or os.getenv("GOOGLE_CLOUD_PROJECT")
 
-        # Initialize GCS client
+        # Debug logging
+        logger.info(f"GCS credentials_path: {credentials_path}")
+        logger.info(f"GCS project: {project}")
+
+        # Initialize GCS client (prefer file path over inline JSON)
         if credentials_path:
             self.client = storage.Client.from_service_account_json(
                 credentials_path, project=project
             )
+            logger.info("GCS connector using credentials from file path")
         else:
             # Use default credentials (gcloud, workload identity, etc.)
             self.client = storage.Client(project=project)
+            logger.info("GCS connector using default credentials")
 
         logger.info(
             "GCS connector initialized",
@@ -135,7 +143,7 @@ class GCSConnector(BaseConnector):
             content_type = blob.content_type or ""
 
             # Extract text based on content type
-            text = self._extract_text(data, content_type)
+            text = extract_text(data, content_type)
 
             # Use object name as title (last component of path)
             title = object_name.split("/")[-1] if object_name else None
@@ -174,29 +182,45 @@ class GCSConnector(BaseConnector):
             raise
 
     def list_changes(self, cursor: str | None = None) -> tuple[list[ChangeItem], str | None]:
-        """List objects in the configured bucket/prefix for backfill sync.
+        """List new/modified objects in the configured bucket/prefix.
 
-        This is a backfill operation that lists all objects. For true incremental sync,
-        you would need to implement change notifications or poll modified_at timestamps.
+        Uses a high-water mark timestamp to avoid re-queuing objects that have
+        already been ingested.  On the very first call (cursor=None) a full
+        backfill is performed.  Once all pages are consumed the maximum
+        ``modified_at`` seen is persisted in the cursor so that subsequent
+        polls only return objects modified after that point.
+
+        Cursor format (JSON):
+            - First run / backfill in progress:
+              ``{"page_token": "...", "high_water": "..."}``
+            - Incremental (backfill done):
+              ``{"high_water": "<ISO-8601>"}``
 
         Args:
-            cursor: JSON string with {"page_token": "..."} or None
+            cursor: JSON cursor string or None (first run).
 
         Returns:
-            Tuple of (list of ChangeItems, next_cursor)
-            - ChangeItems have operation="upsert" for all objects
-            - next_cursor is JSON with page_token or None if done
+            Tuple of (list of ChangeItems, next_cursor).
         """
+        from datetime import datetime, timezone
+
         bucket_name = self.config["bucket"]
         prefix = self.config.get("prefix", "")
         max_results = 1000  # GCS default page size
 
-        # Parse cursor to get page_token
+        # Parse cursor
         page_token = None
+        high_water = None  # datetime – only include blobs modified *after* this
         if cursor:
             try:
                 data = json.loads(cursor)
                 page_token = data.get("page_token")
+                hw_raw = data.get("high_water")
+                if hw_raw:
+                    high_water = datetime.fromisoformat(hw_raw)
+                    # Ensure timezone-aware for comparison
+                    if high_water.tzinfo is None:
+                        high_water = high_water.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logger.warning(
                     f"Invalid cursor format: {e}",
@@ -215,28 +239,49 @@ class GCSConnector(BaseConnector):
             page = next(iterator.pages)
 
             changes: list[ChangeItem] = []
+            max_modified = high_water  # track the max across all pages
             for blob in page:
                 # Skip directory markers (objects ending with /)
                 if blob.name.endswith("/"):
                     continue
 
+                updated = blob.updated  # datetime (tz-aware from GCS)
+
+                # Incremental filter: skip objects not modified since last scan
+                if high_water and updated and updated <= high_water:
+                    continue
+
                 uri = f"gs://{bucket_name}/{blob.name}"
                 etag = blob.etag
-                updated = blob.updated  # datetime
 
                 changes.append(
                     ChangeItem(
                         uri=uri,
-                        operation="upsert",  # GCS doesn't distinguish create/update in listing
+                        operation="upsert",
                         etag=etag,
                         modified_at=updated,
                     )
                 )
 
-            # Get next page token if available
-            next_cursor = None
-            if iterator.next_page_token:
-                next_cursor = json.dumps({"page_token": iterator.next_page_token})
+                # Track high-water mark
+                if updated and (max_modified is None or updated > max_modified):
+                    max_modified = updated
+
+            # Build next cursor
+            next_page_token = iterator.next_page_token
+            if next_page_token:
+                # More pages to go – carry high_water through pagination
+                cursor_data: dict = {"page_token": next_page_token}
+                if max_modified:
+                    cursor_data["high_water"] = max_modified.isoformat()
+                next_cursor = json.dumps(cursor_data)
+            else:
+                # All pages consumed – persist high-water mark for incremental
+                if max_modified:
+                    next_cursor = json.dumps({"high_water": max_modified.isoformat()})
+                else:
+                    # Nothing seen at all (empty bucket / prefix)
+                    next_cursor = cursor  # keep previous cursor as-is
 
             logger.info(
                 "GCS list_changes complete",
@@ -245,7 +290,8 @@ class GCSConnector(BaseConnector):
                     "bucket": bucket_name,
                     "prefix": prefix,
                     "changes_count": len(changes),
-                    "has_more": next_cursor is not None,
+                    "has_more": next_page_token is not None,
+                    "high_water": max_modified.isoformat() if max_modified else None,
                 },
             )
 
@@ -258,76 +304,3 @@ class GCSConnector(BaseConnector):
             )
             raise
 
-    # Text extraction helpers (reused from S3 pattern)
-
-    def _extract_text(self, data: bytes, content_type: str) -> str:
-        """Extract text from binary data based on content type."""
-        ct = (content_type or "").lower()
-
-        if "pdf" in ct:
-            return self._pdf_to_text(data)
-
-        if (
-            "word" in ct
-            or ct.endswith("/msword")
-            or ct.endswith("/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        ):
-            return self._docx_to_text(data)
-
-        if "html" in ct or "text/html" in ct:
-            return self._html_to_text(data)
-
-        # Default: try UTF-8 decoding
-        try:
-            return data.decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-    def _pdf_to_text(self, data: bytes) -> str:
-        """Extract text from PDF bytes using pdfplumber."""
-        txt = []
-        try:
-            with pdfplumber.open(io.BytesIO(data)) as pdf:
-                for page in pdf.pages:
-                    try:
-                        extracted = page.extract_text()
-                        if extracted:
-                            txt.append(extracted)
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.warning(
-                f"PDF extraction failed: {e}", extra_fields={"tenant_id": self.tenant_id}
-            )
-
-        return "\n".join(t for t in txt if t)
-
-    def _docx_to_text(self, data: bytes) -> str:
-        """Extract text from DOCX bytes using python-docx."""
-        try:
-            bio = io.BytesIO(data)
-            doc = DocxDocument(bio)
-            return "\n".join(p.text for p in doc.paragraphs if p.text)
-        except Exception as e:
-            logger.warning(
-                f"DOCX extraction failed: {e}", extra_fields={"tenant_id": self.tenant_id}
-            )
-            return ""
-
-    def _html_to_text(self, data: bytes) -> str:
-        """Extract text from HTML bytes using BeautifulSoup."""
-        try:
-            soup = BeautifulSoup(data, "html.parser")
-
-            # Remove script and style tags
-            for tag in soup(["script", "style"]):
-                tag.decompose()
-
-            # Get text and normalize whitespace
-            text = soup.get_text(" ")
-            return " ".join(text.split())
-        except Exception as e:
-            logger.warning(
-                f"HTML extraction failed: {e}", extra_fields={"tenant_id": self.tenant_id}
-            )
-            return ""

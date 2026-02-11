@@ -10,8 +10,12 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, cast
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file at startup
+
 import numpy as np
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -167,6 +171,7 @@ NODE_BATCH_MAX = int(os.getenv("NODE_BATCH_MAX", "200"))
 EXTRACTION_ENABLED = os.getenv("EXTRACTION_ENABLED", "false").lower() == "true"
 EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "async")  # "async" or "sync"
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "true").lower() == "true"
+RUN_GCS_POLLER = os.getenv("RUN_GCS_POLLER", "true").lower() == "true"
 
 # Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
 HYBRID_ROUTING_ENABLED = os.getenv("HYBRID_ROUTING_ENABLED", "false").lower() == "true"
@@ -429,6 +434,7 @@ def startup_event():
             "version": APP_VERSION,
             "weighted_search_candidate_factor": WEIGHTED_SEARCH_CANDIDATE_FACTOR,
             "run_scheduler": RUN_SCHEDULER,
+            "run_gcs_poller": RUN_GCS_POLLER,
             "rrf_low_sim_threshold": RRF_LOW_SIM_THRESHOLD,
             "raw_low_sim_threshold": RAW_LOW_SIM_THRESHOLD,
         },
@@ -504,7 +510,7 @@ def startup_event():
     global scheduler
     if RUN_SCHEDULER:
         try:
-            scheduler = RefreshScheduler(repo, embedder, trigger_engine=trigger_engine)
+            scheduler = RefreshScheduler(repo, embedder, trigger_engine=trigger_engine, gcs_poller_enabled=RUN_GCS_POLLER)
             scheduler.start()
             logger.info("RefreshScheduler started on startup")
         except Exception as e:
@@ -1949,6 +1955,157 @@ def refresh_node(
     except Exception as e:
         logger.error("Node refresh failed", extra_fields={"node_id": node_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Node refresh failed: {str(e)}")
+
+
+UPLOAD_MAX_FILES = int(os.getenv("UPLOAD_MAX_FILES", "50"))
+
+# MIME type mapping for common file extensions
+_EXT_MIME: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".txt": "text/plain",
+}
+
+
+@app.post("/upload", response_model=None)
+async def upload_files(
+    files: list[UploadFile] = File(...),
+    tenant_id: str | None = Form(None),
+    classes: str = Form("Document,Resume"),
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Upload PDF/DOCX files, extract text, chunk, and enqueue embeddings.
+
+    Accepts multipart/form-data with one or more files. Each file is
+    extracted, chunked via ``create_chunk_nodes``, and embedding jobs are
+    enqueued for each chunk.
+
+    Security:
+        When JWT_ENABLED=true, tenant_id is derived from JWT claims.
+        The ``tenant_id`` form field is only used in dev mode.
+    """
+    from hashlib import sha256
+    from activekg.connectors.chunker import create_chunk_nodes
+    from activekg.connectors.extract import extract_text
+
+    assert repo is not None, "GraphRepository not initialized"
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > UPLOAD_MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files (max {UPLOAD_MAX_FILES})",
+        )
+
+    # Resolve tenant
+    if JWT_ENABLED and claims:
+        effective_tenant = claims.tenant_id
+    else:
+        effective_tenant = tenant_id or "default"
+
+    # Parse classes
+    class_list = [c.strip() for c in classes.split(",") if c.strip()]
+
+    # Prepare embedding queue
+    redis_client = None
+    if AUTO_EMBED_ON_CREATE and EMBEDDING_ASYNC:
+        redis_client = _get_embedding_redis()
+        if not redis_client and EMBEDDING_QUEUE_REQUIRE_REDIS:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedding queue unavailable (Redis not configured)",
+            )
+
+    uploaded = 0
+    skipped = 0
+    total_chunks = 0
+    total_embeddings = 0
+    file_results: list[dict[str, Any]] = []
+
+    for f in files:
+        fname = f.filename or "unknown"
+        try:
+            data = await f.read()
+            if not data:
+                file_results.append({"filename": fname, "chunks": 0, "status": "skipped"})
+                skipped += 1
+                continue
+
+            # Determine content type from header or extension
+            ct = f.content_type or ""
+            if not ct or ct == "application/octet-stream":
+                ext = os.path.splitext(fname)[1].lower()
+                ct = _EXT_MIME.get(ext, "application/octet-stream")
+
+            text = extract_text(data, ct)
+            if not text or not text.strip():
+                file_results.append({"filename": fname, "chunks": 0, "status": "skipped"})
+                skipped += 1
+                continue
+
+            content_hash = sha256(text.encode()).hexdigest()[:16]
+            external_id = f"upload:{effective_tenant}:{fname}:{content_hash}"
+
+            chunk_ids = create_chunk_nodes(
+                parent_node_id=external_id,
+                parent_title=fname,
+                parent_classes=class_list,
+                text=text,
+                parent_metadata={
+                    "source": "manual_upload",
+                    "content_type": ct,
+                    "size": len(data),
+                    "content_hash": content_hash,
+                },
+                repo=repo,
+                tenant_id=effective_tenant,
+            )
+
+            # Enqueue embeddings
+            enqueued = 0
+            if redis_client:
+                if chunk_ids:
+                    _check_embedding_queue_capacity(
+                        redis_client, effective_tenant, requested=len(chunk_ids)
+                    )
+                for cid in chunk_ids:
+                    try:
+                        job_id = enqueue_embedding_job(redis_client, cid, effective_tenant)
+                        if job_id:
+                            repo.mark_embedding_queued(cid, tenant_id=effective_tenant)
+                            enqueued += 1
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to enqueue embedding for chunk",
+                            extra_fields={"chunk_id": cid, "error": str(e)},
+                        )
+
+            uploaded += 1
+            total_chunks += len(chunk_ids)
+            total_embeddings += enqueued
+            file_results.append({"filename": fname, "chunks": len(chunk_ids), "status": "ok"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(
+                "File upload processing failed",
+                extra_fields={"filename": fname, "error": str(e)},
+            )
+            file_results.append({"filename": fname, "chunks": 0, "status": f"error: {e}"})
+            skipped += 1
+
+    return {
+        "uploaded": uploaded,
+        "skipped": skipped,
+        "chunks_created": total_chunks,
+        "embeddings_queued": total_embeddings,
+        "files": file_results,
+    }
 
 
 @app.post("/search", response_model=None)

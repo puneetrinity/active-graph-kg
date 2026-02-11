@@ -9,6 +9,7 @@ from activekg.connectors.base import BaseConnector, ChangeItem
 from activekg.connectors.chunker import create_chunk_nodes
 from activekg.connectors.retry import PermanentError, TransientError, with_retry_and_dlq
 from activekg.connectors.throttle import IngestionThrottle
+from activekg.embedding.queue import enqueue_embedding_job
 from activekg.graph.repository import GraphRepository
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,17 @@ class IngestionProcessor:
             tenant_id=self.tenant_id,
         )
 
-        logger.info(f"Ingested {external_id}: {len(chunk_ids)} chunks created")
+        # Enqueue embedding jobs for each chunk
+        enqueued = 0
+        for chunk_uuid in chunk_ids:
+            try:
+                job_id = enqueue_embedding_job(self.redis_client, chunk_uuid, self.tenant_id)
+                if job_id:
+                    enqueued += 1
+            except Exception as e:
+                logger.warning(f"Failed to enqueue embedding for {chunk_uuid}: {e}")
+
+        logger.info(f"Ingested {external_id}: {len(chunk_ids)} chunks created, {enqueued} embedding jobs enqueued")
 
     def _delete_existing_chunks(self, parent_external_id: str):
         """Delete existing chunk nodes for parent."""
