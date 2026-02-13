@@ -20,6 +20,7 @@ else:
 
 import numpy as np
 import psycopg
+from croniter import croniter, CroniterError
 from pgvector.psycopg import Vector, register_vector
 from psycopg_pool import ConnectionPool
 
@@ -1639,11 +1640,8 @@ class GraphRepository:
         # PRECEDENCE: cron > interval (with fallback)
         # Parse cron policy: {"cron": "*/5 * * * *"}
         if "cron" in policy:
+            cron_expr = policy["cron"]
             try:
-                from croniter import croniter  # type: ignore[import-untyped]
-
-                cron_expr = policy["cron"]
-
                 # If never refreshed, it's due
                 if last_refreshed is None:
                     return True
@@ -1664,7 +1662,7 @@ class GraphRepository:
                 # If current time is past next_run, it's due
                 return bool(now >= next_run)
 
-            except Exception as e:
+            except (ValueError, KeyError, CroniterError) as e:
                 self.logger.warning(
                     f"Invalid cron expression, falling back to interval if present: {policy.get('cron')}",
                     extra_fields={"error": str(e), "node_id": node.id},
