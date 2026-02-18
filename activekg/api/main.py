@@ -1678,6 +1678,33 @@ def list_nodes(
     return {"nodes": nodes_list, "total": total, "limit": limit, "offset": offset}
 
 
+@app.get("/nodes/by-external-id", response_model=None)
+def get_node_by_external_id(
+    external_id: str,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Lookup a node by its external_id prop (tenant-scoped)."""
+    assert repo is not None, "GraphRepository not initialized"
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = None  # Dev mode - RLS will handle isolation if enabled
+
+    node = repo.get_node_by_external_id(external_id, tenant_id=tenant_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    return {
+        "id": node.id,
+        "tenant_id": node.tenant_id,
+        "classes": node.classes,
+        "props": node.props,
+        "metadata": node.metadata,
+        "payload_ref": node.payload_ref,
+    }
+
+
 @app.get("/nodes/{node_id}", response_model=None)
 def get_node(
     node_id: str,

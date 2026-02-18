@@ -766,6 +766,26 @@ class GraphRepository:
                     return None
                 return self._build_node_from_row(row)
 
+    def get_node_by_external_id(
+        self, external_id: str, tenant_id: str | None = None
+    ) -> Node | None:
+        with self._conn(tenant_id=tenant_id) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, tenant_id, classes, props, payload_ref, embedding, metadata,
+                           refresh_policy, triggers, version, last_refreshed, drift_score,
+                           embedding_status, embedding_error, embedding_attempts, embedding_updated_at
+                    FROM nodes WHERE props->>'external_id' = %s
+                    LIMIT 1
+                    """,
+                    (external_id,),
+                )
+                row = cast(NodeRow | None, cur.fetchone())
+                if not row:
+                    return None
+                return self._build_node_from_row(row)
+
     def update_node(
         self,
         node_id: str,
