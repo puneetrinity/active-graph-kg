@@ -29,11 +29,30 @@ When `JWT_ENABLED=true`, all endpoints require JWT authentication:
 - **Supported Algorithms:** RS256 (public key), HS256 (shared secret)
 - **Claims:**
   - `tenant_id` (required): Tenant identifier for RLS
-  - `actor_id` (optional): User/service identifier
-  - `scopes` (optional): Permission scopes (e.g., `admin:refresh`)
+  - `sub` (required): User/service identifier (actor_id)
+  - `scopes` (required for protected endpoints): Permission scopes
 
-**Admin Scopes:**
-- `admin:refresh`: Required for `/admin/refresh` and debug endpoints
+**Scope Formats** (all accepted):
+- `"scopes": ["search:read", "kg:write"]` — array of strings
+- `"scopes": "search:read kg:write"` — space-delimited string
+- `"scope": "search:read kg:write"` — OAuth2 fallback field (space-delimited)
+
+**Endpoint Scopes:**
+| Scope | Endpoints |
+|-------|-----------|
+| `search:read` | `POST /search` |
+| `ask:read` | `POST /ask`, `POST /ask/stream` |
+| `kg:write` | `POST /nodes`, `POST /nodes/batch`, `POST /edges`, `POST /upload` |
+| `admin:refresh` | `POST /admin/refresh`, debug endpoints |
+
+**Vanta Production Config:**
+```bash
+JWT_ENABLED=true
+JWT_ALGORITHM=RS256
+JWT_AUDIENCE=activekg
+JWT_ISSUER=vantahire
+JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+```
 
 ### Development Mode
 

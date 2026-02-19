@@ -967,10 +967,13 @@ pip install PyJWT[crypto]==2.8.0
 
 # 2. Configure JWT (environment variables)
 export JWT_ENABLED=true
-export JWT_SECRET_KEY="your-secret-key-or-public-key"
-export JWT_ALGORITHM=HS256  # or RS256 for production
+export JWT_ALGORITHM=RS256              # RS256 for production, HS256 for dev
+export JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
 export JWT_AUDIENCE=activekg
-export JWT_ISSUER=https://auth.yourcompany.com
+export JWT_ISSUER=vantahire             # Must match issuer in Vanta JWT
+
+# For HS256 dev mode only:
+# export JWT_SECRET_KEY="your-32-char-secret-key-here"
 
 # 3. Generate test JWT
 python scripts/generate_test_jwt.py --tenant test_tenant --actor test_user
@@ -984,8 +987,19 @@ curl -X POST http://localhost:8000/ask \
 **What it does**:
 - Extracts `tenant_id` from JWT claims (not request body) → prevents tenant impersonation
 - Validates token signature, expiry, audience, issuer
-- Enables scope-based authorization (e.g., `admin:refresh` scope required)
+- Enforces scope-based authorization per endpoint
 - Sets RLS context automatically for tenant isolation
+
+**Required scopes**:
+- `search:read` — `POST /search`
+- `ask:read` — `POST /ask`, `POST /ask/stream`
+- `kg:write` — `POST /nodes`, `POST /nodes/batch`, `POST /edges`, `POST /upload`
+- `admin:refresh` — `POST /admin/refresh`, debug endpoints
+
+**Scope formats** (all accepted in JWT claims):
+- `"scopes": ["search:read", "kg:write"]` (array)
+- `"scopes": "search:read kg:write"` (space-delimited string)
+- `"scope": "search:read kg:write"` (OAuth2 fallback)
 
 **Dev mode**: Set `JWT_ENABLED=false` to disable auth for local development.
 

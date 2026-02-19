@@ -90,11 +90,21 @@ def verify_jwt(token: str) -> JWTClaims:
         actor_id = payload.get("sub")  # Standard JWT claim for subject/user ID
         actor_type = payload.get("actor_type", "user")
 
-        # Support both "scopes" (list) and "scope" (space-delimited string)
-        scopes = payload.get("scopes")
-        if scopes is None:
-            scope_str = payload.get("scope", "")
-            scopes = scope_str.split() if scope_str else []
+        # Normalize scopes to list[str] from any of:
+        #   - "scopes": ["search:read", "kg:write"]   (list of strings)
+        #   - "scopes": "search:read kg:write"          (space-delimited string)
+        #   - "scope":  "search:read kg:write"          (OAuth2 fallback field)
+        # Invalid/non-string values are silently ignored.
+        raw_scopes = payload.get("scopes")
+        if raw_scopes is None:
+            raw_scopes = payload.get("scope")
+
+        if isinstance(raw_scopes, list):
+            scopes = [s for s in raw_scopes if isinstance(s, str)]
+        elif isinstance(raw_scopes, str):
+            scopes = raw_scopes.split() if raw_scopes else []
+        else:
+            scopes = []
 
         exp = payload.get("exp")
 
@@ -159,19 +169,24 @@ async def get_jwt_claims(
     return verify_jwt(credentials.credentials)
 
 
-async def require_scope(required_scope: str, claims: JWTClaims = Depends(get_jwt_claims)):
-    """Dependency to require a specific scope.
+def require_scope(required_scope: str):
+    """Factory that returns a FastAPI dependency enforcing a specific scope.
 
     Usage:
-        @app.post("/admin/refresh", dependencies=[Depends(require_scope("admin:refresh"))])
-        def admin_refresh(...):
+        @app.post("/search", dependencies=[Depends(require_scope("search:read"))])
+        def search(...):
             ...
     """
-    if JWT_ENABLED and claims and required_scope not in claims.scopes:
-        try:
-            access_violations_total.labels(type="scope_denied").inc()
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=403, detail=f"Insufficient permissions. Required scope: {required_scope}"
-        )
+
+    async def _check(claims: JWTClaims | None = Depends(get_jwt_claims)):
+        if JWT_ENABLED and claims and required_scope not in claims.scopes:
+            try:
+                access_violations_total.labels(type="scope_denied").inc()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required scope: {required_scope}",
+            )
+
+    return _check

@@ -34,7 +34,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from activekg.api.admin_connectors import router as connectors_admin_router
 
 # JWT authentication and rate limiting
-from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims
+from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims, require_scope
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.common.env import env_str
@@ -1293,7 +1293,7 @@ def _background_embed(node_id: str, tenant_id: str | None = None):
             pass
 
 
-@app.post("/nodes", response_model=None)
+@app.post("/nodes", response_model=None, dependencies=[Depends(require_scope("kg:write"))])
 def create_node(
     node: NodeCreate,
     background_tasks: BackgroundTasks,
@@ -1443,7 +1443,7 @@ def _update_extraction_status(node_id: str, tenant_id: str | None, status: str) 
             )
 
 
-@app.post("/nodes/batch", response_model=None)
+@app.post("/nodes/batch", response_model=None, dependencies=[Depends(require_scope("kg:write"))])
 def create_nodes_batch(
     batch: NodeBatchCreate,
     background_tasks: BackgroundTasks,
@@ -2011,7 +2011,7 @@ _EXT_MIME: dict[str, str] = {
 }
 
 
-@app.post("/upload", response_model=None)
+@app.post("/upload", response_model=None, dependencies=[Depends(require_scope("kg:write"))])
 async def upload_files(
     files: list[UploadFile] = File(...),
     tenant_id: str | None = Form(None),
@@ -2150,7 +2150,7 @@ async def upload_files(
     }
 
 
-@app.post("/search", response_model=None)
+@app.post("/search", response_model=None, dependencies=[Depends(require_scope("search:read"))])
 def search_nodes(
     http_request: Request,
     http_response: Response,
@@ -2530,7 +2530,7 @@ def should_use_fast_path(
     return (False, f"low_confidence_sim={top_similarity:.3f}")
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(require_scope("ask:read"))])
 async def ask_question(
     http_request: Request,
     http_response: Response,
@@ -3061,7 +3061,7 @@ async def ask_question(
             rate_limiter.mark_request_end(identifier, "ask", request_id)
 
 
-@app.post("/ask/stream")
+@app.post("/ask/stream", dependencies=[Depends(require_scope("ask:read"))])
 async def ask_stream(
     http_request: Request,
     http_response: Response,
@@ -3256,7 +3256,7 @@ async def ask_stream(
     return StreamingResponse(gen(), media_type="text/event-stream", headers=rl_headers)
 
 
-@app.post("/edges", response_model=None)
+@app.post("/edges", response_model=None, dependencies=[Depends(require_scope("kg:write"))])
 def create_edge(
     edge: EdgeCreate,
     _rl: None = Depends(require_rate_limit("default")),
