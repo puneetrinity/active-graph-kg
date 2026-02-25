@@ -2253,36 +2253,46 @@ def search_nodes(
             except Exception:
                 raw_text = None
 
+            vector_similarity = None
+            try:
+                if getattr(node, "embedding", None) is not None:
+                    vector_similarity = float(node.embedding @ query_embedding)
+                    if vector_similarity < 0.0:
+                        vector_similarity = 0.0
+                    elif vector_similarity > 1.0:
+                        vector_similarity = 1.0
+            except Exception:
+                vector_similarity = None
+
             text_snippet = raw_text or ""
             if isinstance(text_snippet, str) and len(text_snippet) > 300:
                 text_snippet = text_snippet[:300]
+            item: dict[str, Any] = {
+                "id": node.id,
+                "classes": node.classes,
+                "props": node.props,
+                "payload_ref": node.payload_ref,
+                "metadata": node.metadata,
+                "similarity": round(similarity, 4),
+                "text": text_snippet,
+            }
+            if vector_similarity is not None:
+                item["vector_similarity"] = round(vector_similarity, 4)
+            formatted_results.append(item)
 
-            formatted_results.append(
-                {
-                    "id": node.id,
-                    "classes": node.classes,
-                    "props": node.props,
-                    "payload_ref": node.payload_ref,
-                    "metadata": node.metadata,
-                    "similarity": round(similarity, 4),
-                    "text": text_snippet,
-                }
-            )
+        if search_request.use_hybrid:
+            mode = "hybrid"
+            rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
+            score_type = "rrf_fused" if rrf_enabled else "weighted_fusion"
+            reranked = search_request.use_reranker
+        else:
+            mode = "vector"
+            score_type = "weighted_fusion" if search_request.use_weighted_score else "cosine"
+            reranked = False
 
         # Track Prometheus metrics (if enabled)
         if METRICS_ENABLED:
             latency_ms = (time.time() - start_time) * 1000
-
-            # Determine mode and score_type
-            if search_request.use_hybrid:
-                mode = "hybrid"
-                rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
-                score_type = "rrf_fused" if rrf_enabled else "weighted_fusion"
-                reranked = search_request.use_reranker
-            else:
-                mode = "vector"
-                score_type = "weighted_fusion" if search_request.use_weighted_score else "cosine"
-                reranked = False
 
             track_search_request(
                 mode=mode,
@@ -2296,6 +2306,9 @@ def search_nodes(
             "query": search_request.query,
             "results": formatted_results,
             "count": len(formatted_results),
+            "search_mode": score_type,
+            "score_type": score_type,
+            "mode": mode,
         }
     except Exception as e:
         logger.error("Search failed", extra_fields={"error": str(e), "query": search_request.query})
