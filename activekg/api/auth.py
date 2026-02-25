@@ -19,7 +19,21 @@ logger = get_enhanced_logger(__name__)
 
 # JWT Configuration (from env)
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")  # RS256 public key or HS256 shared secret
-JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")  # RS256 public key (preferred name for clarity)
+
+
+def _decode_pem(raw: str | None) -> str | None:
+    """Decode PEM key from env: supports raw PEM, \\n-escaped, or base64-encoded."""
+    if not raw:
+        return None
+    if raw.startswith("-----BEGIN"):
+        return raw.replace("\\n", "\n")
+    # Assume base64-encoded PEM
+    import base64
+
+    return base64.b64decode(raw).decode("utf-8")
+
+
+JWT_PUBLIC_KEY = _decode_pem(os.getenv("JWT_PUBLIC_KEY"))  # RS256 public key
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "RS256")  # RS256 for production, HS256 for dev
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "activekg")
 JWT_ISSUER = os.getenv("JWT_ISSUER")  # e.g., "https://auth.yourcompany.com"
