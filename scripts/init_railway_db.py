@@ -109,6 +109,7 @@ def main():
                     "009_embedding_queue_status.sql",
                     "010_update_text_search_vector.sql",
                     "011_unique_tenant_external_id.sql",
+                    "012_global_memory.sql",
                 ]
                 applied = 0
                 skipped = 0

@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from activekg.api.admin_connectors import router as connectors_admin_router
+from activekg.api.global_memory import router as global_memory_router
 
 # JWT authentication and rate limiting
 from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims, require_scope
@@ -365,6 +366,7 @@ else:
 # Mount admin connectors router (minimal MVP)
 app.include_router(connectors_admin_router)
 app.include_router(connectors_webhook_router)
+app.include_router(global_memory_router)
 
 # Initialize LLM provider(s)
 llm = None

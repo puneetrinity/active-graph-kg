@@ -191,6 +191,9 @@ class ExtractionWorker:
                 },
             )
 
+            # Post-extraction: sync platform applicants to global memory
+            self._maybe_sync_to_global_memory(node_id, tenant_id, node, result)
+
             # Trigger re-embed if extraction version differs from embedding version
             node_embed_version = (node.props or {}).get("extraction_version")
             if node_embed_version != current_version:
@@ -275,6 +278,42 @@ class ExtractionWorker:
                     """,
                     (json.dumps(props), node_id),
                 )
+
+    def _maybe_sync_to_global_memory(
+        self,
+        node_id: str,
+        tenant_id: str | None,
+        node: Any,
+        result: Any,
+    ) -> None:
+        """After extraction, sync platform applicant nodes to global_candidates."""
+        if os.getenv("GLOBAL_MEMORY_ENABLED", "false").lower() != "true":
+            return
+
+        metadata = node.metadata or {}
+        if metadata.get("provenance_type") != "platform_applicant":
+            return
+
+        try:
+            from activekg.api.global_memory import sync_applicant_to_global_memory
+
+            sync_applicant_to_global_memory(
+                node_id=node_id,
+                tenant_id=tenant_id,
+                node_props=node.props or {},
+                extracted_result=result,
+                metadata=metadata,
+            )
+            logger.info(
+                "Synced applicant to global memory",
+                extra={"node_id": node_id, "tenant_id": tenant_id},
+            )
+        except Exception as e:
+            # Non-blocking: global memory sync failure must not break extraction
+            logger.warning(
+                "Failed to sync applicant to global memory (non-blocking)",
+                extra={"node_id": node_id, "error": str(e)},
+            )
 
     def _trigger_reembed(self, node_id: str, tenant_id: str | None) -> None:
         """Enqueue re-embed job for node."""

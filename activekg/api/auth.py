@@ -19,12 +19,22 @@ logger = get_enhanced_logger(__name__)
 
 # JWT Configuration (from env)
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")  # RS256 public key or HS256 shared secret
-JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")  # RS256 public key (preferred name for clarity)
+JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")  # RS256 public key (Vanta's key)
+SIGNAL_JWT_PUBLIC_KEY = os.getenv("SIGNAL_JWT_PUBLIC_KEY")  # RS256 public key (Signal's key)
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "RS256")  # RS256 for production, HS256 for dev
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "activekg")
-JWT_ISSUER = os.getenv("JWT_ISSUER")  # e.g., "https://auth.yourcompany.com"
+JWT_ISSUER = os.getenv("JWT_ISSUER")  # e.g., "vantahire" (primary issuer)
 JWT_ENABLED = os.getenv("JWT_ENABLED", "false").lower() == "true"
 JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "30"))  # Clock skew tolerance
+
+# Multi-issuer support: map issuer → public key
+_ISSUER_KEY_MAP: dict[str, str] = {}
+if JWT_PUBLIC_KEY:
+    # Vanta's key (primary issuer, or JWT_ISSUER value)
+    _primary_issuer = JWT_ISSUER or "vantahire"
+    _ISSUER_KEY_MAP[_primary_issuer] = JWT_PUBLIC_KEY
+if SIGNAL_JWT_PUBLIC_KEY:
+    _ISSUER_KEY_MAP["signal"] = SIGNAL_JWT_PUBLIC_KEY
 
 security = HTTPBearer(auto_error=False)
 
@@ -59,12 +69,36 @@ def verify_jwt(token: str) -> JWTClaims:
     Raises:
         HTTPException: If token is invalid or expired
     """
-    # Prefer JWT_PUBLIC_KEY for RS256, fallback to JWT_SECRET_KEY
-    key = JWT_PUBLIC_KEY or JWT_SECRET_KEY
+    # Multi-issuer: peek at unverified 'iss' claim to select the right public key
+    key: str | None = None
+    detected_issuer: str | None = None
+    if _ISSUER_KEY_MAP and JWT_ALGORITHM == "RS256":
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+            detected_issuer = unverified.get("iss")
+            if detected_issuer and detected_issuer in _ISSUER_KEY_MAP:
+                key = _ISSUER_KEY_MAP[detected_issuer]
+        except Exception:
+            pass  # Fall through to default key
+
+    if not key:
+        key = JWT_PUBLIC_KEY or JWT_SECRET_KEY
     if not key:
         raise HTTPException(
             status_code=500, detail="JWT_SECRET_KEY or JWT_PUBLIC_KEY not configured"
         )
+
+    # Determine which issuer to verify against.
+    # PyJWT 2.8 requires `issuer` as a string, not a list.
+    # Use the detected issuer (from unverified peek) if it's in our key map;
+    # otherwise fall back to JWT_ISSUER.
+    accepted_issuer: str | None = None
+    if detected_issuer and detected_issuer in _ISSUER_KEY_MAP:
+        accepted_issuer = detected_issuer
+    elif _ISSUER_KEY_MAP and len(_ISSUER_KEY_MAP) == 1:
+        accepted_issuer = next(iter(_ISSUER_KEY_MAP))
+    elif JWT_ISSUER:
+        accepted_issuer = JWT_ISSUER
 
     try:
         # Decode and verify token with leeway for clock skew
@@ -73,7 +107,7 @@ def verify_jwt(token: str) -> JWTClaims:
             key,
             algorithms=[JWT_ALGORITHM],
             audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
+            issuer=accepted_issuer,
             leeway=JWT_LEEWAY_SECONDS,  # Tolerate clock skew
             options={
                 "verify_signature": True,
@@ -81,7 +115,7 @@ def verify_jwt(token: str) -> JWTClaims:
                 "verify_nbf": True,
                 "verify_iat": True,
                 "verify_aud": True,
-                "verify_iss": bool(JWT_ISSUER),
+                "verify_iss": bool(accepted_issuer),
             },
         )
 
