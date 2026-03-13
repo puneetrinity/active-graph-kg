@@ -1155,10 +1155,12 @@ class GraphRepository:
         text_weight: float = 0.3,
         rerank_skip_threshold: float = 0.80,
     ) -> list[tuple[Node, float]]:
-        """Hybrid search with PostgreSQL ts_rank + vector similarity.
+        """Hybrid search with parallel lexical + vector retrieval.
 
-        Combines full-text search (ts_rank) with vector similarity for better recall.
-        Optionally applies cross-encoder reranking for precision.
+        Runs PostgreSQL full-text search and vector search in parallel over the same
+        filtered candidate set, then fuses the two ranked lists. This avoids the
+        vector-first truncation bug where lexical candidates never get a chance to
+        participate in fusion.
 
         Args:
             query_text: Raw query string for full-text search
@@ -1244,8 +1246,9 @@ class GraphRepository:
 
                 where_sql = " AND " + " AND ".join(where_clauses) if where_clauses else ""
 
-                # Adaptive candidate_k based on expected similarity
-                # Base: 20 candidates, increase to 40-50 when uncertain (lower top score)
+                # Adaptive candidate_k for each retrieval branch.
+                # We deliberately fetch deeper than top_k so lexical and vector retrieval
+                # can each surface candidates before fusion.
                 if use_reranker:
                     try:
                         base_candidates = int(os.getenv("HYBRID_RERANKER_BASE", "20"))
@@ -1256,79 +1259,109 @@ class GraphRepository:
                     except Exception:
                         base_candidates, _boost_candidates, adaptive_threshold = 20, 45, 0.55
 
-                    # Ensure we fetch at least top_k candidates for reranking
-                    candidate_k = max(base_candidates, top_k)
+                    candidate_k = max(base_candidates, top_k * 3)
                 else:
-                    candidate_k = top_k
-
-                # Build params in SQL order: [query_vec_param, query_text, ...filters..., query_vec_param, candidate_k]
-                params = [
-                    query_vec_param,  # For SELECT vec_similarity
-                    query_text,  # For ts_rank
-                ]
-                params.extend(filter_params)  # WHERE filters
-                params.extend(
-                    [
-                        query_vec_param,  # For ORDER BY
-                        candidate_k,  # For LIMIT
-                    ]
-                )
+                    adaptive_threshold = 0.55
+                    candidate_k = max(top_k * 2, top_k)
 
                 self.logger.info(
                     "hybrid_search executing",
                     extra_fields={
                         "top_k": top_k,
                         "use_reranker": use_reranker,
+                        "candidate_k": candidate_k,
                         "has_filters": bool(metadata_filters or compound_filter),
                         "classes_filter": classes_filter,
                         "where_sql": where_sql,
                     },
                 )
 
-                # DEBUG: Log the SQL and parameters
                 op, sim_expr = self._distance_operator()
-                sql_query = f"""
+                vector_sql = f"""
                     SELECT
                         id, tenant_id, classes, props, payload_ref, embedding,
                         metadata, refresh_policy, triggers, version,
                         last_refreshed, drift_score,
-                        {sim_expr} as vec_similarity,
-                        ts_rank(text_search_vector, websearch_to_tsquery('english', %s)) as ts_rank_score
+                        {sim_expr} as vec_similarity
                     FROM nodes
                     WHERE embedding IS NOT NULL
-                      AND text_search_vector IS NOT NULL
-                      {where_sql}
+                    {where_sql}
                     ORDER BY embedding {op} %s
                     LIMIT %s
-                    """
+                """
+                text_sql = f"""
+                    SELECT
+                        id, tenant_id, classes, props, payload_ref, embedding,
+                        metadata, refresh_policy, triggers, version,
+                        last_refreshed, drift_score,
+                        ts_rank(text_search_vector, websearch_to_tsquery('english', %s)) as ts_rank_score
+                    FROM nodes
+                    WHERE text_search_vector IS NOT NULL
+                      AND text_search_vector @@ websearch_to_tsquery('english', %s)
+                    {where_sql}
+                    ORDER BY ts_rank_score DESC, id
+                    LIMIT %s
+                """
+
+                vector_params = [query_vec_param]
+                vector_params.extend(filter_params)
+                vector_params.extend([query_vec_param, candidate_k])
+
+                text_params = [query_text, query_text]
+                text_params.extend(filter_params)
+                text_params.append(candidate_k)
+
                 self.logger.info(
                     "hybrid_search SQL",
                     extra_fields={
-                        "sql": sql_query.replace("\n", " ").strip(),
+                        "vector_sql": vector_sql.replace("\n", " ").strip(),
+                        "text_sql": text_sql.replace("\n", " ").strip(),
                         "filter_params": str(filter_params),
                         "candidate_k": candidate_k,
                     },
                 )
 
-                cur.execute(sql_query, params)
-
-                # Parse results and gather candidates
-                candidates: list[tuple[Node, float, float]] = []  # (node, vec_sim, ts_rank)
-                max_ts_rank = 0.0
-
-                for row in cur.fetchall():
-                    row_t = cast(NodeHybridRow, row)
+                cur.execute(vector_sql, vector_params)
+                vector_candidates: list[tuple[Node, float]] = []
+                vector_rank: dict[str, int] = {}
+                for rank, row in enumerate(cur.fetchall(), start=1):
+                    row_t = cast(NodeVecSimRow, row)
                     node = self._build_node_from_row(cast(Sequence[Any], row_t))
                     vec_sim = float(row_t[12])
-                    ts_rank = float(row_t[13])
+                    vector_candidates.append((node, vec_sim))
+                    vector_rank[node.id] = rank
+
+                cur.execute(text_sql, text_params)
+                text_candidates: list[tuple[Node, float]] = []
+                text_rank: dict[str, int] = {}
+                max_ts_rank = 0.0
+                for rank, row in enumerate(cur.fetchall(), start=1):
+                    row_t = cast(NodeRelevanceRow, row)
+                    node = self._build_node_from_row(cast(Sequence[Any], row_t))
+                    ts_rank = float(row_t[12])
                     max_ts_rank = max(max_ts_rank, ts_rank)
-                    candidates.append((node, vec_sim, ts_rank))
+                    text_candidates.append((node, ts_rank))
+                    text_rank[node.id] = rank
+
+                merged: dict[str, tuple[Node, float, float]] = {}
+                for node, vec_sim in vector_candidates:
+                    merged[node.id] = (node, vec_sim, 0.0)
+                for node, ts_rank in text_candidates:
+                    existing = merged.get(node.id)
+                    if existing:
+                        merged[node.id] = (existing[0], existing[1], max(existing[2], ts_rank))
+                    else:
+                        merged[node.id] = (node, 0.0, ts_rank)
+
+                candidates = list(merged.values())
 
                 # DEBUG: Log raw candidates with their classes
                 self.logger.info(
                     "hybrid_search raw candidates",
                     extra_fields={
                         "count": len(candidates),
+                        "vector_count": len(vector_candidates),
+                        "text_count": len(text_candidates),
                         "classes": [node.classes for node, _, _ in candidates[:5]],  # First 5
                     },
                 )
@@ -1343,33 +1376,16 @@ class GraphRepository:
                     rrf_k = 60
 
                 if rrf_enabled and candidates:
-                    # Compute ranks for vec_sim and ts_rank
-                    # Higher is better, so sort descending
-                    # Build maps: node_id -> rank
-                    by_vec = sorted(
-                        ((i, v[1]) for i, v in enumerate(candidates)),
-                        key=lambda x: x[1],
-                        reverse=True,
-                    )
-                    by_txt = sorted(
-                        ((i, v[2]) for i, v in enumerate(candidates)),
-                        key=lambda x: x[1],
-                        reverse=True,
-                    )
-
-                    vec_rank: dict[int, int] = {}
-                    txt_rank: dict[int, int] = {}
-                    for r, (idx, _) in enumerate(by_vec, start=1):
-                        vec_rank[idx] = r
-                    for r, (idx, _) in enumerate(by_txt, start=1):
-                        txt_rank[idx] = r
-
-                    # RRF fusion: score = 1/(k + rank_vec) + 1/(k + rank_text)
+                    # RRF fusion over independently ranked lexical and vector lists.
                     fused: list[tuple[Node, float]] = []
-                    for i, (node, _vec, _txt) in enumerate(candidates):
-                        rv = vec_rank.get(i, len(candidates))
-                        rt = txt_rank.get(i, len(candidates))
-                        rrf_score = (1.0 / (rrf_k + rv)) + (1.0 / (rrf_k + rt))
+                    for node, _vec, _txt in candidates:
+                        rrf_score = 0.0
+                        rv = vector_rank.get(node.id)
+                        rt = text_rank.get(node.id)
+                        if rv is not None:
+                            rrf_score += 1.0 / (rrf_k + rv)
+                        if rt is not None:
+                            rrf_score += 1.0 / (rrf_k + rt)
                         fused.append((node, rrf_score))
 
                     # Sort by fused score desc

@@ -2271,6 +2271,15 @@ def search_nodes(
                 }
             )
 
+        # Determine response metadata regardless of whether Prometheus is enabled.
+        if search_request.use_hybrid:
+            search_mode = "hybrid"
+            rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
+            score_type = "rrf_fused" if rrf_enabled else "weighted_fusion"
+        else:
+            search_mode = "vector"
+            score_type = "weighted_fusion" if search_request.use_weighted_score else "cosine"
+
         # Track Prometheus metrics (if enabled)
         if METRICS_ENABLED:
             latency_ms = (time.time() - start_time) * 1000
@@ -2278,13 +2287,11 @@ def search_nodes(
             # Determine mode and score_type
             if search_request.use_hybrid:
                 mode = "hybrid"
-                rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
-                score_type = "rrf_fused" if rrf_enabled else "weighted_fusion"
                 reranked = search_request.use_reranker
             else:
                 mode = "vector"
-                score_type = "weighted_fusion" if search_request.use_weighted_score else "cosine"
                 reranked = False
+            search_mode = mode
 
             track_search_request(
                 mode=mode,
@@ -2298,6 +2305,8 @@ def search_nodes(
             "query": search_request.query,
             "results": formatted_results,
             "count": len(formatted_results),
+            "search_mode": search_mode,
+            "score_type": score_type,
         }
     except Exception as e:
         logger.error("Search failed", extra_fields={"error": str(e), "query": search_request.query})
