@@ -2259,17 +2259,27 @@ def search_nodes(
             if isinstance(text_snippet, str) and len(text_snippet) > 300:
                 text_snippet = text_snippet[:300]
 
-            formatted_results.append(
-                {
-                    "id": node.id,
-                    "classes": node.classes,
-                    "props": node.props,
-                    "payload_ref": node.payload_ref,
-                    "metadata": node.metadata,
-                    "similarity": round(similarity, 4),
-                    "text": text_snippet,
-                }
-            )
+            # Recover raw cosine similarity from node embedding (same pattern as /ask)
+            vec_sim = None
+            try:
+                if node.embedding is not None:
+                    vec_sim = round(float(node.embedding @ query_embedding), 4)
+            except Exception:
+                vec_sim = None
+
+            result_dict: dict[str, Any] = {
+                "id": node.id,
+                "classes": node.classes,
+                "props": node.props,
+                "payload_ref": node.payload_ref,
+                "metadata": node.metadata,
+                "similarity": round(similarity, 4),
+                "text": text_snippet,
+            }
+            if vec_sim is not None:
+                result_dict["vector_similarity"] = vec_sim
+
+            formatted_results.append(result_dict)
 
         # Determine response metadata regardless of whether Prometheus is enabled.
         if search_request.use_hybrid:
