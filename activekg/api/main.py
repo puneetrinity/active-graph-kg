@@ -4133,6 +4133,13 @@ class CandidateResolveRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_url: str | None = None
     tenant_id: str | None = None
+    # Structured VantaHire provenance — forwarded to candidate_source_records structured
+    # columns so downstream Talent Search can scope by org/recruiter without JSONB scans.
+    org_id: str | None = None
+    job_id: str | None = None
+    effective_recruiter_id: str | None = None
+    created_by_user_id: str | None = None
+    resume_source: str | None = None
 
 
 class MatchedIdentifier(BaseModel):
@@ -4140,12 +4147,33 @@ class MatchedIdentifier(BaseModel):
     value_normalized: str
 
 
+class AttachedIdentifier(BaseModel):
+    identifier_type: str
+    value_normalized: str
+
+
+class SkippedIdentifier(BaseModel):
+    identifier_type: str | None = None
+    value: str | None = None
+    reason: str
+
+
+class ResolveConflict(BaseModel):
+    identifier_type: str
+    value_normalized: str
+    candidate_id: str | None = None
+    reason: str | None = None
+
+
 class CandidateResolveResponse(BaseModel):
     candidate_id: str | None
     resolution_status: str  # "created" | "matched" | "review_required"
     matched_identifier: MatchedIdentifier | None = None
+    attached_identifiers: list[AttachedIdentifier] = Field(default_factory=list)
+    skipped_identifiers: list[SkippedIdentifier] = Field(default_factory=list)
     source_record_id: str | None = None
-    conflicts: list[dict[str, Any]] | None = None
+    conflicts: list[ResolveConflict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 @app.post(
@@ -4175,7 +4203,10 @@ def resolve_candidate(
 
 
 def _execute_candidate_resolve(
-    payload: CandidateResolveRequest, *, tenant_id: str | None
+    payload: CandidateResolveRequest,
+    *,
+    tenant_id: str | None,
+    pre_skipped: list[SkippedIdentifier] | None = None,
 ) -> CandidateResolveResponse:
     if candidate_repo is None:
         raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
@@ -4183,9 +4214,13 @@ def _execute_candidate_resolve(
     if not payload.identifiers:
         raise HTTPException(status_code=400, detail="at least one identifier is required")
 
+    skipped: list[SkippedIdentifier] = list(pre_skipped or [])
+    warnings: list[str] = []
+
     # 1. Normalize all identifiers up-front; any failure is a 400.
     normalized: list[tuple[str, str, str, float | None, dict[str, Any]]] = []
     # (type, raw, normalized, confidence, metadata)
+    seen_norm: set[tuple[str, str]] = set()
     for ident in payload.identifiers:
         if ident.identifier_type not in IDENTIFIER_TYPES:
             raise HTTPException(
@@ -4196,6 +4231,17 @@ def _execute_candidate_resolve(
             norm = normalize_identifier(ident.identifier_type, ident.value)
         except IdentifierNormalizationError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        key = (ident.identifier_type, norm)
+        if key in seen_norm:
+            skipped.append(
+                SkippedIdentifier(
+                    identifier_type=ident.identifier_type,
+                    value=ident.value,
+                    reason="duplicate identifier in request",
+                )
+            )
+            continue
+        seen_norm.add(key)
         normalized.append(
             (ident.identifier_type, ident.value, norm, ident.confidence, ident.metadata or {})
         )
@@ -4216,11 +4262,12 @@ def _execute_candidate_resolve(
     # canonical candidates is an explicit operation, not a silent side-effect.
     if len(seen_candidate_ids) > 1:
         conflicts = [
-            {
-                "identifier_type": itype,
-                "value_normalized": norm,
-                "candidate_id": cid,
-            }
+            ResolveConflict(
+                identifier_type=itype,
+                value_normalized=norm,
+                candidate_id=cid,
+                reason="identifier resolves to a different canonical candidate",
+            )
             for itype, norm, cid in matches
         ]
         logger.warning(
@@ -4232,12 +4279,19 @@ def _execute_candidate_resolve(
                 "tenant_id": tenant_id,
             },
         )
+        warnings.append(
+            f"identifiers point at {len(seen_candidate_ids)} distinct candidates; "
+            "merging requires explicit review"
+        )
         return CandidateResolveResponse(
             candidate_id=None,
             resolution_status="review_required",
             matched_identifier=None,
+            attached_identifiers=[],
+            skipped_identifiers=skipped,
             source_record_id=None,
             conflicts=conflicts,
+            warnings=warnings,
         )
 
     profile = payload.profile or CandidateProfileInput()
@@ -4253,14 +4307,21 @@ def _execute_candidate_resolve(
             value_normalized=matched_norm,
         )
         # Fill in profile fields only when currently empty — never clobber
-        # canonical data with upstream drift.
+        # canonical data with upstream drift. Surface drift as a warning so
+        # callers can reconcile upstream.
         updates: dict[str, Any] = {}
         if profile.display_name and not candidate.display_name:
             updates["display_name"] = profile.display_name
+        elif profile.display_name and candidate.display_name and profile.display_name != candidate.display_name:
+            warnings.append("upstream display_name differs from canonical; canonical preserved")
         if profile.primary_email and not candidate.primary_email:
             updates["primary_email"] = profile.primary_email
+        elif profile.primary_email and candidate.primary_email and profile.primary_email.lower() != candidate.primary_email.lower():
+            warnings.append("upstream primary_email differs from canonical; canonical preserved")
         if profile.primary_phone and not candidate.primary_phone:
             updates["primary_phone"] = profile.primary_phone
+        elif profile.primary_phone and candidate.primary_phone and profile.primary_phone != candidate.primary_phone:
+            warnings.append("upstream primary_phone differs from canonical; canonical preserved")
         if updates:
             candidate_repo.update_candidate(
                 candidate.candidate_id, tenant_id=tenant_id, **updates
@@ -4279,9 +4340,11 @@ def _execute_candidate_resolve(
         matched_identifier = None
 
     # 4. Attach every (valid) identifier. Any conflict here means a concurrent
-    # writer grabbed the identifier between our lookup and insert — surface it
-    # and downgrade to review_required rather than silently re-pointing rows.
-    conflicts: list[dict[str, Any]] = []
+    # writer grabbed the identifier between our lookup and insert, or the
+    # identifier is already owned by a different candidate — surface it and
+    # downgrade to review_required rather than silently re-pointing rows.
+    attached: list[AttachedIdentifier] = []
+    conflicts: list[ResolveConflict] = []
     for itype, raw, norm, conf, meta in normalized:
         try:
             candidate_repo.add_identifier(
@@ -4293,22 +4356,36 @@ def _execute_candidate_resolve(
                 confidence=conf,
                 metadata=meta or None,
             )
+            attached.append(
+                AttachedIdentifier(identifier_type=itype, value_normalized=norm)
+            )
         except IdentifierConflict:
+            owner = candidate_repo.find_candidate_by_identifier(
+                itype, norm, tenant_id=tenant_id
+            )
+            owner_id = owner.candidate_id if owner is not None else None
             conflicts.append(
-                {
-                    "identifier_type": itype,
-                    "value_normalized": norm,
-                    "reason": "identifier owned by a different candidate",
-                }
+                ResolveConflict(
+                    identifier_type=itype,
+                    value_normalized=norm,
+                    candidate_id=owner_id,
+                    reason="identifier owned by a different candidate",
+                )
             )
 
     if conflicts:
+        warnings.append(
+            f"{len(conflicts)} identifier(s) could not be attached due to ownership conflicts"
+        )
         return CandidateResolveResponse(
             candidate_id=candidate.candidate_id,
             resolution_status="review_required",
             matched_identifier=matched_identifier,
+            attached_identifiers=attached,
+            skipped_identifiers=skipped,
             source_record_id=None,
             conflicts=conflicts,
+            warnings=warnings,
         )
 
     # 5. Upsert the source record — idempotent on
@@ -4322,6 +4399,11 @@ def _execute_candidate_resolve(
             source_record_id=payload.source_record_id,
             source_url=payload.source_url,
             payload=payload.payload or {},
+            org_id=payload.org_id,
+            job_id=payload.job_id,
+            effective_recruiter_id=payload.effective_recruiter_id,
+            created_by_user_id=payload.created_by_user_id,
+            resume_source=payload.resume_source,
         )
     )
 
@@ -4329,7 +4411,11 @@ def _execute_candidate_resolve(
         candidate_id=candidate.candidate_id,
         resolution_status=status,
         matched_identifier=matched_identifier,
+        attached_identifiers=attached,
+        skipped_identifiers=skipped,
         source_record_id=record.source_record_id,
+        conflicts=[],
+        warnings=warnings,
     )
 
 
@@ -4350,6 +4436,12 @@ class VantahireApplicationResolveRequest(BaseModel):
     resume_id: str | None = None
     job_id: str | None = None
     org_id: str | None = None
+
+    # Recruiter/uploader provenance — written to candidate_source_records structured
+    # columns so Talent Search can filter by recruiter or org without JSONB scans.
+    effective_recruiter_id: str | None = None
+    created_by_user_id: str | None = None
+    resume_source: str | None = None
 
     applicant_name: str | None = None
     email: str | None = None
@@ -4473,6 +4565,11 @@ def resolve_candidate_from_vantahire_application(
     if skipped:
         source_payload["_skipped_identifiers"] = skipped
 
+    # Ensure provenance fields are always present in the payload under canonical keys
+    # so consumers that read raw JSONB can still find them.
+    source_payload["source"] = "vantahire"
+    source_payload["source_record_type"] = "application"
+
     resolve_request = CandidateResolveRequest(
         source="vantahire",
         source_record_type="application",
@@ -4482,11 +4579,11 @@ def resolve_candidate_from_vantahire_application(
             display_name=payload.applicant_name,
             primary_email=payload.email,
             primary_phone=payload.phone,
+            # org_id and job_id are NOT put on the canonical candidate — they are
+            # VantaHire-specific scoping metadata and live on the source record only.
             props={
                 k: v
                 for k, v in {
-                    "job_id": payload.job_id,
-                    "org_id": payload.org_id,
                     "resume_gcp_url": payload.resume_gcp_url,
                     "skills": payload.skills or None,
                 }.items()
@@ -4497,6 +4594,12 @@ def resolve_candidate_from_vantahire_application(
         metadata=payload.source_metadata or {},
         source_url=payload.resume_gcp_url,
         tenant_id=payload.tenant_id,
+        # Structured provenance — written to candidate_source_records columns
+        org_id=payload.org_id,
+        job_id=payload.job_id,
+        effective_recruiter_id=payload.effective_recruiter_id,
+        created_by_user_id=payload.created_by_user_id,
+        resume_source=payload.resume_source,
     )
 
     if JWT_ENABLED and claims:
@@ -4504,7 +4607,17 @@ def resolve_candidate_from_vantahire_application(
     else:
         tenant_id = payload.tenant_id
 
-    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id)
+    pre_skipped = [
+        SkippedIdentifier(
+            identifier_type=s.get("identifier_type"),
+            value=s.get("value"),
+            reason=s.get("reason", ""),
+        )
+        for s in skipped
+    ]
+    return _execute_candidate_resolve(
+        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+    )
 
 
 # ----------------------------------------------------------------------
@@ -4724,4 +4837,14 @@ def resolve_candidate_from_signal(
     else:
         tenant_id = payload.tenant_id
 
-    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id)
+    pre_skipped = [
+        SkippedIdentifier(
+            identifier_type=s.get("identifier_type"),
+            value=s.get("value"),
+            reason=s.get("reason", ""),
+        )
+        for s in skipped
+    ]
+    return _execute_candidate_resolve(
+        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+    )

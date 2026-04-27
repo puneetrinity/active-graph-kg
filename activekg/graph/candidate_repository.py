@@ -323,8 +323,9 @@ class CandidateRepository:
                     """
                     INSERT INTO candidate_source_records (
                         id, candidate_id, tenant_id, source, source_record_type,
-                        source_record_id, source_url, payload, payload_ref, fetched_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        source_record_id, source_url, payload, payload_ref, fetched_at,
+                        org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tenant_id, source, source_record_type, source_record_id)
                     DO UPDATE SET
                         candidate_id = EXCLUDED.candidate_id,
@@ -332,6 +333,11 @@ class CandidateRepository:
                         payload = EXCLUDED.payload,
                         payload_ref = COALESCE(EXCLUDED.payload_ref, candidate_source_records.payload_ref),
                         fetched_at = COALESCE(EXCLUDED.fetched_at, candidate_source_records.fetched_at),
+                        org_id = COALESCE(EXCLUDED.org_id, candidate_source_records.org_id),
+                        job_id = COALESCE(EXCLUDED.job_id, candidate_source_records.job_id),
+                        effective_recruiter_id = COALESCE(EXCLUDED.effective_recruiter_id, candidate_source_records.effective_recruiter_id),
+                        created_by_user_id = COALESCE(EXCLUDED.created_by_user_id, candidate_source_records.created_by_user_id),
+                        resume_source = COALESCE(EXCLUDED.resume_source, candidate_source_records.resume_source),
                         updated_at = now()
                     RETURNING id
                     """,
@@ -346,6 +352,11 @@ class CandidateRepository:
                         json.dumps(record.payload),
                         record.payload_ref,
                         record.fetched_at,
+                        record.org_id,
+                        record.job_id,
+                        record.effective_recruiter_id,
+                        record.created_by_user_id,
+                        record.resume_source,
                     ),
                 )
                 record.id = str(cur.fetchone()[0])
@@ -361,7 +372,8 @@ class CandidateRepository:
         sql = [
             """
             SELECT id, candidate_id, tenant_id, source, source_record_type, source_record_id,
-                   source_url, payload, payload_ref, fetched_at, created_at, updated_at
+                   source_url, payload, payload_ref, fetched_at, created_at, updated_at,
+                   org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source
             FROM candidate_source_records
             WHERE candidate_id = %s
             """
@@ -380,6 +392,73 @@ class CandidateRepository:
                 return [self._row_to_source_record(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------
+    # VantaHire provenance queries
+    # ------------------------------------------------------------------
+
+    def find_candidates_by_vantahire_org(
+        self, org_id: str, *, tenant_id: str | None = None
+    ) -> list[Candidate]:
+        """Return canonical candidates that have a VantaHire source record for org_id."""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT c.candidate_id, c.tenant_id, c.scope, c.display_name,
+                           c.primary_email, c.primary_phone, c.props, c.metadata,
+                           c.node_id, c.created_at, c.updated_at
+                    FROM candidates c
+                    JOIN candidate_source_records sr ON sr.candidate_id = c.candidate_id
+                    WHERE sr.source = 'vantahire'
+                      AND sr.org_id = %s
+                      AND sr.tenant_id IS NOT DISTINCT FROM %s
+                    """,
+                    (org_id, tenant_id),
+                )
+                return [self._row_to_candidate(r) for r in cur.fetchall()]
+
+    def find_candidates_by_vantahire_recruiter(
+        self, recruiter_id: str, *, tenant_id: str | None = None
+    ) -> list[Candidate]:
+        """Return canonical candidates with a VantaHire record for effective_recruiter_id."""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT c.candidate_id, c.tenant_id, c.scope, c.display_name,
+                           c.primary_email, c.primary_phone, c.props, c.metadata,
+                           c.node_id, c.created_at, c.updated_at
+                    FROM candidates c
+                    JOIN candidate_source_records sr ON sr.candidate_id = c.candidate_id
+                    WHERE sr.source = 'vantahire'
+                      AND sr.effective_recruiter_id = %s
+                      AND sr.tenant_id IS NOT DISTINCT FROM %s
+                    """,
+                    (recruiter_id, tenant_id),
+                )
+                return [self._row_to_candidate(r) for r in cur.fetchall()]
+
+    def find_candidates_by_vantahire_uploader(
+        self, user_id: str, *, tenant_id: str | None = None
+    ) -> list[Candidate]:
+        """Return canonical candidates with a VantaHire record created by user_id."""
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT c.candidate_id, c.tenant_id, c.scope, c.display_name,
+                           c.primary_email, c.primary_phone, c.props, c.metadata,
+                           c.node_id, c.created_at, c.updated_at
+                    FROM candidates c
+                    JOIN candidate_source_records sr ON sr.candidate_id = c.candidate_id
+                    WHERE sr.source = 'vantahire'
+                      AND sr.created_by_user_id = %s
+                      AND sr.tenant_id IS NOT DISTINCT FROM %s
+                    """,
+                    (user_id, tenant_id),
+                )
+                return [self._row_to_candidate(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
     # high-level merge helper
     # ------------------------------------------------------------------
 
@@ -395,6 +474,11 @@ class CandidateRepository:
         source_url: str | None = None,
         tenant_id: str | None = None,
         display_name: str | None = None,
+        org_id: str | None = None,
+        job_id: str | None = None,
+        effective_recruiter_id: str | None = None,
+        created_by_user_id: str | None = None,
+        resume_source: str | None = None,
     ) -> Candidate:
         """Resolve or create a canonical candidate for an incoming source record.
 
@@ -464,6 +548,11 @@ class CandidateRepository:
                 source_url=source_url,
                 payload=payload or {},
                 payload_ref=payload_ref,
+                org_id=org_id,
+                job_id=job_id,
+                effective_recruiter_id=effective_recruiter_id,
+                created_by_user_id=created_by_user_id,
+                resume_source=resume_source,
             )
         )
         return candidate
@@ -540,6 +629,11 @@ class CandidateRepository:
             fetched_at=row[9],
             created_at=row[10],
             updated_at=row[11],
+            org_id=row[12],
+            job_id=row[13],
+            effective_recruiter_id=row[14],
+            created_by_user_id=row[15],
+            resume_source=row[16],
         )
 
 

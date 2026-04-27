@@ -91,6 +91,13 @@ class CandidateSourceRecord:
     payload: dict[str, Any] = field(default_factory=dict)
     payload_ref: str | None = None
     fetched_at: datetime | None = None
+    # Structured VantaHire provenance — populated for source='vantahire' records
+    # so downstream Talent Search can filter by org/job/recruiter without JSONB scans.
+    org_id: str | None = None
+    job_id: str | None = None
+    effective_recruiter_id: str | None = None
+    created_by_user_id: str | None = None
+    resume_source: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
