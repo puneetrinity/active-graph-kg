@@ -4099,6 +4099,10 @@ def get_node_versions(
 # Candidate identity resolution
 # ----------------------------------------------------------------------
 
+STRONG_SIGNAL_TYPES: frozenset[str] = frozenset(
+    {"linkedin_url", "github_url", "medium_url", "email", "phone"}
+)
+
 
 class CandidateIdentifierInput(BaseModel):
     identifier_type: str = Field(..., description="Type of identifier (email, linkedin_url, ...)")
@@ -4174,6 +4178,44 @@ class CandidateResolveResponse(BaseModel):
     source_record_id: str | None = None
     conflicts: list[ResolveConflict] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+def _evaluate_strong_signal_mismatch(
+    incoming_normalized: list[tuple[str, str, str, Any, Any]],
+    canonical_identifiers: list,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """Compare incoming strong-signal identifiers against the canonical candidate.
+
+    Returns:
+        strong_matches: (itype, incoming_norm) where values agree with canonical
+        strong_mismatches: (itype, incoming_norm, canonical_norm) where values conflict
+
+    Types absent on the canonical candidate are ignored (not mismatches).
+    """
+    canonical_by_type: dict[str, set[str]] = {}
+    for ident in canonical_identifiers:
+        if ident.identifier_type in STRONG_SIGNAL_TYPES:
+            canonical_by_type.setdefault(ident.identifier_type, set()).add(ident.value_normalized)
+
+    strong_matches: list[tuple[str, str]] = []
+    strong_mismatches: list[tuple[str, str, str]] = []
+
+    seen_incoming: set[str] = set()
+    for itype, _raw, norm, *_ in incoming_normalized:
+        if itype not in STRONG_SIGNAL_TYPES:
+            continue
+        if itype not in canonical_by_type:
+            continue
+        if itype in seen_incoming:
+            continue
+        seen_incoming.add(itype)
+        if norm in canonical_by_type[itype]:
+            strong_matches.append((itype, norm))
+        else:
+            canonical_norm = next(iter(canonical_by_type[itype]))
+            strong_mismatches.append((itype, norm, canonical_norm))
+
+    return strong_matches, strong_mismatches
 
 
 @app.post(
@@ -4296,10 +4338,86 @@ def _execute_candidate_resolve(
 
     profile = payload.profile or CandidateProfileInput()
 
+    # Identifiers blocked from attachment due to a tolerated strong-signal mismatch.
+    mismatch_blocked: set[tuple[str, str]] = set()
+
     if len(seen_candidate_ids) == 1:
         candidate_id = next(iter(seen_candidate_ids))
         candidate = candidate_repo.get_candidate(candidate_id, tenant_id=tenant_id)
         assert candidate is not None
+
+        # 3a. Strong-signal mismatch evaluation — compare incoming strong-signal
+        # identifiers against the canonical candidate's existing identifiers of the
+        # same type. Absent types are ignored; present-but-different types are conflicts.
+        canonical_identifiers = candidate_repo.list_identifiers(candidate_id, tenant_id=tenant_id)
+        strong_matches, strong_mismatches = _evaluate_strong_signal_mismatch(
+            normalized, canonical_identifiers
+        )
+
+        if strong_mismatches:
+            n_matches = len(strong_matches)
+            n_mismatches = len(strong_mismatches)
+            # Tolerate only the case of ≥2 corroborating strong matches vs exactly 1 conflict.
+            tolerated = n_matches >= 2 and n_mismatches == 1
+
+            if not tolerated:
+                mismatch_conflicts = [
+                    ResolveConflict(
+                        identifier_type=itype,
+                        value_normalized=incoming_norm,
+                        candidate_id=candidate_id,
+                        reason=(
+                            f"strong signal mismatch: incoming {itype}={incoming_norm!r} "
+                            f"conflicts with canonical value {canonical_norm!r}"
+                        ),
+                    )
+                    for itype, incoming_norm, canonical_norm in strong_mismatches
+                ]
+                logger.warning(
+                    "candidate resolve flagged review_required due to strong-signal mismatch",
+                    extra_fields={
+                        "source": payload.source,
+                        "source_record_id": payload.source_record_id,
+                        "strong_matches": n_matches,
+                        "strong_mismatches": n_mismatches,
+                        "candidate_id": candidate_id,
+                        "tenant_id": tenant_id,
+                    },
+                )
+                warnings.append(
+                    f"strong-signal mismatch: {n_mismatches} conflict(s) against "
+                    f"{n_matches} match(es); manual review required"
+                )
+                return CandidateResolveResponse(
+                    candidate_id=None,
+                    resolution_status="review_required",
+                    matched_identifier=None,
+                    attached_identifiers=[],
+                    skipped_identifiers=skipped,
+                    source_record_id=None,
+                    conflicts=mismatch_conflicts,
+                    warnings=warnings,
+                )
+            else:
+                # Tolerated: accept the match but block the mismatching identifier from
+                # being attached so canonical strong-signal values are not diluted.
+                for itype, incoming_norm, canonical_norm in strong_mismatches:
+                    mismatch_blocked.add((itype, incoming_norm))
+                    skipped.append(
+                        SkippedIdentifier(
+                            identifier_type=itype,
+                            value=incoming_norm,
+                            reason=(
+                                f"strong signal mismatch: incoming {itype}={incoming_norm!r} "
+                                f"conflicts with canonical value {canonical_norm!r}; not attached"
+                            ),
+                        )
+                    )
+                warnings.append(
+                    f"strong-signal mismatch tolerated: {n_matches} match(es) outweigh "
+                    f"{n_mismatches} mismatch(es); conflicting identifier(s) not attached"
+                )
+
         status = "matched"
         matched_itype, matched_norm, _ = matches[0]
         matched_identifier = MatchedIdentifier(
@@ -4343,9 +4461,12 @@ def _execute_candidate_resolve(
     # writer grabbed the identifier between our lookup and insert, or the
     # identifier is already owned by a different candidate — surface it and
     # downgrade to review_required rather than silently re-pointing rows.
+    # Identifiers blocked by the strong-signal mismatch rule are also skipped.
     attached: list[AttachedIdentifier] = []
     conflicts: list[ResolveConflict] = []
     for itype, raw, norm, conf, meta in normalized:
+        if (itype, norm) in mismatch_blocked:
+            continue
         try:
             candidate_repo.add_identifier(
                 candidate.candidate_id,
