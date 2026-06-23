@@ -16,6 +16,7 @@ create a new canonical row. Source payloads are recorded verbatim in
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from psycopg_pool import ConnectionPool
@@ -26,7 +27,7 @@ from activekg.graph.candidate_identifiers import (
     IdentifierNormalizationError,
     normalize_identifier,
 )
-from activekg.graph.models import Candidate, CandidateIdentifier, CandidateSourceRecord
+from activekg.graph.models import Candidate, CandidateIdentifier, CandidateSourceRecord, SignalTagSearchRow
 
 
 class CandidateRepository:
@@ -324,8 +325,9 @@ class CandidateRepository:
                     INSERT INTO candidate_source_records (
                         id, candidate_id, tenant_id, source, source_record_type,
                         source_record_id, source_url, payload, payload_ref, fetched_at,
-                        org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source,
+                        job_tags
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tenant_id, source, source_record_type, source_record_id)
                     DO UPDATE SET
                         candidate_id = EXCLUDED.candidate_id,
@@ -338,6 +340,7 @@ class CandidateRepository:
                         effective_recruiter_id = COALESCE(EXCLUDED.effective_recruiter_id, candidate_source_records.effective_recruiter_id),
                         created_by_user_id = COALESCE(EXCLUDED.created_by_user_id, candidate_source_records.created_by_user_id),
                         resume_source = COALESCE(EXCLUDED.resume_source, candidate_source_records.resume_source),
+                        job_tags = EXCLUDED.job_tags,
                         updated_at = now()
                     RETURNING id
                     """,
@@ -357,6 +360,7 @@ class CandidateRepository:
                         record.effective_recruiter_id,
                         record.created_by_user_id,
                         record.resume_source,
+                        record.job_tags or [],
                     ),
                 )
                 record.id = str(cur.fetchone()[0])
@@ -373,7 +377,8 @@ class CandidateRepository:
             """
             SELECT id, candidate_id, tenant_id, source, source_record_type, source_record_id,
                    source_url, payload, payload_ref, fetched_at, created_at, updated_at,
-                   org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source
+                   org_id, job_id, effective_recruiter_id, created_by_user_id, resume_source,
+                   job_tags
             FROM candidate_source_records
             WHERE candidate_id = %s
             """
@@ -457,6 +462,91 @@ class CandidateRepository:
                     (user_id, tenant_id),
                 )
                 return [self._row_to_candidate(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Signal tag search
+    # ------------------------------------------------------------------
+
+    def search_candidates_by_signal_tags(
+        self,
+        tags: list[str],
+        *,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[SignalTagSearchRow]:
+        """Return candidates whose Signal source record job_tags overlap with *tags*.
+
+        A candidate's source record is considered a match when the number of
+        query tags present in its stored tags is >= ceil(0.7 * len(tags)).
+        Results are ranked by overlap count descending. If a candidate has
+        multiple qualifying Signal source records only the highest-overlap record
+        is returned. Never returns more than *limit* rows (max 100).
+        """
+        if not tags:
+            return []
+        limit = min(limit, 100)
+        min_overlap = math.ceil(0.7 * len(tags))
+        query_tags = tags  # already normalized by the caller
+
+        with self.pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH tag_matches AS (
+                        SELECT
+                            c.candidate_id,
+                            c.display_name,
+                            c.primary_email,
+                            c.scope,
+                            c.tenant_id,
+                            csr.source_record_id AS signal_source_record_id,
+                            csr.job_tags AS stored_tags,
+                            cardinality(ARRAY(
+                                SELECT unnest(csr.job_tags)
+                                INTERSECT
+                                SELECT unnest(%s::text[])
+                            )) AS overlap_count
+                        FROM candidates c
+                        JOIN candidate_source_records csr
+                            ON csr.candidate_id = c.candidate_id
+                        WHERE csr.source = 'signal'
+                          AND csr.job_tags && %s::text[]
+                          AND csr.tenant_id IS NOT DISTINCT FROM %s
+                    ),
+                    filtered AS (
+                        SELECT * FROM tag_matches WHERE overlap_count >= %s
+                    ),
+                    deduped AS (
+                        SELECT DISTINCT ON (candidate_id) *
+                        FROM filtered
+                        ORDER BY candidate_id, overlap_count DESC
+                    )
+                    SELECT * FROM deduped
+                    ORDER BY overlap_count DESC, candidate_id
+                    LIMIT %s
+                    """,
+                    (query_tags, query_tags, tenant_id, min_overlap, limit),
+                )
+                rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            overlap_count = int(row[7])
+            overlap_ratio = overlap_count / len(tags) if tags else 0.0
+            results.append(
+                SignalTagSearchRow(
+                    candidate_id=str(row[0]),
+                    display_name=row[1],
+                    primary_email=row[2],
+                    scope=row[3],
+                    tenant_id=row[4],
+                    signal_source_record_id=str(row[5]),
+                    stored_tags=list(row[6]) if row[6] else [],
+                    overlap_count=overlap_count,
+                    overlap_ratio=overlap_ratio,
+                )
+            )
+        return results
 
     # ------------------------------------------------------------------
     # high-level merge helper
@@ -634,6 +724,7 @@ class CandidateRepository:
             effective_recruiter_id=row[14],
             created_by_user_id=row[15],
             resume_source=row[16],
+            job_tags=list(row[17]) if row[17] else [],
         )
 
 

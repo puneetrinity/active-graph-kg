@@ -98,6 +98,24 @@ class CandidateSourceRecord:
     effective_recruiter_id: str | None = None
     created_by_user_id: str | None = None
     resume_source: str | None = None
+    # Structured Signal tags — populated for source='signal' records so tag-based
+    # candidate search uses a GIN index rather than scanning JSONB payloads.
+    job_tags: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class SignalTagSearchRow:
+    """A single result from a Signal tag-based candidate search."""
+
+    candidate_id: str
+    display_name: str | None
+    primary_email: str | None
+    scope: str
+    tenant_id: str | None
+    signal_source_record_id: str
+    stored_tags: list[str]
+    overlap_count: int
+    overlap_ratio: float

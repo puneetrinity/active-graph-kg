@@ -4144,6 +4144,9 @@ class CandidateResolveRequest(BaseModel):
     effective_recruiter_id: str | None = None
     created_by_user_id: str | None = None
     resume_source: str | None = None
+    # Structured Signal tags — forwarded to candidate_source_records.job_tags so
+    # tag-based candidate search uses a GIN index rather than scanning JSONB payloads.
+    job_tags: list[str] = Field(default_factory=list)
 
 
 class MatchedIdentifier(BaseModel):
@@ -4178,6 +4181,29 @@ class CandidateResolveResponse(BaseModel):
     source_record_id: str | None = None
     conflicts: list[ResolveConflict] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class CandidateTagSearchResult(BaseModel):
+    candidate_id: str
+    display_name: str | None = None
+    primary_email: str | None = None
+    signal_candidate_id: str
+    stored_tags: list[str]
+    matched_tags: list[str]
+    overlap_count: int
+    overlap_ratio: float
+
+
+class CandidateSearchByTagsRequest(BaseModel):
+    tags: list[str]
+    tenant_id: str | None = None
+    limit: int = Field(default=100, ge=1, le=100)
+
+
+class CandidateSearchByTagsResponse(BaseModel):
+    results: list[CandidateTagSearchResult]
+    query_tags: list[str]
+    total: int
 
 
 def _evaluate_strong_signal_mismatch(
@@ -4525,6 +4551,7 @@ def _execute_candidate_resolve(
             effective_recruiter_id=payload.effective_recruiter_id,
             created_by_user_id=payload.created_by_user_id,
             resume_source=payload.resume_source,
+            job_tags=list(payload.job_tags) if payload.job_tags else [],
         )
     )
 
@@ -4785,6 +4812,7 @@ class SignalCandidateResolveRequest(BaseModel):
     request_id: str | None = None
     external_job_id: str | None = None
 
+    tags: list[str] = Field(default_factory=list)
     sourcing_context: dict[str, Any] = Field(default_factory=dict)
     source_metadata: dict[str, Any] = Field(default_factory=dict)
     tenant_id: str | None = None
@@ -4803,6 +4831,18 @@ _SIGNAL_PLATFORM_TO_ITYPE: dict[str, str] = {
     "portfolio": "portfolio_url",
     "website": "website_url",
 }
+
+
+def _normalize_signal_tags(tags: list[str]) -> list[str]:
+    """Trim, lowercase, deduplicate, and drop empty strings from a tag list."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in tags:
+        normalized = t.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
 
 
 def _guess_itype_from_url(url: str) -> str:
@@ -4951,6 +4991,7 @@ def resolve_candidate_from_signal(
         metadata=payload.source_metadata or {},
         source_url=payload.linkedinUrl,
         tenant_id=payload.tenant_id,
+        job_tags=_normalize_signal_tags(payload.tags),
     )
 
     if JWT_ENABLED and claims:
@@ -4968,4 +5009,59 @@ def resolve_candidate_from_signal(
     ]
     return _execute_candidate_resolve(
         resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+    )
+
+
+@app.post(
+    "/candidates/search/by-tags",
+    response_model=CandidateSearchByTagsResponse,
+    dependencies=[Depends(require_scope("kg:read"))],
+)
+def search_candidates_by_tags(
+    payload: CandidateSearchByTagsRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Search for candidates whose Signal source record tags overlap with the query tags.
+
+    A candidate is returned when at least 70 % of the query tags are present in
+    its stored Signal ``job_tags``. Results are ranked by overlap ratio descending.
+    At most 100 candidates are returned.
+    """
+    if candidate_repo is None:
+        raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
+
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = payload.tenant_id
+
+    normalized_query_tags = _normalize_signal_tags(payload.tags)
+    if not normalized_query_tags:
+        return CandidateSearchByTagsResponse(results=[], query_tags=[], total=0)
+
+    rows = candidate_repo.search_candidates_by_signal_tags(
+        normalized_query_tags,
+        tenant_id=tenant_id,
+        limit=payload.limit,
+    )
+
+    results = [
+        CandidateTagSearchResult(
+            candidate_id=row.candidate_id,
+            display_name=row.display_name,
+            primary_email=row.primary_email,
+            signal_candidate_id=row.signal_source_record_id,
+            stored_tags=row.stored_tags,
+            matched_tags=sorted(set(normalized_query_tags) & set(row.stored_tags)),
+            overlap_count=row.overlap_count,
+            overlap_ratio=row.overlap_ratio,
+        )
+        for row in rows
+    ]
+
+    return CandidateSearchByTagsResponse(
+        results=results,
+        query_tags=normalized_query_tags,
+        total=len(results),
     )
