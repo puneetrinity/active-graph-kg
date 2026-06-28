@@ -54,8 +54,10 @@ class CandidateRepository:
                     """
                     INSERT INTO candidates (
                         candidate_id, tenant_id, scope, display_name,
-                        primary_email, primary_phone, props, metadata, node_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        primary_email, primary_phone, props, metadata, node_id,
+                        profile, headline, location_raw, skills, seniority_level,
+                        linkedin_url, linkedin_id, profile_picture_url
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING candidate_id
                     """,
                     (
@@ -68,6 +70,14 @@ class CandidateRepository:
                         json.dumps(candidate.props),
                         json.dumps(candidate.metadata),
                         candidate.node_id,
+                        json.dumps(candidate.profile),
+                        candidate.headline,
+                        candidate.location_raw,
+                        candidate.skills,
+                        candidate.seniority_level,
+                        candidate.linkedin_url,
+                        candidate.linkedin_id,
+                        candidate.profile_picture_url,
                     ),
                 )
                 return str(cur.fetchone()[0])
@@ -81,7 +91,9 @@ class CandidateRepository:
                     cur.execute(
                         """
                         SELECT candidate_id, tenant_id, scope, display_name, primary_email,
-                               primary_phone, props, metadata, node_id, created_at, updated_at
+                               primary_phone, props, metadata, node_id, created_at, updated_at,
+                               profile, headline, location_raw, skills, seniority_level,
+                               linkedin_url, linkedin_id, profile_picture_url
                         FROM candidates WHERE candidate_id = %s
                         """,
                         (candidate_id,),
@@ -90,7 +102,9 @@ class CandidateRepository:
                     cur.execute(
                         """
                         SELECT candidate_id, tenant_id, scope, display_name, primary_email,
-                               primary_phone, props, metadata, node_id, created_at, updated_at
+                               primary_phone, props, metadata, node_id, created_at, updated_at,
+                               profile, headline, location_raw, skills, seniority_level,
+                               linkedin_url, linkedin_id, profile_picture_url
                         FROM candidates
                         WHERE candidate_id = %s AND tenant_id IS NOT DISTINCT FROM %s
                         """,
@@ -109,6 +123,14 @@ class CandidateRepository:
         props: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         node_id: str | None = None,
+        profile: dict[str, Any] | None = None,
+        headline: str | None = None,
+        location_raw: str | None = None,
+        skills: list[str] | None = None,
+        seniority_level: str | None = None,
+        linkedin_url: str | None = None,
+        linkedin_id: str | None = None,
+        profile_picture_url: str | None = None,
         tenant_id: str | None = None,
     ) -> bool:
         sets: list[str] = ["updated_at = now()"]
@@ -131,6 +153,30 @@ class CandidateRepository:
         if node_id is not None:
             sets.append("node_id = %s")
             params.append(node_id)
+        if profile is not None:
+            sets.append("profile = %s")
+            params.append(json.dumps(profile))
+        if headline is not None:
+            sets.append("headline = %s")
+            params.append(headline)
+        if location_raw is not None:
+            sets.append("location_raw = %s")
+            params.append(location_raw)
+        if skills is not None:
+            sets.append("skills = %s")
+            params.append(skills)
+        if seniority_level is not None:
+            sets.append("seniority_level = %s")
+            params.append(seniority_level)
+        if linkedin_url is not None:
+            sets.append("linkedin_url = %s")
+            params.append(linkedin_url)
+        if linkedin_id is not None:
+            sets.append("linkedin_id = %s")
+            params.append(linkedin_id)
+        if profile_picture_url is not None:
+            sets.append("profile_picture_url = %s")
+            params.append(profile_picture_url)
         if len(sets) == 1:
             return True
 
@@ -499,6 +545,7 @@ class CandidateRepository:
                             c.primary_email,
                             c.scope,
                             c.tenant_id,
+                            c.profile,
                             csr.source_record_id AS signal_source_record_id,
                             csr.job_tags AS stored_tags,
                             cardinality(ARRAY(
@@ -531,7 +578,7 @@ class CandidateRepository:
 
         results = []
         for row in rows:
-            overlap_count = int(row[7])
+            overlap_count = int(row[8])
             overlap_ratio = overlap_count / len(tags) if tags else 0.0
             results.append(
                 SignalTagSearchRow(
@@ -540,8 +587,9 @@ class CandidateRepository:
                     primary_email=row[2],
                     scope=row[3],
                     tenant_id=row[4],
-                    signal_source_record_id=str(row[5]),
-                    stored_tags=list(row[6]) if row[6] else [],
+                    profile=row[5] if row[5] else {},
+                    signal_source_record_id=str(row[6]),
+                    stored_tags=list(row[7]) if row[7] else [],
                     overlap_count=overlap_count,
                     overlap_ratio=overlap_ratio,
                 )
@@ -686,6 +734,14 @@ class CandidateRepository:
             node_id=str(row[8]) if row[8] else None,
             created_at=row[9],
             updated_at=row[10],
+            profile=row[11] if len(row) > 11 and row[11] else {},
+            headline=row[12] if len(row) > 12 else None,
+            location_raw=row[13] if len(row) > 13 else None,
+            skills=row[14] if len(row) > 14 and row[14] else [],
+            seniority_level=row[15] if len(row) > 15 else None,
+            linkedin_url=row[16] if len(row) > 16 else None,
+            linkedin_id=row[17] if len(row) > 17 else None,
+            profile_picture_url=row[18] if len(row) > 18 else None,
         )
 
     @staticmethod

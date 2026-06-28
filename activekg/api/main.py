@@ -4122,6 +4122,14 @@ class CandidateProfileInput(BaseModel):
     primary_email: str | None = None
     primary_phone: str | None = None
     props: dict[str, Any] = Field(default_factory=dict)
+    profile: dict[str, Any] | None = None
+    headline: str | None = None
+    location_raw: str | None = None
+    skills: list[str] | None = None
+    seniority_level: str | None = None
+    linkedin_url: str | None = None
+    linkedin_id: str | None = None
+    profile_picture_url: str | None = None
 
 
 class CandidateResolveRequest(BaseModel):
@@ -4192,6 +4200,7 @@ class CandidateTagSearchResult(BaseModel):
     matched_tags: list[str]
     overlap_count: int
     overlap_ratio: float
+    profile: dict[str, Any] | None = None
 
 
 class CandidateSearchByTagsRequest(BaseModel):
@@ -4464,8 +4473,25 @@ def _execute_candidate_resolve(
             warnings.append("upstream primary_email differs from canonical; canonical preserved")
         if profile.primary_phone and not candidate.primary_phone:
             updates["primary_phone"] = profile.primary_phone
-        elif profile.primary_phone and candidate.primary_phone and profile.primary_phone != candidate.primary_phone:
+        if profile.primary_phone and candidate.primary_phone and profile.primary_phone != candidate.primary_phone:
             warnings.append("upstream primary_phone differs from canonical; canonical preserved")
+        if profile.profile is not None:
+            updates["profile"] = profile.profile
+        if profile.headline is not None:
+            updates["headline"] = profile.headline
+        if profile.location_raw is not None:
+            updates["location_raw"] = profile.location_raw
+        if profile.skills is not None:
+            updates["skills"] = profile.skills
+        if profile.seniority_level is not None:
+            updates["seniority_level"] = profile.seniority_level
+        if profile.linkedin_url is not None:
+            updates["linkedin_url"] = profile.linkedin_url
+        if profile.linkedin_id is not None:
+            updates["linkedin_id"] = profile.linkedin_id
+        if profile.profile_picture_url is not None:
+            updates["profile_picture_url"] = profile.profile_picture_url
+
         if updates:
             candidate_repo.update_candidate(
                 candidate.candidate_id, tenant_id=tenant_id, **updates
@@ -4478,6 +4504,14 @@ def _execute_candidate_resolve(
             primary_phone=profile.primary_phone,
             props=profile.props or {},
             metadata=payload.metadata or {},
+            profile=profile.profile or {},
+            headline=profile.headline,
+            location_raw=profile.location_raw,
+            skills=profile.skills or [],
+            seniority_level=profile.seniority_level,
+            linkedin_url=profile.linkedin_url,
+            linkedin_id=profile.linkedin_id,
+            profile_picture_url=profile.profile_picture_url,
         )
         candidate_repo.create_candidate(candidate)
         status = "created"
@@ -4811,6 +4845,7 @@ class SignalCandidateResolveRequest(BaseModel):
     rank: int | float | None = None
     request_id: str | None = None
     external_job_id: str | None = None
+    crustdata: dict[str, Any] | None = Field(default=None, description="Raw Crustdata profile blob")
 
     tags: list[str] = Field(default_factory=list)
     sourcing_context: dict[str, Any] = Field(default_factory=dict)
@@ -4978,6 +5013,38 @@ def resolve_candidate_from_signal(
         if v is not None
     }
 
+    crustdata = payload.crustdata or {}
+    
+    # Extract fields from crustdata for indexing
+    headline_idx = payload.headline or crustdata.get("basic_profile", {}).get("headline")
+    
+    location_raw = None
+    if loc := crustdata.get("basic_profile", {}).get("location"):
+        location_raw = loc.get("full_location") or loc.get("raw")
+        
+    skills_idx = []
+    if s := crustdata.get("skills"):
+        skills_idx = s.get("professional_network_skills") or []
+        
+    seniority = None
+    exp = crustdata.get("experience", {}).get("employment_details", {})
+    if current := exp.get("current"):
+        if isinstance(current, list) and len(current) > 0:
+            seniority = current[0].get("seniority_level")
+            
+    linkedin_id = None
+    if payload.linkedinUrl:
+        import re
+        match = re.search(r'/in/([^/]+)', payload.linkedinUrl)
+        if match:
+            linkedin_id = match.group(1).split('?')[0].split('#')[0].rstrip('/')
+            
+    profile_pic = None
+    if bp := crustdata.get("basic_profile"):
+        profile_pic = bp.get("profile_picture_permalink")
+    if not profile_pic and (pn := crustdata.get("professional_network")):
+        profile_pic = pn.get("profile_picture_permalink")
+
     resolve_request = CandidateResolveRequest(
         source="signal",
         source_record_type=payload.source_record_type,
@@ -4986,6 +5053,14 @@ def resolve_candidate_from_signal(
         profile=CandidateProfileInput(
             display_name=payload.display_name,
             props=profile_props,
+            profile=crustdata,
+            headline=headline_idx,
+            location_raw=location_raw,
+            skills=skills_idx,
+            seniority_level=seniority,
+            linkedin_url=payload.linkedinUrl,
+            linkedin_id=linkedin_id,
+            profile_picture_url=profile_pic,
         ),
         payload=source_payload,
         metadata=payload.source_metadata or {},
@@ -5056,6 +5131,7 @@ def search_candidates_by_tags(
             matched_tags=sorted(set(normalized_query_tags) & set(row.stored_tags)),
             overlap_count=row.overlap_count,
             overlap_ratio=row.overlap_ratio,
+            profile=row.profile,
         )
         for row in rows
     ]
