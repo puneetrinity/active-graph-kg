@@ -54,6 +54,14 @@ class Candidate:
     props: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     node_id: str | None = None
+    profile: dict[str, Any] = field(default_factory=dict)
+    headline: str | None = None
+    location_raw: str | None = None
+    skills: list[str] = field(default_factory=list)
+    seniority_level: str | None = None
+    linkedin_url: str | None = None
+    linkedin_id: str | None = None
+    profile_picture_url: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -119,3 +127,4 @@ class SignalTagSearchRow:
     stored_tags: list[str]
     overlap_count: int
     overlap_ratio: float
+    profile: dict[str, Any] = field(default_factory=dict)
