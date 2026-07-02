@@ -40,6 +40,14 @@ JWT_ISSUER = os.getenv("JWT_ISSUER")  # e.g., "https://auth.yourcompany.com"
 JWT_ENABLED = os.getenv("JWT_ENABLED", "false").lower() == "true"
 JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "30"))  # Clock skew tolerance
 
+# Additional per-issuer public keys, for callers with their own signing key
+# (e.g. Signal) that verify against JWT_AUDIENCE but not the default JWT_ISSUER.
+SIGNAL_JWT_ISSUER = os.getenv("SIGNAL_JWT_ISSUER", "signal")
+SIGNAL_JWT_PUBLIC_KEY = _decode_pem(os.getenv("SIGNAL_JWT_PUBLIC_KEY"))
+ISSUER_PUBLIC_KEYS: dict[str, str] = {}
+if SIGNAL_JWT_PUBLIC_KEY:
+    ISSUER_PUBLIC_KEYS[SIGNAL_JWT_ISSUER] = SIGNAL_JWT_PUBLIC_KEY
+
 security = HTTPBearer(auto_error=False)
 
 
@@ -61,6 +69,25 @@ class JWTClaims:
         self.exp = exp
 
 
+def _select_key_and_issuer(token: str) -> tuple[str | None, str | None]:
+    """Pick the verification key/issuer for a token based on its (unverified) iss claim.
+
+    Falls back to the default JWT_PUBLIC_KEY/JWT_ISSUER pair when the issuer
+    isn't in ISSUER_PUBLIC_KEYS, preserving existing behavior for callers
+    that don't have their own signing key configured.
+    """
+    try:
+        unverified = jwt.decode(token, options={"verify_signature": False})
+    except PyJWTError:
+        return (JWT_PUBLIC_KEY or JWT_SECRET_KEY), JWT_ISSUER
+
+    token_issuer = unverified.get("iss")
+    if token_issuer and token_issuer in ISSUER_PUBLIC_KEYS:
+        return ISSUER_PUBLIC_KEYS[token_issuer], token_issuer
+
+    return (JWT_PUBLIC_KEY or JWT_SECRET_KEY), JWT_ISSUER
+
+
 def verify_jwt(token: str) -> JWTClaims:
     """Verify and decode JWT token.
 
@@ -73,8 +100,7 @@ def verify_jwt(token: str) -> JWTClaims:
     Raises:
         HTTPException: If token is invalid or expired
     """
-    # Prefer JWT_PUBLIC_KEY for RS256, fallback to JWT_SECRET_KEY
-    key = JWT_PUBLIC_KEY or JWT_SECRET_KEY
+    key, expected_issuer = _select_key_and_issuer(token)
     if not key:
         raise HTTPException(
             status_code=500, detail="JWT_SECRET_KEY or JWT_PUBLIC_KEY not configured"
@@ -87,7 +113,7 @@ def verify_jwt(token: str) -> JWTClaims:
             key,
             algorithms=[JWT_ALGORITHM],
             audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
+            issuer=expected_issuer,
             leeway=JWT_LEEWAY_SECONDS,  # Tolerate clock skew
             options={
                 "verify_signature": True,
@@ -95,7 +121,7 @@ def verify_jwt(token: str) -> JWTClaims:
                 "verify_nbf": True,
                 "verify_iat": True,
                 "verify_aud": True,
-                "verify_iss": bool(JWT_ISSUER),
+                "verify_iss": bool(expected_issuer),
             },
         )
 
