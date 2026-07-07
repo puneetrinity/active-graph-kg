@@ -125,26 +125,20 @@ def test_find_candidate_by_identifier(candidate_repo: CandidateRepository, tenan
     assert fetched.candidate_id == candidate.candidate_id
 
 
-def test_identifier_conflict_across_candidates(
-    candidate_repo: CandidateRepository, tenant: str
-):
+def test_identifier_conflict_across_candidates(candidate_repo: CandidateRepository, tenant: str):
     a = Candidate(tenant_id=tenant)
     b = Candidate(tenant_id=tenant)
     candidate_repo.create_candidate(a)
     candidate_repo.create_candidate(b)
 
-    candidate_repo.add_identifier(
-        a.candidate_id, "email", "carol@example.com", tenant_id=tenant
-    )
+    candidate_repo.add_identifier(a.candidate_id, "email", "carol@example.com", tenant_id=tenant)
     with pytest.raises(IdentifierConflict):
         candidate_repo.add_identifier(
             b.candidate_id, "email", "carol@example.com", tenant_id=tenant
         )
 
 
-def test_source_record_preserves_provenance(
-    candidate_repo: CandidateRepository, tenant: str
-):
+def test_source_record_preserves_provenance(candidate_repo: CandidateRepository, tenant: str):
     candidate = Candidate(tenant_id=tenant)
     candidate_repo.create_candidate(candidate)
 
@@ -173,9 +167,7 @@ def test_source_record_preserves_provenance(
         )
     )
 
-    records = candidate_repo.list_source_records(
-        candidate.candidate_id, tenant_id=tenant
-    )
+    records = candidate_repo.list_source_records(candidate.candidate_id, tenant_id=tenant)
     assert len(records) == 1
     assert records[0].payload["stage"] == "offer"
 
@@ -233,6 +225,7 @@ def test_upsert_candidate_from_source_merges_across_sources(
 # Signal tag search
 # ---------------------------------------------------------------------------
 
+
 def _make_signal_record(
     candidate_repo: CandidateRepository,
     *,
@@ -256,8 +249,12 @@ def _make_signal_record(
 def test_signal_tag_search_exact_match(candidate_repo: CandidateRepository, tenant: str):
     c = Candidate(tenant_id=tenant, display_name="Tag Alice")
     candidate_repo.create_candidate(c)
-    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                        tags=["python", "go", "distributed systems"])
+    _make_signal_record(
+        candidate_repo,
+        candidate_id=c.candidate_id,
+        tenant=tenant,
+        tags=["python", "go", "distributed systems"],
+    )
 
     results = candidate_repo.search_candidates_by_signal_tags(
         ["python", "go", "distributed systems"], tenant_id=tenant
@@ -276,8 +273,7 @@ def test_signal_tag_search_70_percent_threshold_match(
     # Stored: 7 tags. Query: 10 tags, 7 of which overlap → 70 % → should match.
     stored = ["a", "b", "c", "d", "e", "f", "g"]
     query = ["a", "b", "c", "d", "e", "f", "g", "x", "y", "z"]
-    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                        tags=stored)
+    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=stored)
 
     results = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
     assert any(r.candidate_id == c.candidate_id for r in results)
@@ -291,8 +287,7 @@ def test_signal_tag_search_below_threshold_no_match(
     # Stored: 6 tags matching out of 10 query tags → 60 % → below threshold.
     stored = ["a", "b", "c", "d", "e", "f", "nope1", "nope2"]
     query = ["a", "b", "c", "d", "e", "f", "x", "y", "z", "w"]
-    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                        tags=stored)
+    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=stored)
 
     results = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
     assert not any(r.candidate_id == c.candidate_id for r in results)
@@ -305,10 +300,20 @@ def test_signal_tag_search_deduplicates_by_candidate(
     c = Candidate(tenant_id=tenant)
     candidate_repo.create_candidate(c)
     tags = ["python", "go"]
-    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                        tags=tags, sig_id=f"SIG-A-{uuid.uuid4()}")
-    _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                        tags=tags + ["java"], sig_id=f"SIG-B-{uuid.uuid4()}")
+    _make_signal_record(
+        candidate_repo,
+        candidate_id=c.candidate_id,
+        tenant=tenant,
+        tags=tags,
+        sig_id=f"SIG-A-{uuid.uuid4()}",
+    )
+    _make_signal_record(
+        candidate_repo,
+        candidate_id=c.candidate_id,
+        tenant=tenant,
+        tags=tags + ["java"],
+        sig_id=f"SIG-B-{uuid.uuid4()}",
+    )
 
     results = candidate_repo.search_candidates_by_signal_tags(tags, tenant_id=tenant)
     matches = [r for r in results if r.candidate_id == c.candidate_id]
@@ -322,8 +327,7 @@ def test_signal_tag_search_result_limit_never_exceeds_100(
     for _ in range(5):
         c = Candidate(tenant_id=tenant)
         candidate_repo.create_candidate(c)
-        _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant,
-                            tags=[tag])
+        _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=[tag])
 
     results = candidate_repo.search_candidates_by_signal_tags([tag], tenant_id=tenant, limit=2)
     assert len(results) <= 2

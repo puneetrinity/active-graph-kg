@@ -140,9 +140,7 @@ def test_resolve_is_idempotent_for_repeated_source_record(client: TestClient, te
     assert second["resolution_status"] == "matched"
 
 
-def test_resolve_flags_review_required_on_conflicting_identifiers(
-    client: TestClient, tenant: str
-):
+def test_resolve_flags_review_required_on_conflicting_identifiers(client: TestClient, tenant: str):
     # Seed two distinct candidates.
     a = _post(
         client,
@@ -216,7 +214,10 @@ def test_response_shape_on_created(client: TestClient, tenant: str):
             "source_record_id": f"VH-{uuid.uuid4()}",
             "identifiers": [
                 {"identifier_type": "email", "value": f"shape-{uuid.uuid4().hex[:6]}@ex.com"},
-                {"identifier_type": "linkedin_url", "value": f"https://linkedin.com/in/shape-{uuid.uuid4().hex[:6]}"},
+                {
+                    "identifier_type": "linkedin_url",
+                    "value": f"https://linkedin.com/in/shape-{uuid.uuid4().hex[:6]}",
+                },
             ],
             "tenant_id": tenant,
         },
@@ -501,7 +502,9 @@ def test_strong_signal_two_matches_one_mismatch_accepted(client: TestClient, ten
     attached_types = {a["identifier_type"] for a in resp["attached_identifiers"]}
     assert "linkedin_url" not in attached_types
     # It should appear in skipped with a mismatch reason
-    skipped_types = {s["identifier_type"] for s in resp["skipped_identifiers"] if s.get("identifier_type")}
+    skipped_types = {
+        s["identifier_type"] for s in resp["skipped_identifiers"] if s.get("identifier_type")
+    }
     assert "linkedin_url" in skipped_types
     assert any("mismatch" in w.lower() for w in resp["warnings"])
 
@@ -533,8 +536,14 @@ def test_strong_signal_two_matches_two_mismatches_review_required(client: TestCl
             "identifiers": [
                 {"identifier_type": "email", "value": email},
                 {"identifier_type": "github_url", "value": gh},
-                {"identifier_type": "linkedin_url", "value": f"https://linkedin.com/in/wrong-{uuid.uuid4().hex[:6]}"},
-                {"identifier_type": "medium_url", "value": f"https://medium.com/@wrong-{uuid.uuid4().hex[:6]}"},
+                {
+                    "identifier_type": "linkedin_url",
+                    "value": f"https://linkedin.com/in/wrong-{uuid.uuid4().hex[:6]}",
+                },
+                {
+                    "identifier_type": "medium_url",
+                    "value": f"https://medium.com/@wrong-{uuid.uuid4().hex[:6]}",
+                },
             ],
             "tenant_id": tenant,
         },
@@ -566,7 +575,10 @@ def test_strong_signal_type_absent_on_canonical_not_a_mismatch(client: TestClien
             "source_record_id": f"SIG-{uuid.uuid4()}",
             "identifiers": [
                 {"identifier_type": "email", "value": email},
-                {"identifier_type": "linkedin_url", "value": f"https://linkedin.com/in/new-{uuid.uuid4().hex[:6]}"},
+                {
+                    "identifier_type": "linkedin_url",
+                    "value": f"https://linkedin.com/in/new-{uuid.uuid4().hex[:6]}",
+                },
             ],
             "tenant_id": tenant,
         },

@@ -4134,7 +4134,9 @@ class CandidateProfileInput(BaseModel):
 
 class CandidateResolveRequest(BaseModel):
     source: str = Field(..., description="Upstream source name, e.g. 'vantahire', 'signal'")
-    source_record_type: str = Field(..., description="Source record type, e.g. 'application', 'profile'")
+    source_record_type: str = Field(
+        ..., description="Source record type, e.g. 'application', 'profile'"
+    )
     source_record_id: str = Field(..., description="Upstream-stable record id")
     identifiers: list[CandidateIdentifierInput] = Field(
         default_factory=list,
@@ -4327,9 +4329,7 @@ def _execute_candidate_resolve(
     matches: list[tuple[str, str, str]] = []  # (type, normalized, candidate_id)
     seen_candidate_ids: set[str] = set()
     for itype, _raw, norm, _conf, _meta in normalized:
-        existing = candidate_repo.find_candidate_by_identifier(
-            itype, norm, tenant_id=tenant_id
-        )
+        existing = candidate_repo.find_candidate_by_identifier(itype, norm, tenant_id=tenant_id)
         if existing is not None:
             matches.append((itype, norm, existing.candidate_id))
             seen_candidate_ids.add(existing.candidate_id)
@@ -4465,15 +4465,27 @@ def _execute_candidate_resolve(
         updates: dict[str, Any] = {}
         if profile.display_name and not candidate.display_name:
             updates["display_name"] = profile.display_name
-        elif profile.display_name and candidate.display_name and profile.display_name != candidate.display_name:
+        elif (
+            profile.display_name
+            and candidate.display_name
+            and profile.display_name != candidate.display_name
+        ):
             warnings.append("upstream display_name differs from canonical; canonical preserved")
         if profile.primary_email and not candidate.primary_email:
             updates["primary_email"] = profile.primary_email
-        elif profile.primary_email and candidate.primary_email and profile.primary_email.lower() != candidate.primary_email.lower():
+        elif (
+            profile.primary_email
+            and candidate.primary_email
+            and profile.primary_email.lower() != candidate.primary_email.lower()
+        ):
             warnings.append("upstream primary_email differs from canonical; canonical preserved")
         if profile.primary_phone and not candidate.primary_phone:
             updates["primary_phone"] = profile.primary_phone
-        if profile.primary_phone and candidate.primary_phone and profile.primary_phone != candidate.primary_phone:
+        if (
+            profile.primary_phone
+            and candidate.primary_phone
+            and profile.primary_phone != candidate.primary_phone
+        ):
             warnings.append("upstream primary_phone differs from canonical; canonical preserved")
         if profile.profile is not None:
             updates["profile"] = profile.profile
@@ -4493,9 +4505,7 @@ def _execute_candidate_resolve(
             updates["profile_picture_url"] = profile.profile_picture_url
 
         if updates:
-            candidate_repo.update_candidate(
-                candidate.candidate_id, tenant_id=tenant_id, **updates
-            )
+            candidate_repo.update_candidate(candidate.candidate_id, tenant_id=tenant_id, **updates)
     else:
         candidate = Candidate(
             tenant_id=tenant_id,
@@ -4537,13 +4547,9 @@ def _execute_candidate_resolve(
                 confidence=conf,
                 metadata=meta or None,
             )
-            attached.append(
-                AttachedIdentifier(identifier_type=itype, value_normalized=norm)
-            )
+            attached.append(AttachedIdentifier(identifier_type=itype, value_normalized=norm))
         except IdentifierConflict:
-            owner = candidate_repo.find_candidate_by_identifier(
-                itype, norm, tenant_id=tenant_id
-            )
+            owner = candidate_repo.find_candidate_by_identifier(itype, norm, tenant_id=tenant_id)
             owner_id = owner.candidate_id if owner is not None else None
             conflicts.append(
                 ResolveConflict(
@@ -4797,9 +4803,7 @@ def resolve_candidate_from_vantahire_application(
         )
         for s in skipped
     ]
-    return _execute_candidate_resolve(
-        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
-    )
+    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
 
 
 # ----------------------------------------------------------------------
@@ -4921,9 +4925,7 @@ def _collect_signal_identifiers(
         except IdentifierNormalizationError as e:
             if required:
                 raise HTTPException(status_code=400, detail=f"{itype}: {e}")
-            skipped.append(
-                {"identifier_type": itype, "value": value, "reason": str(e)}
-            )
+            skipped.append({"identifier_type": itype, "value": value, "reason": str(e)})
             return
         key = (itype, norm)
         if key in seen:
@@ -4988,9 +4990,7 @@ def resolve_candidate_from_signal(
     if payload.source_record_type not in {"sourced_candidate", "profile"}:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"unsupported Signal source_record_type: {payload.source_record_type!r}"
-            ),
+            detail=(f"unsupported Signal source_record_type: {payload.source_record_type!r}"),
         )
 
     identifiers, skipped = _collect_signal_identifiers(payload)
@@ -5014,31 +5014,32 @@ def resolve_candidate_from_signal(
     }
 
     crustdata = payload.crustdata or {}
-    
+
     # Extract fields from crustdata for indexing
     headline_idx = payload.headline or crustdata.get("basic_profile", {}).get("headline")
-    
+
     location_raw = None
     if loc := crustdata.get("basic_profile", {}).get("location"):
         location_raw = loc.get("full_location") or loc.get("raw")
-        
+
     skills_idx = []
     if s := crustdata.get("skills"):
         skills_idx = s.get("professional_network_skills") or []
-        
+
     seniority = None
     exp = crustdata.get("experience", {}).get("employment_details", {})
     if current := exp.get("current"):
         if isinstance(current, list) and len(current) > 0:
             seniority = current[0].get("seniority_level")
-            
+
     linkedin_id = None
     if payload.linkedinUrl:
         import re
-        match = re.search(r'/in/([^/]+)', payload.linkedinUrl)
+
+        match = re.search(r"/in/([^/]+)", payload.linkedinUrl)
         if match:
-            linkedin_id = match.group(1).split('?')[0].split('#')[0].rstrip('/')
-            
+            linkedin_id = match.group(1).split("?")[0].split("#")[0].rstrip("/")
+
     profile_pic = None
     if bp := crustdata.get("basic_profile"):
         profile_pic = bp.get("profile_picture_permalink")
@@ -5082,9 +5083,7 @@ def resolve_candidate_from_signal(
         )
         for s in skipped
     ]
-    return _execute_candidate_resolve(
-        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
-    )
+    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
 
 
 @app.post(

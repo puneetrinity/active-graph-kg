@@ -153,9 +153,7 @@ def test_signal_payload_creates_candidate_with_translated_identifiers(
     assert rec.payload["aiSummary"] == body["aiSummary"]
 
 
-def test_signal_payload_matches_existing_candidate_by_linkedin(
-    client: TestClient, tenant: str
-):
+def test_signal_payload_matches_existing_candidate_by_linkedin(client: TestClient, tenant: str):
     linkedin = "https://linkedin.com/in/signal-shared"
     first = _post(
         client,
@@ -245,6 +243,7 @@ def test_signal_profile_record_type_is_accepted(client: TestClient, tenant: str)
     assert resp["resolution_status"] == "created"
     records = _get_source_records(resp["candidate_id"], tenant)
     assert records[0].source_record_type == "profile"
+
 
 def test_signal_tags_are_accepted_and_stored(client: TestClient, tenant: str):
     sig_id = f"SIG-{uuid.uuid4()}"

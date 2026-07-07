@@ -22,22 +22,13 @@ class TestEmail:
         assert normalize_identifier("email", "mailto:bob@foo.io") == "bob@foo.io"
 
     def test_gmail_dots_folded(self):
-        assert (
-            normalize_identifier("email", "a.l.i.c.e@gmail.com")
-            == "alice@gmail.com"
-        )
+        assert normalize_identifier("email", "a.l.i.c.e@gmail.com") == "alice@gmail.com"
 
     def test_gmail_plus_alias_preserved(self):
-        assert (
-            normalize_identifier("email", "alice+jobs@gmail.com")
-            == "alice+jobs@gmail.com"
-        )
+        assert normalize_identifier("email", "alice+jobs@gmail.com") == "alice+jobs@gmail.com"
 
     def test_googlemail_aliases_to_gmail(self):
-        assert (
-            normalize_identifier("email", "bob@googlemail.com")
-            == "bob@gmail.com"
-        )
+        assert normalize_identifier("email", "bob@googlemail.com") == "bob@gmail.com"
 
     def test_invalid_rejected(self):
         with pytest.raises(IdentifierNormalizationError):

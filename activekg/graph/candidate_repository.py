@@ -27,7 +27,12 @@ from activekg.graph.candidate_identifiers import (
     IdentifierNormalizationError,
     normalize_identifier,
 )
-from activekg.graph.models import Candidate, CandidateIdentifier, CandidateSourceRecord, SignalTagSearchRow
+from activekg.graph.models import (
+    Candidate,
+    CandidateIdentifier,
+    CandidateSourceRecord,
+    SignalTagSearchRow,
+)
 
 
 class CandidateRepository:
@@ -82,9 +87,7 @@ class CandidateRepository:
                 )
                 return str(cur.fetchone()[0])
 
-    def get_candidate(
-        self, candidate_id: str, tenant_id: str | None = None
-    ) -> Candidate | None:
+    def get_candidate(self, candidate_id: str, tenant_id: str | None = None) -> Candidate | None:
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 if tenant_id is None:
@@ -194,9 +197,7 @@ class CandidateRepository:
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 if tenant_id is None:
-                    cur.execute(
-                        "DELETE FROM candidates WHERE candidate_id = %s", (candidate_id,)
-                    )
+                    cur.execute("DELETE FROM candidates WHERE candidate_id = %s", (candidate_id,))
                 else:
                     cur.execute(
                         "DELETE FROM candidates WHERE candidate_id = %s AND tenant_id IS NOT DISTINCT FROM %s",
