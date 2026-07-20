@@ -74,6 +74,7 @@ jobs:
         run: |
           pytest \
             tests/test_security_limits.py \
+            tests/test_embedding_provider.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
