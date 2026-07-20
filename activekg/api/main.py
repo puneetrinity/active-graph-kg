@@ -68,7 +68,16 @@ from activekg.extraction.queue import (
     enqueue_extraction_job,
     extraction_queue_depth,
 )
-from activekg.graph.models import Edge, Node
+from activekg.graph.candidate_identifiers import (
+    IDENTIFIER_TYPES,
+    IdentifierNormalizationError,
+    normalize_identifier,
+)
+from activekg.graph.candidate_repository import (
+    CandidateRepository,
+    IdentifierConflict,
+)
+from activekg.graph.models import Candidate, CandidateSourceRecord, Edge, Node
 from activekg.graph.repository import GraphRepository
 
 # Prometheus observability
@@ -353,6 +362,7 @@ if TEST_MODE:
     pattern_store = None
     trigger_engine = None
     scheduler: RefreshScheduler | None = None
+    candidate_repo: CandidateRepository | None = None
     logger.warning("Running in TEST_MODE - DB connections deferred")
 else:
     # Normal mode: eager initialization
@@ -361,6 +371,7 @@ else:
     pattern_store = PatternStore(DSN)
     trigger_engine = TriggerEngine(pattern_store, repo)
     scheduler = None
+    candidate_repo = CandidateRepository(DSN)
 
 # Mount admin connectors router (minimal MVP)
 app.include_router(connectors_admin_router)
@@ -4082,3 +4093,1050 @@ def get_node_versions(
             "Node versions query failed", extra_fields={"node_id": node_id, "error": str(e)}
         )
         raise HTTPException(status_code=500, detail=f"Node versions query failed: {str(e)}")
+
+
+# ----------------------------------------------------------------------
+# Candidate identity resolution
+# ----------------------------------------------------------------------
+
+STRONG_SIGNAL_TYPES: frozenset[str] = frozenset(
+    {"linkedin_url", "github_url", "medium_url", "email", "phone"}
+)
+
+
+class CandidateIdentifierInput(BaseModel):
+    identifier_type: str = Field(..., description="Type of identifier (email, linkedin_url, ...)")
+    value: str = Field(..., description="Raw identifier value as sent by the upstream source")
+    confidence: float | None = Field(
+        default=None,
+        description="Optional per-identifier confidence from the upstream source",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional per-identifier metadata (e.g. bridge_tier, identity platform)",
+    )
+
+
+class CandidateProfileInput(BaseModel):
+    display_name: str | None = None
+    primary_email: str | None = None
+    primary_phone: str | None = None
+    props: dict[str, Any] = Field(default_factory=dict)
+    profile: dict[str, Any] | None = None
+    headline: str | None = None
+    location_raw: str | None = None
+    skills: list[str] | None = None
+    seniority_level: str | None = None
+    linkedin_url: str | None = None
+    linkedin_id: str | None = None
+    profile_picture_url: str | None = None
+
+
+class CandidateResolveRequest(BaseModel):
+    source: str = Field(..., description="Upstream source name, e.g. 'vantahire', 'signal'")
+    source_record_type: str = Field(
+        ..., description="Source record type, e.g. 'application', 'profile'"
+    )
+    source_record_id: str = Field(..., description="Upstream-stable record id")
+    identifiers: list[CandidateIdentifierInput] = Field(
+        default_factory=list,
+        description="Identifiers for exact-match resolution",
+    )
+    profile: CandidateProfileInput | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_url: str | None = None
+    tenant_id: str | None = None
+    # Structured VantaHire provenance — forwarded to candidate_source_records structured
+    # columns so downstream Talent Search can scope by org/recruiter without JSONB scans.
+    org_id: str | None = None
+    job_id: str | None = None
+    effective_recruiter_id: str | None = None
+    created_by_user_id: str | None = None
+    resume_source: str | None = None
+    # Structured Signal tags — forwarded to candidate_source_records.job_tags so
+    # tag-based candidate search uses a GIN index rather than scanning JSONB payloads.
+    job_tags: list[str] = Field(default_factory=list)
+
+
+class MatchedIdentifier(BaseModel):
+    identifier_type: str
+    value_normalized: str
+
+
+class AttachedIdentifier(BaseModel):
+    identifier_type: str
+    value_normalized: str
+
+
+class SkippedIdentifier(BaseModel):
+    identifier_type: str | None = None
+    value: str | None = None
+    reason: str
+
+
+class ResolveConflict(BaseModel):
+    identifier_type: str
+    value_normalized: str
+    candidate_id: str | None = None
+    reason: str | None = None
+
+
+class CandidateResolveResponse(BaseModel):
+    candidate_id: str | None
+    resolution_status: str  # "created" | "matched" | "review_required"
+    matched_identifier: MatchedIdentifier | None = None
+    attached_identifiers: list[AttachedIdentifier] = Field(default_factory=list)
+    skipped_identifiers: list[SkippedIdentifier] = Field(default_factory=list)
+    source_record_id: str | None = None
+    conflicts: list[ResolveConflict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CandidateTagSearchResult(BaseModel):
+    candidate_id: str
+    display_name: str | None = None
+    primary_email: str | None = None
+    signal_candidate_id: str
+    stored_tags: list[str]
+    matched_tags: list[str]
+    overlap_count: int
+    overlap_ratio: float
+    profile: dict[str, Any] | None = None
+
+
+class CandidateSearchByTagsRequest(BaseModel):
+    tags: list[str]
+    tenant_id: str | None = None
+    limit: int = Field(default=100, ge=1, le=100)
+
+
+class CandidateSearchByTagsResponse(BaseModel):
+    results: list[CandidateTagSearchResult]
+    query_tags: list[str]
+    total: int
+
+
+def _evaluate_strong_signal_mismatch(
+    incoming_normalized: list[tuple[str, str, str, Any, Any]],
+    canonical_identifiers: list,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """Compare incoming strong-signal identifiers against the canonical candidate.
+
+    Returns:
+        strong_matches: (itype, incoming_norm) where values agree with canonical
+        strong_mismatches: (itype, incoming_norm, canonical_norm) where values conflict
+
+    Types absent on the canonical candidate are ignored (not mismatches).
+    """
+    canonical_by_type: dict[str, set[str]] = {}
+    for ident in canonical_identifiers:
+        if ident.identifier_type in STRONG_SIGNAL_TYPES:
+            canonical_by_type.setdefault(ident.identifier_type, set()).add(ident.value_normalized)
+
+    strong_matches: list[tuple[str, str]] = []
+    strong_mismatches: list[tuple[str, str, str]] = []
+
+    seen_incoming: set[str] = set()
+    for itype, _raw, norm, *_ in incoming_normalized:
+        if itype not in STRONG_SIGNAL_TYPES:
+            continue
+        if itype not in canonical_by_type:
+            continue
+        if itype in seen_incoming:
+            continue
+        seen_incoming.add(itype)
+        if norm in canonical_by_type[itype]:
+            strong_matches.append((itype, norm))
+        else:
+            canonical_norm = next(iter(canonical_by_type[itype]))
+            strong_mismatches.append((itype, norm, canonical_norm))
+
+    return strong_matches, strong_mismatches
+
+
+@app.post(
+    "/candidates/resolve",
+    response_model=CandidateResolveResponse,
+    dependencies=[Depends(require_scope("kg:write"))],
+)
+def resolve_candidate(
+    payload: CandidateResolveRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Resolve-or-create a canonical ActiveKG candidate from upstream evidence.
+
+    Exact identifier-based matching only: if any normalized identifier already
+    belongs to a candidate, that candidate is returned; otherwise a new
+    canonical candidate is created. Upstream payloads are preserved verbatim in
+    ``candidate_source_records``. If identifiers point at multiple distinct
+    candidates the request is flagged ``review_required`` and no merge happens
+    — merging candidates is an explicit operation, not an implicit side-effect.
+    """
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = payload.tenant_id
+    return _execute_candidate_resolve(payload, tenant_id=tenant_id)
+
+
+def _execute_candidate_resolve(
+    payload: CandidateResolveRequest,
+    *,
+    tenant_id: str | None,
+    pre_skipped: list[SkippedIdentifier] | None = None,
+) -> CandidateResolveResponse:
+    if candidate_repo is None:
+        raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
+
+    if not payload.identifiers:
+        raise HTTPException(status_code=400, detail="at least one identifier is required")
+
+    skipped: list[SkippedIdentifier] = list(pre_skipped or [])
+    warnings: list[str] = []
+
+    # 1. Normalize all identifiers up-front; any failure is a 400.
+    normalized: list[tuple[str, str, str, float | None, dict[str, Any]]] = []
+    # (type, raw, normalized, confidence, metadata)
+    seen_norm: set[tuple[str, str]] = set()
+    for ident in payload.identifiers:
+        if ident.identifier_type not in IDENTIFIER_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown identifier_type: {ident.identifier_type!r}",
+            )
+        try:
+            norm = normalize_identifier(ident.identifier_type, ident.value)
+        except IdentifierNormalizationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        key = (ident.identifier_type, norm)
+        if key in seen_norm:
+            skipped.append(
+                SkippedIdentifier(
+                    identifier_type=ident.identifier_type,
+                    value=ident.value,
+                    reason="duplicate identifier in request",
+                )
+            )
+            continue
+        seen_norm.add(key)
+        normalized.append(
+            (ident.identifier_type, ident.value, norm, ident.confidence, ident.metadata or {})
+        )
+
+    # 2. For each identifier, check if it already belongs to a candidate.
+    matches: list[tuple[str, str, str]] = []  # (type, normalized, candidate_id)
+    seen_candidate_ids: set[str] = set()
+    for itype, _raw, norm, _conf, _meta in normalized:
+        existing = candidate_repo.find_candidate_by_identifier(itype, norm, tenant_id=tenant_id)
+        if existing is not None:
+            matches.append((itype, norm, existing.candidate_id))
+            seen_candidate_ids.add(existing.candidate_id)
+
+    # 3. Conflicting matches across different candidates → review_required. We
+    # do NOT attach identifiers or write a source record in this case: merging
+    # canonical candidates is an explicit operation, not a silent side-effect.
+    if len(seen_candidate_ids) > 1:
+        conflicts = [
+            ResolveConflict(
+                identifier_type=itype,
+                value_normalized=norm,
+                candidate_id=cid,
+                reason="identifier resolves to a different canonical candidate",
+            )
+            for itype, norm, cid in matches
+        ]
+        logger.warning(
+            "candidate resolve flagged review_required",
+            extra_fields={
+                "source": payload.source,
+                "source_record_id": payload.source_record_id,
+                "candidate_count": len(seen_candidate_ids),
+                "tenant_id": tenant_id,
+            },
+        )
+        warnings.append(
+            f"identifiers point at {len(seen_candidate_ids)} distinct candidates; "
+            "merging requires explicit review"
+        )
+        return CandidateResolveResponse(
+            candidate_id=None,
+            resolution_status="review_required",
+            matched_identifier=None,
+            attached_identifiers=[],
+            skipped_identifiers=skipped,
+            source_record_id=None,
+            conflicts=conflicts,
+            warnings=warnings,
+        )
+
+    profile = payload.profile or CandidateProfileInput()
+
+    # Identifiers blocked from attachment due to a tolerated strong-signal mismatch.
+    mismatch_blocked: set[tuple[str, str]] = set()
+
+    if len(seen_candidate_ids) == 1:
+        candidate_id = next(iter(seen_candidate_ids))
+        candidate = candidate_repo.get_candidate(candidate_id, tenant_id=tenant_id)
+        assert candidate is not None
+
+        # 3a. Strong-signal mismatch evaluation — compare incoming strong-signal
+        # identifiers against the canonical candidate's existing identifiers of the
+        # same type. Absent types are ignored; present-but-different types are conflicts.
+        canonical_identifiers = candidate_repo.list_identifiers(candidate_id, tenant_id=tenant_id)
+        strong_matches, strong_mismatches = _evaluate_strong_signal_mismatch(
+            normalized, canonical_identifiers
+        )
+
+        if strong_mismatches:
+            n_matches = len(strong_matches)
+            n_mismatches = len(strong_mismatches)
+            # Tolerate only the case of ≥2 corroborating strong matches vs exactly 1 conflict.
+            tolerated = n_matches >= 2 and n_mismatches == 1
+
+            if not tolerated:
+                mismatch_conflicts = [
+                    ResolveConflict(
+                        identifier_type=itype,
+                        value_normalized=incoming_norm,
+                        candidate_id=candidate_id,
+                        reason=(
+                            f"strong signal mismatch: incoming {itype}={incoming_norm!r} "
+                            f"conflicts with canonical value {canonical_norm!r}"
+                        ),
+                    )
+                    for itype, incoming_norm, canonical_norm in strong_mismatches
+                ]
+                logger.warning(
+                    "candidate resolve flagged review_required due to strong-signal mismatch",
+                    extra_fields={
+                        "source": payload.source,
+                        "source_record_id": payload.source_record_id,
+                        "strong_matches": n_matches,
+                        "strong_mismatches": n_mismatches,
+                        "candidate_id": candidate_id,
+                        "tenant_id": tenant_id,
+                    },
+                )
+                warnings.append(
+                    f"strong-signal mismatch: {n_mismatches} conflict(s) against "
+                    f"{n_matches} match(es); manual review required"
+                )
+                return CandidateResolveResponse(
+                    candidate_id=None,
+                    resolution_status="review_required",
+                    matched_identifier=None,
+                    attached_identifiers=[],
+                    skipped_identifiers=skipped,
+                    source_record_id=None,
+                    conflicts=mismatch_conflicts,
+                    warnings=warnings,
+                )
+            else:
+                # Tolerated: accept the match but block the mismatching identifier from
+                # being attached so canonical strong-signal values are not diluted.
+                for itype, incoming_norm, canonical_norm in strong_mismatches:
+                    mismatch_blocked.add((itype, incoming_norm))
+                    skipped.append(
+                        SkippedIdentifier(
+                            identifier_type=itype,
+                            value=incoming_norm,
+                            reason=(
+                                f"strong signal mismatch: incoming {itype}={incoming_norm!r} "
+                                f"conflicts with canonical value {canonical_norm!r}; not attached"
+                            ),
+                        )
+                    )
+                warnings.append(
+                    f"strong-signal mismatch tolerated: {n_matches} match(es) outweigh "
+                    f"{n_mismatches} mismatch(es); conflicting identifier(s) not attached"
+                )
+
+        status = "matched"
+        matched_itype, matched_norm, _ = matches[0]
+        matched_identifier = MatchedIdentifier(
+            identifier_type=matched_itype,
+            value_normalized=matched_norm,
+        )
+        # Fill in profile fields only when currently empty — never clobber
+        # canonical data with upstream drift. Surface drift as a warning so
+        # callers can reconcile upstream.
+        updates: dict[str, Any] = {}
+        if profile.display_name and not candidate.display_name:
+            updates["display_name"] = profile.display_name
+        elif (
+            profile.display_name
+            and candidate.display_name
+            and profile.display_name != candidate.display_name
+        ):
+            warnings.append("upstream display_name differs from canonical; canonical preserved")
+        if profile.primary_email and not candidate.primary_email:
+            updates["primary_email"] = profile.primary_email
+        elif (
+            profile.primary_email
+            and candidate.primary_email
+            and profile.primary_email.lower() != candidate.primary_email.lower()
+        ):
+            warnings.append("upstream primary_email differs from canonical; canonical preserved")
+        if profile.primary_phone and not candidate.primary_phone:
+            updates["primary_phone"] = profile.primary_phone
+        if (
+            profile.primary_phone
+            and candidate.primary_phone
+            and profile.primary_phone != candidate.primary_phone
+        ):
+            warnings.append("upstream primary_phone differs from canonical; canonical preserved")
+        if profile.profile is not None:
+            updates["profile"] = profile.profile
+        if profile.headline is not None:
+            updates["headline"] = profile.headline
+        if profile.location_raw is not None:
+            updates["location_raw"] = profile.location_raw
+        if profile.skills is not None:
+            updates["skills"] = profile.skills
+        if profile.seniority_level is not None:
+            updates["seniority_level"] = profile.seniority_level
+        if profile.linkedin_url is not None:
+            updates["linkedin_url"] = profile.linkedin_url
+        if profile.linkedin_id is not None:
+            updates["linkedin_id"] = profile.linkedin_id
+        if profile.profile_picture_url is not None:
+            updates["profile_picture_url"] = profile.profile_picture_url
+
+        if updates:
+            candidate_repo.update_candidate(candidate.candidate_id, tenant_id=tenant_id, **updates)
+    else:
+        candidate = Candidate(
+            tenant_id=tenant_id,
+            display_name=profile.display_name,
+            primary_email=profile.primary_email,
+            primary_phone=profile.primary_phone,
+            props=profile.props or {},
+            metadata=payload.metadata or {},
+            profile=profile.profile or {},
+            headline=profile.headline,
+            location_raw=profile.location_raw,
+            skills=profile.skills or [],
+            seniority_level=profile.seniority_level,
+            linkedin_url=profile.linkedin_url,
+            linkedin_id=profile.linkedin_id,
+            profile_picture_url=profile.profile_picture_url,
+        )
+        candidate_repo.create_candidate(candidate)
+        status = "created"
+        matched_identifier = None
+
+    # 4. Attach every (valid) identifier. Any conflict here means a concurrent
+    # writer grabbed the identifier between our lookup and insert, or the
+    # identifier is already owned by a different candidate — surface it and
+    # downgrade to review_required rather than silently re-pointing rows.
+    # Identifiers blocked by the strong-signal mismatch rule are also skipped.
+    attached: list[AttachedIdentifier] = []
+    conflicts: list[ResolveConflict] = []
+    for itype, raw, norm, conf, meta in normalized:
+        if (itype, norm) in mismatch_blocked:
+            continue
+        try:
+            candidate_repo.add_identifier(
+                candidate.candidate_id,
+                itype,
+                raw,
+                tenant_id=tenant_id,
+                source=payload.source,
+                confidence=conf,
+                metadata=meta or None,
+            )
+            attached.append(AttachedIdentifier(identifier_type=itype, value_normalized=norm))
+        except IdentifierConflict:
+            owner = candidate_repo.find_candidate_by_identifier(itype, norm, tenant_id=tenant_id)
+            owner_id = owner.candidate_id if owner is not None else None
+            conflicts.append(
+                ResolveConflict(
+                    identifier_type=itype,
+                    value_normalized=norm,
+                    candidate_id=owner_id,
+                    reason="identifier owned by a different candidate",
+                )
+            )
+
+    if conflicts:
+        warnings.append(
+            f"{len(conflicts)} identifier(s) could not be attached due to ownership conflicts"
+        )
+        return CandidateResolveResponse(
+            candidate_id=candidate.candidate_id,
+            resolution_status="review_required",
+            matched_identifier=matched_identifier,
+            attached_identifiers=attached,
+            skipped_identifiers=skipped,
+            source_record_id=None,
+            conflicts=conflicts,
+            warnings=warnings,
+        )
+
+    # 5. Upsert the source record — idempotent on
+    # (tenant_id, source, source_record_type, source_record_id).
+    record = candidate_repo.upsert_source_record(
+        CandidateSourceRecord(
+            candidate_id=candidate.candidate_id,
+            tenant_id=tenant_id,
+            source=payload.source,
+            source_record_type=payload.source_record_type,
+            source_record_id=payload.source_record_id,
+            source_url=payload.source_url,
+            payload=payload.payload or {},
+            org_id=payload.org_id,
+            job_id=payload.job_id,
+            effective_recruiter_id=payload.effective_recruiter_id,
+            created_by_user_id=payload.created_by_user_id,
+            resume_source=payload.resume_source,
+            job_tags=list(payload.job_tags) if payload.job_tags else [],
+        )
+    )
+
+    return CandidateResolveResponse(
+        candidate_id=candidate.candidate_id,
+        resolution_status=status,
+        matched_identifier=matched_identifier,
+        attached_identifiers=attached,
+        skipped_identifiers=skipped,
+        source_record_id=record.source_record_id,
+        conflicts=[],
+        warnings=warnings,
+    )
+
+
+# ----------------------------------------------------------------------
+# VantaHire application evidence → canonical candidate
+# ----------------------------------------------------------------------
+
+
+class VantahireApplicationResolveRequest(BaseModel):
+    """Raw VantaHire application payload.
+
+    ActiveKG translates the VantaHire-specific fields below into canonical
+    identifiers and profile data, then routes them through the same resolve-
+    or-create flow used by :func:`resolve_candidate`.
+    """
+
+    application_id: str = Field(..., description="VantaHire application id")
+    resume_id: str | None = None
+    job_id: str | None = None
+    org_id: str | None = None
+
+    # Recruiter/uploader provenance — written to candidate_source_records structured
+    # columns so Talent Search can filter by recruiter or org without JSONB scans.
+    effective_recruiter_id: str | None = None
+    created_by_user_id: str | None = None
+    resume_source: str | None = None
+
+    applicant_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+
+    linkedin_url: str | None = None
+    github_url: str | None = None
+    medium_url: str | None = None
+    other_links: list[str] = Field(default_factory=list)
+
+    resume_gcp_url: str | None = None
+    skills: list[str] = Field(default_factory=list)
+
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+    tenant_id: str | None = None
+
+
+_VANTAHIRE_LINK_TYPES: tuple[tuple[str, str], ...] = (
+    ("linkedin_url", "linkedin_url"),
+    ("github_url", "github_url"),
+    ("medium_url", "medium_url"),
+)
+
+
+def _collect_vantahire_identifiers(
+    payload: VantahireApplicationResolveRequest,
+) -> tuple[list[CandidateIdentifierInput], list[dict[str, str]]]:
+    """Translate VantaHire fields into canonical identifier inputs.
+
+    Invalid optional links are dropped (and reported in ``skipped``) rather than
+    failing the whole request — VantaHire data is user-entered and one bad
+    profile URL shouldn't block ingestion of an application whose email is
+    still perfectly good.
+    """
+    identifiers: list[CandidateIdentifierInput] = []
+    skipped: list[dict[str, str]] = []
+
+    def _add_required(itype: str, value: str) -> None:
+        try:
+            normalize_identifier(itype, value)
+        except IdentifierNormalizationError as e:
+            raise HTTPException(status_code=400, detail=f"{itype}: {e}")
+        identifiers.append(CandidateIdentifierInput(identifier_type=itype, value=value))
+
+    def _add_optional(itype: str, value: str | None) -> None:
+        if not value:
+            return
+        try:
+            normalize_identifier(itype, value)
+        except IdentifierNormalizationError as e:
+            skipped.append({"identifier_type": itype, "value": value, "reason": str(e)})
+            return
+        identifiers.append(CandidateIdentifierInput(identifier_type=itype, value=value))
+
+    _add_required("vantahire_application_id", payload.application_id)
+    _add_optional("vantahire_resume_id", payload.resume_id)
+
+    for field_name, itype in _VANTAHIRE_LINK_TYPES:
+        _add_optional(itype, getattr(payload, field_name))
+
+    _add_optional("email", payload.email)
+    _add_optional("phone", payload.phone)
+
+    for link in payload.other_links:
+        if not link:
+            continue
+        # Pick the most specific canonical type we can, falling back to a
+        # generic website url.
+        guessed: str | None = None
+        lowered = link.lower()
+        if "linkedin.com" in lowered:
+            guessed = "linkedin_url"
+        elif "github.com" in lowered:
+            guessed = "github_url"
+        elif "medium.com" in lowered:
+            guessed = "medium_url"
+        elif "twitter.com" in lowered or "x.com" in lowered:
+            guessed = "twitter_url"
+        elif "stackoverflow.com" in lowered:
+            guessed = "stackoverflow_url"
+        else:
+            guessed = "website_url"
+        _add_optional(guessed, link)
+
+    return identifiers, skipped
+
+
+@app.post(
+    "/candidates/resolve/vantahire/application",
+    response_model=CandidateResolveResponse,
+    dependencies=[Depends(require_scope("kg:write"))],
+)
+def resolve_candidate_from_vantahire_application(
+    payload: VantahireApplicationResolveRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Resolve-or-create a canonical candidate from a VantaHire application.
+
+    Maps VantaHire application fields onto canonical identifiers
+    (``vantahire_application_id``, ``vantahire_resume_id``, ``linkedin_url``,
+    ``github_url``, ``medium_url``, ``email``, ``phone``, plus any profile
+    URLs under ``other_links``) and stores the full application payload in
+    ``candidate_source_records`` with ``source='vantahire'`` /
+    ``source_record_type='application'``.
+
+    Per-field normalization failures on *optional* identifiers are dropped
+    silently; the request only 400s if no usable identifier survives.
+    """
+    identifiers, skipped = _collect_vantahire_identifiers(payload)
+    if not identifiers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "no usable identifiers in VantaHire payload",
+                "skipped": skipped,
+            },
+        )
+
+    source_payload: dict[str, Any] = payload.model_dump(exclude_none=False)
+    if skipped:
+        source_payload["_skipped_identifiers"] = skipped
+
+    # Ensure provenance fields are always present in the payload under canonical keys
+    # so consumers that read raw JSONB can still find them.
+    source_payload["source"] = "vantahire"
+    source_payload["source_record_type"] = "application"
+
+    resolve_request = CandidateResolveRequest(
+        source="vantahire",
+        source_record_type="application",
+        source_record_id=payload.application_id,
+        identifiers=identifiers,
+        profile=CandidateProfileInput(
+            display_name=payload.applicant_name,
+            primary_email=payload.email,
+            primary_phone=payload.phone,
+            # org_id and job_id are NOT put on the canonical candidate — they are
+            # VantaHire-specific scoping metadata and live on the source record only.
+            props={
+                k: v
+                for k, v in {
+                    "resume_gcp_url": payload.resume_gcp_url,
+                    "skills": payload.skills or None,
+                }.items()
+                if v
+            },
+        ),
+        payload=source_payload,
+        metadata=payload.source_metadata or {},
+        source_url=payload.resume_gcp_url,
+        tenant_id=payload.tenant_id,
+        # Structured provenance — written to candidate_source_records columns
+        org_id=payload.org_id,
+        job_id=payload.job_id,
+        effective_recruiter_id=payload.effective_recruiter_id,
+        created_by_user_id=payload.created_by_user_id,
+        resume_source=payload.resume_source,
+    )
+
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = payload.tenant_id
+
+    pre_skipped = [
+        SkippedIdentifier(
+            identifier_type=s.get("identifier_type"),
+            value=s.get("value"),
+            reason=s.get("reason", ""),
+        )
+        for s in skipped
+    ]
+    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
+
+
+# ----------------------------------------------------------------------
+# Signal sourced-candidate evidence → canonical candidate
+# ----------------------------------------------------------------------
+
+
+class SignalIdentityInput(BaseModel):
+    """A single identity link discovered by Signal (linkedin, github, ...)."""
+
+    platform: str | None = None
+    profileUrl: str | None = None
+    profile_url: str | None = None
+    confidence: float | None = None
+    bridgeTier: str | None = None
+    bridge_tier: str | None = None
+    model_config = {"extra": "allow"}
+
+
+class SignalCandidateResolveRequest(BaseModel):
+    """Raw Signal sourced-candidate / profile payload.
+
+    ActiveKG translates Signal-specific fields below into canonical identifiers
+    and profile data, then routes them through the same resolve-or-create flow
+    used by :func:`resolve_candidate`. The full payload is preserved verbatim
+    in ``candidate_source_records``.
+    """
+
+    signal_candidate_id: str = Field(..., description="Signal's stable candidate id")
+    source_record_type: str = Field(
+        default="sourced_candidate",
+        description="Signal record type: 'sourced_candidate' or 'profile'",
+    )
+
+    linkedinUrl: str | None = None
+    identities: list[SignalIdentityInput] = Field(default_factory=list)
+
+    display_name: str | None = None
+    headline: str | None = None
+    identitySummary: str | None = None
+    aiSummary: str | None = None
+
+    rank: int | float | None = None
+    request_id: str | None = None
+    external_job_id: str | None = None
+    crustdata: dict[str, Any] | None = Field(default=None, description="Raw Crustdata profile blob")
+
+    tags: list[str] = Field(default_factory=list)
+    sourcing_context: dict[str, Any] = Field(default_factory=dict)
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+    tenant_id: str | None = None
+
+    model_config = {"extra": "allow"}
+
+
+_SIGNAL_PLATFORM_TO_ITYPE: dict[str, str] = {
+    "linkedin": "linkedin_url",
+    "github": "github_url",
+    "medium": "medium_url",
+    "twitter": "twitter_url",
+    "x": "twitter_url",
+    "stackoverflow": "stackoverflow_url",
+    "stack_overflow": "stackoverflow_url",
+    "portfolio": "portfolio_url",
+    "website": "website_url",
+}
+
+
+def _normalize_signal_tags(tags: list[str]) -> list[str]:
+    """Trim, lowercase, deduplicate, and drop empty strings from a tag list."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in tags:
+        normalized = t.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _guess_itype_from_url(url: str) -> str:
+    lowered = url.lower()
+    if "linkedin.com" in lowered:
+        return "linkedin_url"
+    if "github.com" in lowered:
+        return "github_url"
+    if "medium.com" in lowered:
+        return "medium_url"
+    if "twitter.com" in lowered or "x.com" in lowered:
+        return "twitter_url"
+    if "stackoverflow.com" in lowered:
+        return "stackoverflow_url"
+    return "website_url"
+
+
+def _collect_signal_identifiers(
+    payload: SignalCandidateResolveRequest,
+) -> tuple[list[CandidateIdentifierInput], list[dict[str, Any]]]:
+    """Translate Signal fields into canonical identifier inputs.
+
+    Invalid optional identities are dropped and reported in ``skipped`` — one
+    bad profileUrl from a Signal enrichment shouldn't block ingestion of a
+    candidate whose signal_candidate_id and primary linkedin are valid.
+    """
+    identifiers: list[CandidateIdentifierInput] = []
+    skipped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(
+        itype: str,
+        value: str,
+        *,
+        required: bool,
+        confidence: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            norm = normalize_identifier(itype, value)
+        except IdentifierNormalizationError as e:
+            if required:
+                raise HTTPException(status_code=400, detail=f"{itype}: {e}")
+            skipped.append({"identifier_type": itype, "value": value, "reason": str(e)})
+            return
+        key = (itype, norm)
+        if key in seen:
+            return
+        seen.add(key)
+        identifiers.append(
+            CandidateIdentifierInput(
+                identifier_type=itype,
+                value=value,
+                confidence=confidence,
+                metadata=metadata or {},
+            )
+        )
+
+    _add("signal_candidate_id", payload.signal_candidate_id, required=True)
+
+    if payload.linkedinUrl:
+        _add("linkedin_url", payload.linkedinUrl, required=False)
+
+    for identity in payload.identities:
+        url = identity.profileUrl or identity.profile_url
+        if not url:
+            continue
+        platform = (identity.platform or "").strip().lower()
+        itype = _SIGNAL_PLATFORM_TO_ITYPE.get(platform) or _guess_itype_from_url(url)
+        bridge_tier = identity.bridgeTier or identity.bridge_tier
+        meta: dict[str, Any] = {}
+        if platform:
+            meta["signal_platform"] = platform
+        if bridge_tier:
+            meta["bridge_tier"] = bridge_tier
+        _add(
+            itype,
+            url,
+            required=False,
+            confidence=identity.confidence,
+            metadata=meta,
+        )
+
+    return identifiers, skipped
+
+
+@app.post(
+    "/candidates/resolve/signal/candidate",
+    response_model=CandidateResolveResponse,
+    dependencies=[Depends(require_scope("kg:write"))],
+)
+def resolve_candidate_from_signal(
+    payload: SignalCandidateResolveRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Resolve-or-create a canonical candidate from a Signal sourced-candidate payload.
+
+    Maps Signal fields onto canonical identifiers (``signal_candidate_id``,
+    ``linkedin_url`` from ``candidate.linkedinUrl``, and one identifier per
+    entry of ``identities[]``) and stores the full Signal payload in
+    ``candidate_source_records`` with ``source='signal'``. Identity confidence
+    and bridge tier are preserved in identifier metadata so downstream match
+    review can weigh Signal's enrichment quality.
+    """
+    if payload.source_record_type not in {"sourced_candidate", "profile"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unsupported Signal source_record_type: {payload.source_record_type!r}"),
+        )
+
+    identifiers, skipped = _collect_signal_identifiers(payload)
+
+    source_payload: dict[str, Any] = payload.model_dump(exclude_none=False)
+    if skipped:
+        source_payload["_skipped_identifiers"] = skipped
+
+    profile_props: dict[str, Any] = {
+        k: v
+        for k, v in {
+            "headline": payload.headline,
+            "identity_summary": payload.identitySummary,
+            "ai_summary": payload.aiSummary,
+            "rank": payload.rank,
+            "request_id": payload.request_id,
+            "external_job_id": payload.external_job_id,
+            "sourcing_context": payload.sourcing_context or None,
+        }.items()
+        if v is not None
+    }
+
+    crustdata = payload.crustdata or {}
+
+    # Extract fields from crustdata for indexing
+    headline_idx = payload.headline or crustdata.get("basic_profile", {}).get("headline")
+
+    location_raw = None
+    if loc := crustdata.get("basic_profile", {}).get("location"):
+        location_raw = loc.get("full_location") or loc.get("raw")
+
+    skills_idx = []
+    if s := crustdata.get("skills"):
+        skills_idx = s.get("professional_network_skills") or []
+
+    seniority = None
+    exp = crustdata.get("experience", {}).get("employment_details", {})
+    if current := exp.get("current"):
+        if isinstance(current, list) and len(current) > 0:
+            seniority = current[0].get("seniority_level")
+
+    linkedin_id = None
+    if payload.linkedinUrl:
+        import re
+
+        match = re.search(r"/in/([^/]+)", payload.linkedinUrl)
+        if match:
+            linkedin_id = match.group(1).split("?")[0].split("#")[0].rstrip("/")
+
+    profile_pic = None
+    if bp := crustdata.get("basic_profile"):
+        profile_pic = bp.get("profile_picture_permalink")
+    if not profile_pic and (pn := crustdata.get("professional_network")):
+        profile_pic = pn.get("profile_picture_permalink")
+
+    resolve_request = CandidateResolveRequest(
+        source="signal",
+        source_record_type=payload.source_record_type,
+        source_record_id=payload.signal_candidate_id,
+        identifiers=identifiers,
+        profile=CandidateProfileInput(
+            display_name=payload.display_name,
+            props=profile_props,
+            profile=crustdata,
+            headline=headline_idx,
+            location_raw=location_raw,
+            skills=skills_idx,
+            seniority_level=seniority,
+            linkedin_url=payload.linkedinUrl,
+            linkedin_id=linkedin_id,
+            profile_picture_url=profile_pic,
+        ),
+        payload=source_payload,
+        metadata=payload.source_metadata or {},
+        source_url=payload.linkedinUrl,
+        tenant_id=payload.tenant_id,
+        job_tags=_normalize_signal_tags(payload.tags),
+    )
+
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = payload.tenant_id
+
+    pre_skipped = [
+        SkippedIdentifier(
+            identifier_type=s.get("identifier_type"),
+            value=s.get("value"),
+            reason=s.get("reason", ""),
+        )
+        for s in skipped
+    ]
+    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
+
+
+@app.post(
+    "/candidates/search/by-tags",
+    response_model=CandidateSearchByTagsResponse,
+    dependencies=[Depends(require_scope("kg:read"))],
+)
+def search_candidates_by_tags(
+    payload: CandidateSearchByTagsRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Search for candidates whose Signal source record tags overlap with the query tags.
+
+    A candidate is returned when at least 70 % of the query tags are present in
+    its stored Signal ``job_tags``. Results are ranked by overlap ratio descending.
+    At most 100 candidates are returned.
+    """
+    if candidate_repo is None:
+        raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
+
+    if JWT_ENABLED and claims:
+        tenant_id = claims.tenant_id
+    else:
+        tenant_id = payload.tenant_id
+
+    normalized_query_tags = _normalize_signal_tags(payload.tags)
+    if not normalized_query_tags:
+        return CandidateSearchByTagsResponse(results=[], query_tags=[], total=0)
+
+    rows = candidate_repo.search_candidates_by_signal_tags(
+        normalized_query_tags,
+        tenant_id=tenant_id,
+        limit=payload.limit,
+    )
+
+    results = [
+        CandidateTagSearchResult(
+            candidate_id=row.candidate_id,
+            display_name=row.display_name,
+            primary_email=row.primary_email,
+            signal_candidate_id=row.signal_source_record_id,
+            stored_tags=row.stored_tags,
+            matched_tags=sorted(set(normalized_query_tags) & set(row.stored_tags)),
+            overlap_count=row.overlap_count,
+            overlap_ratio=row.overlap_ratio,
+            profile=row.profile,
+        )
+        for row in rows
+    ]
+
+    return CandidateSearchByTagsResponse(
+        results=results,
+        query_tags=normalized_query_tags,
+        total=len(results),
+    )
