@@ -24,6 +24,7 @@ from pgvector.psycopg import Vector, register_vector
 from psycopg_pool import ConnectionPool
 
 from activekg.common.logger import get_enhanced_logger
+from activekg.engine.model_loading import HF_MODEL_LOAD_LOCK
 from activekg.graph.models import Edge, Node
 
 # RLS Configuration
@@ -202,6 +203,7 @@ class GraphRepository:
         self.dsn = dsn
         self.candidate_factor = candidate_factor  # For weighted search re-ranking
         self.logger = get_enhanced_logger(__name__)
+        self._cross_encoder: Any | None = None
 
         # Initialize connection pool
         # min_size=2: Keep 2 connections warm for low-latency requests
@@ -1499,18 +1501,23 @@ class GraphRepository:
             import torch
             from sentence_transformers import CrossEncoder
 
-            # Lazy load cross-encoder (caches after first load)
-            if not hasattr(self, "_cross_encoder"):
-                automodel_args = {
-                    "device_map": None,
-                    "low_cpu_mem_usage": False,
-                    "dtype": torch.float32,
-                }
-                self._cross_encoder = CrossEncoder(
-                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                    device="cpu",
-                    automodel_args=automodel_args,
-                )
+            # Lazy load cross-encoder (caches after first load). This shares the
+            # process-wide lock with the embedding model because Transformers
+            # mutates global model-loading state.
+            if self._cross_encoder is None:
+                with HF_MODEL_LOAD_LOCK:
+                    if self._cross_encoder is None:
+                        automodel_args = {
+                            "device_map": None,
+                            "low_cpu_mem_usage": False,
+                            "dtype": torch.float32,
+                        }
+                        model = CrossEncoder(
+                            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                            device="cpu",
+                            automodel_args=automodel_args,
+                        )
+                        self._cross_encoder = model
 
             # Prepare pairs for cross-encoder
             pairs = []

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 import numpy as np
 
 from activekg.common.logger import get_enhanced_logger
+from activekg.engine.model_loading import HF_MODEL_LOAD_LOCK
 
 
 class EmbeddingProvider:
@@ -24,35 +25,39 @@ class EmbeddingProvider:
     def _ensure_model(self):
         if self._model is not None:
             return
-        if self.backend == "sentence-transformers":
-            try:
-                from sentence_transformers import SentenceTransformer
-            except Exception as e:
-                raise ImportError("sentence-transformers not installed") from e
-            # Fix for sentence-transformers 5.x meta tensor issue
-            # Load without device parameter first, then move to CPU
-            # This avoids the meta tensor initialization issue
-            import os
+        # FastAPI background tasks can reach first use concurrently. Hugging Face
+        # model construction is not thread-safe and can leave parameters on the
+        # meta device when two constructors run at once.
+        with HF_MODEL_LOAD_LOCK:
+            if self._model is not None:
+                return
+            if self.backend == "sentence-transformers":
+                try:
+                    from sentence_transformers import SentenceTransformer
+                except Exception as e:
+                    raise ImportError("sentence-transformers not installed") from e
+                import os
 
-            import torch
+                import torch
 
-            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-            model_kwargs = {
-                "device_map": None,
-                "low_cpu_mem_usage": False,
-                "dtype": torch.float32,
-            }
-            self._model = SentenceTransformer(
-                self.model_name, device="cpu", model_kwargs=model_kwargs
-            )
-        elif self.backend == "ollama":
-            try:
-                import ollama
-            except Exception as e:
-                raise ImportError("ollama client not installed") from e
-            self._model = ollama
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
+                os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                model_kwargs = {
+                    "device_map": None,
+                    "low_cpu_mem_usage": False,
+                    "dtype": torch.float32,
+                }
+                model = SentenceTransformer(
+                    self.model_name, device="cpu", model_kwargs=model_kwargs
+                )
+                self._model = model
+            elif self.backend == "ollama":
+                try:
+                    import ollama
+                except Exception as e:
+                    raise ImportError("ollama client not installed") from e
+                self._model = ollama
+            else:
+                raise ValueError(f"Unsupported backend: {self.backend}")
 
     def encode(self, texts: Iterable[str]) -> np.ndarray:
         texts = list(texts)
