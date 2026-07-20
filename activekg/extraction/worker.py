@@ -42,7 +42,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     """Simple HTTP handler for healthcheck endpoint."""
 
     def do_GET(self):
-        if self.path == "/health":
+        # /readyz answered too: services configured with the root railway.json
+        # (whose healthcheck targets /readyz) must not be killed at deploy time.
+        if self.path in ("/health", "/readyz"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
