@@ -152,6 +152,10 @@ def verify_jwt(token: str) -> JWTClaims:
 
         if not tenant_id:
             raise HTTPException(status_code=401, detail="Missing tenant_id claim in JWT")
+        if tenant_id == "__quarantine__":
+            # Reserved sentinel for rows parked by migration 016; only
+            # operators (admin_role, direct DB) may touch quarantined data.
+            raise HTTPException(status_code=403, detail="Reserved tenant_id")
 
         if not actor_id:
             raise HTTPException(status_code=401, detail="Missing sub (actor_id) claim in JWT")

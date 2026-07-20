@@ -22,6 +22,68 @@ BEGIN
 END$$;
 
 -- ============================================================================
+-- 0. PREFLIGHT — refuse to run against data the backfill could corrupt
+-- ============================================================================
+-- Collapsing NULL-tenant rows into one sentinel tenant can violate the
+-- unique merge keys or silently merge distinct identities. Fail loudly with
+-- an actionable message instead; an operator must resolve these rows first.
+
+DO $$
+DECLARE n int;
+BEGIN
+    SELECT count(*) INTO n FROM (
+        SELECT identifier_type, value_normalized
+        FROM candidate_identifiers
+        WHERE tenant_id IS NULL
+        GROUP BY identifier_type, value_normalized
+        HAVING count(*) > 1
+    ) d;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 016 preflight: % duplicate NULL-tenant identifier group(s) in candidate_identifiers would collide under __quarantine__; resolve manually first', n;
+    END IF;
+
+    SELECT count(*) INTO n
+    FROM candidate_identifiers a
+    JOIN candidate_identifiers b
+      ON b.tenant_id = '__quarantine__'
+     AND a.identifier_type = b.identifier_type
+     AND a.value_normalized = b.value_normalized
+    WHERE a.tenant_id IS NULL;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 016 preflight: % NULL-tenant identifier(s) collide with existing __quarantine__ rows; resolve manually first', n;
+    END IF;
+
+    SELECT count(*) INTO n FROM (
+        SELECT source, source_record_type, source_record_id
+        FROM candidate_source_records
+        WHERE tenant_id IS NULL
+        GROUP BY source, source_record_type, source_record_id
+        HAVING count(*) > 1
+    ) d;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 016 preflight: % duplicate NULL-tenant source-record key(s) would collide under __quarantine__; resolve manually first', n;
+    END IF;
+
+    -- Pre-existing cross-tenant children would make the composite FK below
+    -- fail with an opaque error; surface them explicitly instead.
+    SELECT count(*) INTO n
+    FROM candidate_identifiers ci JOIN candidates c USING (candidate_id)
+    WHERE ci.tenant_id IS NOT NULL AND c.tenant_id IS NOT NULL
+      AND ci.tenant_id <> c.tenant_id;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 016 preflight: % candidate_identifiers row(s) reference a parent in another tenant; resolve manually first', n;
+    END IF;
+
+    SELECT count(*) INTO n
+    FROM candidate_source_records csr JOIN candidates c USING (candidate_id)
+    WHERE csr.tenant_id IS NOT NULL AND c.tenant_id IS NOT NULL
+      AND csr.tenant_id <> c.tenant_id;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 016 preflight: % candidate_source_records row(s) reference a parent in another tenant; resolve manually first', n;
+    END IF;
+END$$;
+
+-- ============================================================================
 -- 1. TENANT BACKFILL + NOT NULL
 -- ============================================================================
 

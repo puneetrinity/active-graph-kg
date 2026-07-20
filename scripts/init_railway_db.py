@@ -28,6 +28,7 @@ cleanly: objects that already exist are recorded as baselined, data errors
 are not forgiven.
 """
 
+import hashlib
 import importlib.util
 import os
 import re
@@ -79,12 +80,13 @@ def _connect_with_retry(dsn: str) -> psycopg.Connection:
 
 
 def _is_duplicate_object_error(e: Exception) -> bool:
+    # When a SQLSTATE is available it is authoritative: a unique-data
+    # violation (23505) carries "already exists" in its DETAIL text and must
+    # NOT be mistaken for a duplicate object. The string fallback only covers
+    # errors that surface without a SQLSTATE (e.g. wrapped DO-block DDL).
     sqlstate = getattr(e, "sqlstate", None)
-    if sqlstate in DUPLICATE_OBJECT_SQLSTATES:
-        return True
-    # DO-block wrapped DDL can surface as a generic error; "already exists"
-    # only ever comes from object DDL. Unique-violation messages say
-    # "duplicate key value", which this deliberately does not match.
+    if sqlstate is not None:
+        return sqlstate in DUPLICATE_OBJECT_SQLSTATES
     return "already exists" in str(e).lower()
 
 
@@ -153,18 +155,15 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
         )
         """
     )
-    cur.execute("SELECT filename FROM schema_migrations")
-    already_applied = {row[0] for row in cur.fetchall()}
+    cur.execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT")
+    cur.execute("SELECT filename, checksum FROM schema_migrations")
+    ledger = {row[0]: row[1] for row in cur.fetchall()}
 
     applied = 0
     baselined = 0
     ledger_skipped = 0
 
     for migration_file in migrations:
-        if migration_file in already_applied:
-            ledger_skipped += 1
-            continue
-
         migration_path = os.path.join(
             os.path.dirname(__file__), "..", "db", "migrations", migration_file
         )
@@ -172,17 +171,31 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
             print(f"ERROR: migration listed in manifest but missing on disk: {migration_file}")
             sys.exit(1)
 
-        print(f"Applying migration: {migration_file}...")
         with open(migration_path) as f:
             migration_sql = f.read()
+        checksum = hashlib.sha256(migration_sql.encode("utf-8")).hexdigest()
+
+        if migration_file in ledger:
+            recorded = ledger[migration_file]
+            if recorded and recorded != checksum:
+                print(
+                    f"WARNING: {migration_file} changed since it was applied "
+                    f"(recorded {recorded[:12]}, on disk {checksum[:12]}). "
+                    "Applied databases keep the recorded version; review the edit."
+                )
+            ledger_skipped += 1
+            continue
+
+        print(f"Applying migration: {migration_file}...")
         try:
             _execute_migration_sql(cur, migration_sql)
         except Exception as e:
             if _is_duplicate_object_error(e):
                 print(f"⊙ Migration {migration_file} baselined (objects already exist)")
                 cur.execute(
-                    "INSERT INTO schema_migrations (filename, baselined) VALUES (%s, true)",
-                    (migration_file,),
+                    "INSERT INTO schema_migrations (filename, baselined, checksum) "
+                    "VALUES (%s, true, %s)",
+                    (migration_file, checksum),
                 )
                 baselined += 1
                 continue
@@ -190,8 +203,8 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
             sys.exit(1)
 
         cur.execute(
-            "INSERT INTO schema_migrations (filename) VALUES (%s)",
-            (migration_file,),
+            "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
+            (migration_file, checksum),
         )
         print(f"✓ Migration {migration_file} applied")
         applied += 1
@@ -256,7 +269,42 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
             "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
         ).format(role_ident)
     )
-    print(f"✓ Runtime role {role} granted table access (no ownership)")
+
+    # The runtime role must never hold the admin_role RLS bypass.
+    cur.execute(
+        """
+        SELECT 1 FROM pg_auth_members m
+        JOIN pg_roles r ON r.oid = m.roleid
+        JOIN pg_roles mem ON mem.oid = m.member
+        WHERE r.rolname = 'admin_role' AND mem.rolname = %s
+        """,
+        (role,),
+    )
+    if cur.fetchone():
+        cur.execute(sql.SQL("REVOKE admin_role FROM {}").format(role_ident))
+        print(f"✓ Revoked admin_role membership from {role}")
+
+    # The ledger is readiness-trusted state: the app may read it, never write it.
+    cur.execute(
+        sql.SQL("REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON schema_migrations FROM {}").format(
+            role_ident
+        )
+    )
+    print(f"✓ Runtime role {role} granted table access (no ownership; ledger read-only)")
+
+
+def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
+    """Disable the app_user role older installs created with a known password."""
+    cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'app_user'")
+    row = cur.fetchone()
+    if row is None:
+        return
+    if row[0]:
+        cur.execute("ALTER ROLE app_user NOLOGIN")
+        print(
+            "✓ Legacy app_user role disabled (NOLOGIN) — it was provisioned with a "
+            "known default password. Use ACTIVEKG_RUNTIME_ROLE provisioning instead."
+        )
 
 
 def main():
@@ -285,6 +333,7 @@ def main():
                     _ensure_extensions_and_schema(cur)
                     _apply_migrations(cur, migrations)
                     _provision_runtime_role(cur)
+                    _remediate_legacy_app_user(cur)
                 finally:
                     cur.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
         print("\n✅ Database initialization complete!")

@@ -593,6 +593,9 @@ _READINESS_CANDIDATE_TABLES = ("candidates", "candidate_identifiers", "candidate
 # role still owns the tables (RLS nominal). Production must NOT set this.
 _READYZ_ALLOW_OWNER = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
 
+# Development-only: lets /readyz pass with JWT authentication disabled.
+_READYZ_ALLOW_NO_JWT = os.getenv("ACTIVEKG_READYZ_ALLOW_NO_JWT", "false").lower() == "true"
+
 
 @app.get("/readyz", response_model=None)
 def readyz() -> JSONResponse:
@@ -674,9 +677,28 @@ def readyz() -> JSONResponse:
                                     "runtime role owns candidate tables (RLS not effective): "
                                     + ", ".join(sorted(owned))
                                 )
+
+                        # 5. The runtime role must not inherit the RLS bypass
+                        cur.execute(
+                            """
+                            SELECT 1 FROM pg_auth_members m
+                            JOIN pg_roles r ON r.oid = m.roleid
+                            JOIN pg_roles mem ON mem.oid = m.member
+                            WHERE r.rolname = 'admin_role' AND mem.rolname = current_user
+                            """
+                        )
+                        if cur.fetchone():
+                            problems.append("runtime role is a member of admin_role (RLS bypass)")
         except Exception:
             logger.exception("readyz database check failed")
             problems.append("database check failed (see logs)")
+
+        # 6. Auth must be on outside development
+        if not JWT_ENABLED and not _READYZ_ALLOW_NO_JWT:
+            problems.append(
+                "JWT authentication disabled "
+                "(set ACTIVEKG_READYZ_ALLOW_NO_JWT=true only in development)"
+            )
 
     if problems:
         return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})

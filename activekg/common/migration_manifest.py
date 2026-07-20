@@ -23,4 +23,5 @@ MIGRATIONS: tuple[str, ...] = (
     "014_signal_job_tags.sql",
     "015_candidate_profile.sql",
     "016_candidate_rls.sql",
+    "017_reserve_quarantine_tenant.sql",
 )

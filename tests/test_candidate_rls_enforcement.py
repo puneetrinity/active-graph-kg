@@ -172,3 +172,22 @@ def test_cross_tenant_child_reference_rejected(seeded_candidates):
                     "VALUES (%s, %s, 'email', %s)",
                     (seeded_candidates["a"], TENANT_B, f"x_{uuid.uuid4().hex[:8]}@example.com"),
                 )
+
+
+def test_repository_conn_enforces_tenant_context(seeded_candidates):
+    """Exercise CandidateRepository._conn() itself (not a manually set GUC).
+
+    The repository must install the tenant GUC per call: same-tenant reads
+    work, cross-tenant and missing-tenant reads return nothing — all through
+    the restricted runtime role the deployed API uses.
+    """
+    pytest.importorskip("numpy")  # transitively required by activekg.graph.models
+    from activekg.graph.candidate_repository import CandidateRepository
+
+    repo = CandidateRepository(RUNTIME_DSN)
+    try:
+        assert repo.get_candidate(seeded_candidates["a"], tenant_id=TENANT_A) is not None
+        assert repo.get_candidate(seeded_candidates["a"], tenant_id=TENANT_B) is None
+        assert repo.get_candidate(seeded_candidates["a"], tenant_id=None) is None
+    finally:
+        repo.close()

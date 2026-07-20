@@ -157,6 +157,15 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
 
@@ -201,8 +210,13 @@ jobs:
             fi
             echo "OK: $table exists with RLS enabled"
           done
-          ledger=$(psql -h localhost -U activekg -d activekg -tAc "SELECT count(*) FROM schema_migrations;")
-          echo "OK: migration ledger has $ledger entries"
+          ledger=$(psql -h localhost -U activekg -d activekg -tAc \
+            "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
+          if [ "$ledger" != "17|0" ]; then
+            echo "FAIL: ledger should have exactly 17 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+            exit 1
+          fi
+          echo "OK: migration ledger has 17 applied, 0 baselined"
           posture=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -217,6 +231,101 @@ jobs:
           ACTIVEKG_RLS_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
         run: |
           pytest tests/test_candidate_rls_enforcement.py -v --tb=short --timeout=60
+
+      - name: Start API under the restricted runtime DSN
+        env:
+          ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
+          JWT_ENABLED: "true"
+          JWT_ALGORITHM: HS256
+          JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
+          JWT_AUDIENCE: activekg
+          JWT_ISSUER: vantahire
+          LLM_ENABLED: "false"
+          RUN_SCHEDULER: "false"
+          RUN_GCS_POLLER: "false"
+          RATE_LIMIT_ENABLED: "false"
+          REDIS_URL: redis://localhost:6379/0
+          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
+        run: |
+          uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
+          echo $! > api_server.pid
+          timeout 90 bash -c 'until curl -fsS http://localhost:8000/health >/dev/null; do sleep 2; done'
+
+      - name: Readiness must pass under the restricted role
+        run: |
+          body=$(curl -s -w '\n%{http_code}' http://localhost:8000/readyz)
+          code=$(echo "$body" | tail -1)
+          echo "$body"
+          if [ "$code" != "200" ]; then
+            echo "FAIL: /readyz returned $code under the restricted runtime role"
+            exit 1
+          fi
+
+      - name: JWT-backed candidate request through the API
+        env:
+          JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
+        run: |
+          pip install pyjwt requests >/dev/null
+          python3 - <<'PY'
+          import os, time, uuid, jwt, requests
+
+          token = jwt.encode(
+              {
+                  "tenant_id": "ci_rls_tenant",
+                  "sub": "ci-test",
+                  "actor_type": "service",
+                  "scopes": "kg:write kg:read",
+                  "jti": str(uuid.uuid4()),
+                  "iss": "vantahire",
+                  "aud": "activekg",
+                  "exp": int(time.time()) + 300,
+              },
+              os.environ["JWT_SECRET_KEY"],
+              algorithm="HS256",
+          )
+          r = requests.post(
+              "http://localhost:8000/candidates/resolve",
+              json={
+                  "identifiers": [{"identifier_type": "email", "value": "ci-rls@example.com"}],
+                  "source": "signal",
+                  "source_record_type": "profile",
+                  "source_record_id": "ci-rls-1",
+              },
+              headers={"Authorization": f"Bearer {token}"},
+              timeout=30,
+          )
+          print(r.status_code, r.text[:300])
+          assert r.status_code == 200, f"resolve failed: {r.status_code} {r.text[:300]}"
+
+          # Reserved sentinel tenant must be rejected outright.
+          bad = jwt.encode(
+              {
+                  "tenant_id": "__quarantine__",
+                  "sub": "ci-test",
+                  "actor_type": "service",
+                  "scopes": "kg:read",
+                  "jti": str(uuid.uuid4()),
+                  "iss": "vantahire",
+                  "aud": "activekg",
+                  "exp": int(time.time()) + 300,
+              },
+              os.environ["JWT_SECRET_KEY"],
+              algorithm="HS256",
+          )
+          r2 = requests.post(
+              "http://localhost:8000/candidates/search/by-tags",
+              json={"tags": ["x"]},
+              headers={"Authorization": f"Bearer {bad}"},
+              timeout=30,
+          )
+          print("quarantine tenant:", r2.status_code)
+          assert r2.status_code == 403, f"expected 403 for __quarantine__, got {r2.status_code}"
+          PY
+
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ -f api_server.pid ]; then kill $(cat api_server.pid) || true; fi
 
       # Repository/endpoint logic tests run as the owner role: they exercise
       # merge/resolve logic, not isolation — isolation is proven above by the
