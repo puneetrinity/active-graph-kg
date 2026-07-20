@@ -35,6 +35,7 @@ from activekg.api.admin_connectors import router as connectors_admin_router
 
 # JWT authentication and rate limiting
 from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims, require_scope
+from activekg.api.global_memory import router as global_memory_router
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.common.env import env_str
@@ -376,6 +377,7 @@ else:
 # Mount admin connectors router (minimal MVP)
 app.include_router(connectors_admin_router)
 app.include_router(connectors_webhook_router)
+app.include_router(global_memory_router)
 
 # Initialize LLM provider(s)
 llm = None
@@ -2413,7 +2415,7 @@ def search_nodes(
             "query": search_request.query,
             "results": formatted_results,
             "count": len(formatted_results),
-            "search_mode": score_type,
+            "search_mode": mode,
             "score_type": score_type,
             "mode": mode,
         }
