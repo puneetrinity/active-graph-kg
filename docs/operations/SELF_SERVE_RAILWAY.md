@@ -39,13 +39,27 @@ Add this badge to your repo README (already included in the main README section 
 When Railway imports the repo, it will use Nixpacks or the provided Dockerfile/Procfile to build the API.
 
 ### Configure Environment Variables
-Set these variables in Railway → Variables for the API service (note: the app will also accept `DATABASE_URL` as a fallback DSN when using the Railway Postgres plugin):
+Set these variables in Railway → Variables for the API service. The healthcheck
+is `/readyz`: it verifies the migration ledger, RLS policies, a **restricted
+runtime role** (non-owner, NOSUPERUSER, NOBYPASSRLS, no admin_role membership)
+and that JWT auth is enabled. A single owner DSN (or relying on the plugin's
+`DATABASE_URL`) leaves the service permanently not-ready; the start script also
+removes `DATABASE_URL` from the API environment when `ACTIVEKG_DSN` is set.
 
 Required
-- `ACTIVEKG_DSN` — e.g., `postgresql://USER:PASSWORD@HOST:5432/DBNAME`
+- `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (the Railway Postgres plugin
+  credential); used only by the boot-time migration script, then unset
+- `ACTIVEKG_RUNTIME_ROLE=activekg_app` and `ACTIVEKG_RUNTIME_PASSWORD=<secret>`
+  — the migration script provisions/hardens this restricted role on boot
+- `ACTIVEKG_DSN` — runtime DSN as the restricted role, e.g.
+  `postgresql://activekg_app:SECRET@HOST:5432/DBNAME`
+- `JWT_ENABLED=true` plus key configuration (see `.env.example`)
 - `EMBEDDING_BACKEND=sentence-transformers`
 - `EMBEDDING_MODEL=all-MiniLM-L6-v2` (or a larger model like `all-mpnet-base-v2`)
 - `SEARCH_DISTANCE=cosine` (or `l2` to match your index opclass)
+
+Development-only escape hatches (never production): `ACTIVEKG_READYZ_ALLOW_OWNER=true`,
+`ACTIVEKG_READYZ_ALLOW_NO_JWT=true`.
 
 Recommended
 - `PGVECTOR_INDEXES=ivfflat,hnsw` (coexist for migration)

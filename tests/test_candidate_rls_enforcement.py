@@ -191,3 +191,93 @@ def test_repository_conn_enforces_tenant_context(seeded_candidates):
         assert repo.get_candidate(seeded_candidates["a"], tenant_id=None) is None
     finally:
         repo.close()
+
+
+@pytest.fixture(scope="module")
+def seeded_children(seeded_candidates):
+    """Attach one identifier and one source record per tenant (owner role)."""
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO candidate_identifiers "
+                "(candidate_id, tenant_id, identifier_type, value_normalized) "
+                "VALUES (%s, %s, 'email', %s), (%s, %s, 'email', %s)",
+                (
+                    seeded_candidates["a"],
+                    TENANT_A,
+                    f"a_{TENANT_A}@example.com",
+                    seeded_candidates["b"],
+                    TENANT_B,
+                    f"b_{TENANT_B}@example.com",
+                ),
+            )
+            cur.execute(
+                "INSERT INTO candidate_source_records "
+                "(candidate_id, tenant_id, source, source_record_type, source_record_id) "
+                "VALUES (%s, %s, 'signal', 'profile', %s), (%s, %s, 'signal', 'profile', %s)",
+                (
+                    seeded_candidates["a"],
+                    TENANT_A,
+                    f"rec_{TENANT_A}",
+                    seeded_candidates["b"],
+                    TENANT_B,
+                    f"rec_{TENANT_B}",
+                ),
+            )
+    yield seeded_candidates
+    # Parent-row cleanup cascades via the composite FK.
+
+
+def test_identifier_isolation(runtime_conn, seeded_children):
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_A)
+            cur.execute(
+                "SELECT tenant_id FROM candidate_identifiers WHERE tenant_id IN (%s, %s)",
+                (TENANT_A, TENANT_B),
+            )
+            rows = cur.fetchall()
+    assert rows and all(r[0] == TENANT_A for r in rows)
+
+
+def test_source_record_isolation(runtime_conn, seeded_children):
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_B)
+            cur.execute(
+                "SELECT tenant_id FROM candidate_source_records WHERE tenant_id IN (%s, %s)",
+                (TENANT_A, TENANT_B),
+            )
+            rows = cur.fetchall()
+    assert rows and all(r[0] == TENANT_B for r in rows)
+
+
+def test_cross_tenant_source_record_rejected(seeded_children):
+    """Composite FK on candidate_source_records, proven schema-level (owner role)."""
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                cur.execute(
+                    "INSERT INTO candidate_source_records "
+                    "(candidate_id, tenant_id, source, source_record_type, source_record_id) "
+                    "VALUES (%s, %s, 'signal', 'profile', %s)",
+                    (seeded_children["a"], TENANT_B, f"x_{uuid.uuid4().hex[:8]}"),
+                )
+
+
+def test_blank_tenant_rejected_by_constraint(seeded_candidates):
+    """Migration 018: blank tenant_id can never be stored, even by the owner."""
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    "INSERT INTO candidates (candidate_id, tenant_id, display_name) "
+                    "VALUES (%s, '', %s)",
+                    (str(uuid.uuid4()), "Blank Tenant"),
+                )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    "INSERT INTO candidates (candidate_id, tenant_id, display_name) "
+                    "VALUES (%s, '   ', %s)",
+                    (str(uuid.uuid4()), "Whitespace Tenant"),
+                )

@@ -681,19 +681,29 @@ active-graph-kg/
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?templateUrl=https://github.com/puneetrinity/active-graph-kg)
 
-After deploy, set variables in Railway → Variables:
-- `ACTIVEKG_DSN` (Postgres with pgvector). Optional if you added the Railway Postgres plugin — the app will fall back to `DATABASE_URL` automatically.
+After deploy, set variables in Railway → Variables. The service healthcheck is
+`/readyz`, which requires a **restricted runtime role** (non-owner, NOSUPERUSER,
+NOBYPASSRLS) and JWT auth enabled — a single owner DSN will hold the deployment
+permanently not-ready.
+
+Required (split-DSN model):
+- `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (e.g. the Railway Postgres
+  plugin credential). Used only by the startup migration script and removed
+  from the environment before the API starts.
+- `ACTIVEKG_RUNTIME_ROLE=activekg_app` + `ACTIVEKG_RUNTIME_PASSWORD=<secret>` —
+  the migration script creates/hardens this restricted role on boot.
+- `ACTIVEKG_DSN` — the runtime DSN using that restricted role, e.g.
+  `postgresql://activekg_app:<secret>@<host>:5432/<db>`.
+- `JWT_ENABLED=true` + key config (see `.env.example`).
 - `EMBEDDING_BACKEND=sentence-transformers`
 - `EMBEDDING_MODEL=all-MiniLM-L6-v2` (or larger, e.g., all-mpnet-base-v2)
 - `SEARCH_DISTANCE=cosine`
 - Optional: `PGVECTOR_INDEXES=ivfflat,hnsw`, `RUN_SCHEDULER=true`, `AUTO_INDEX_ON_STARTUP=false`
 
-Initialize DB once:
-```bash
-psql $ACTIVEKG_DSN -c "CREATE EXTENSION IF NOT EXISTS vector;"
-psql $ACTIVEKG_DSN -f db/init.sql
-psql $ACTIVEKG_DSN -f enable_rls_policies.sql
-```
+Schema, migrations and role provisioning run automatically on every boot
+(`scripts/init_railway_db.py`, idempotent, ledger-tracked) — no manual psql
+initialization is needed. Development-only escape hatches:
+`ACTIVEKG_READYZ_ALLOW_OWNER=true`, `ACTIVEKG_READYZ_ALLOW_NO_JWT=true`.
 
 Run the demo bundle against Railway:
 ```bash

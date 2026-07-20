@@ -28,58 +28,71 @@ END$$;
 -- unique merge keys or silently merge distinct identities. Fail loudly with
 -- an actionable message instead; an operator must resolve these rows first.
 
+-- The backfill assigns every row an EFFECTIVE tenant:
+--   candidates:  COALESCE(tenant_id, '__quarantine__')
+--   children:    COALESCE(own tenant_id, parent tenant_id, '__quarantine__')
+-- All uniqueness and FK validation below is computed against that effective
+-- tenant, so rows that end up in *different* tenants never trip the check,
+-- while every collision the backfill would actually create does.
 DO $$
 DECLARE n int;
 BEGIN
+    -- Identifier merge keys must stay unique under the effective tenant.
+    WITH eff AS (
+        SELECT COALESCE(ci.tenant_id, c.tenant_id, '__quarantine__') AS eff_tenant,
+               ci.identifier_type,
+               ci.value_normalized
+        FROM candidate_identifiers ci
+        JOIN candidates c USING (candidate_id)
+    )
     SELECT count(*) INTO n FROM (
-        SELECT identifier_type, value_normalized
-        FROM candidate_identifiers
-        WHERE tenant_id IS NULL
-        GROUP BY identifier_type, value_normalized
+        SELECT eff_tenant, identifier_type, value_normalized
+        FROM eff
+        GROUP BY eff_tenant, identifier_type, value_normalized
         HAVING count(*) > 1
     ) d;
     IF n > 0 THEN
-        RAISE EXCEPTION 'migration 016 preflight: % duplicate NULL-tenant identifier group(s) in candidate_identifiers would collide under __quarantine__; resolve manually first', n;
+        RAISE EXCEPTION 'migration 016 preflight: % identifier merge-key group(s) would collide after the tenant backfill (including collisions with existing rows in the target tenant); resolve manually first', n;
     END IF;
 
-    SELECT count(*) INTO n
-    FROM candidate_identifiers a
-    JOIN candidate_identifiers b
-      ON b.tenant_id = '__quarantine__'
-     AND a.identifier_type = b.identifier_type
-     AND a.value_normalized = b.value_normalized
-    WHERE a.tenant_id IS NULL;
-    IF n > 0 THEN
-        RAISE EXCEPTION 'migration 016 preflight: % NULL-tenant identifier(s) collide with existing __quarantine__ rows; resolve manually first', n;
-    END IF;
-
+    -- Source-record keys must stay unique under the effective tenant.
+    WITH eff AS (
+        SELECT COALESCE(csr.tenant_id, c.tenant_id, '__quarantine__') AS eff_tenant,
+               csr.source,
+               csr.source_record_type,
+               csr.source_record_id
+        FROM candidate_source_records csr
+        JOIN candidates c USING (candidate_id)
+    )
     SELECT count(*) INTO n FROM (
-        SELECT source, source_record_type, source_record_id
-        FROM candidate_source_records
-        WHERE tenant_id IS NULL
-        GROUP BY source, source_record_type, source_record_id
+        SELECT eff_tenant, source, source_record_type, source_record_id
+        FROM eff
+        GROUP BY eff_tenant, source, source_record_type, source_record_id
         HAVING count(*) > 1
     ) d;
     IF n > 0 THEN
-        RAISE EXCEPTION 'migration 016 preflight: % duplicate NULL-tenant source-record key(s) would collide under __quarantine__; resolve manually first', n;
+        RAISE EXCEPTION 'migration 016 preflight: % source-record key group(s) would collide after the tenant backfill; resolve manually first', n;
     END IF;
 
-    -- Pre-existing cross-tenant children would make the composite FK below
-    -- fail with an opaque error; surface them explicitly instead.
+    -- Any child whose effective tenant differs from its parent's effective
+    -- tenant would violate the composite FK (covers non-NULL child with NULL
+    -- parent, and plain cross-tenant references); surface them clearly.
     SELECT count(*) INTO n
-    FROM candidate_identifiers ci JOIN candidates c USING (candidate_id)
-    WHERE ci.tenant_id IS NOT NULL AND c.tenant_id IS NOT NULL
-      AND ci.tenant_id <> c.tenant_id;
+    FROM candidate_identifiers ci
+    JOIN candidates c USING (candidate_id)
+    WHERE COALESCE(ci.tenant_id, c.tenant_id, '__quarantine__')
+          <> COALESCE(c.tenant_id, '__quarantine__');
     IF n > 0 THEN
-        RAISE EXCEPTION 'migration 016 preflight: % candidate_identifiers row(s) reference a parent in another tenant; resolve manually first', n;
+        RAISE EXCEPTION 'migration 016 preflight: % candidate_identifiers row(s) would end up in a different tenant than their parent candidate; resolve manually first', n;
     END IF;
 
     SELECT count(*) INTO n
-    FROM candidate_source_records csr JOIN candidates c USING (candidate_id)
-    WHERE csr.tenant_id IS NOT NULL AND c.tenant_id IS NOT NULL
-      AND csr.tenant_id <> c.tenant_id;
+    FROM candidate_source_records csr
+    JOIN candidates c USING (candidate_id)
+    WHERE COALESCE(csr.tenant_id, c.tenant_id, '__quarantine__')
+          <> COALESCE(c.tenant_id, '__quarantine__');
     IF n > 0 THEN
-        RAISE EXCEPTION 'migration 016 preflight: % candidate_source_records row(s) reference a parent in another tenant; resolve manually first', n;
+        RAISE EXCEPTION 'migration 016 preflight: % candidate_source_records row(s) would end up in a different tenant than their parent candidate; resolve manually first', n;
     END IF;
 END$$;
 
