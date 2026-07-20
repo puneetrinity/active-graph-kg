@@ -31,5 +31,8 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 8000
 
-CMD bash -c 'uvicorn activekg.api.main:app --host $HOST --port $PORT --workers $WORKERS'
+# start_railway.sh runs init_railway_db.py (schema + migrations, idempotent)
+# before exec'ing uvicorn — the Railway web service builds from this Dockerfile,
+# so migrations must run here, not only in the unused Procfile path.
+CMD ["sh", "/app/scripts/start_railway.sh"]
 

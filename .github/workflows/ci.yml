@@ -138,6 +138,101 @@ jobs:
         continue-on-error: false
 
   # ============================================================================
+  # Job 3.5: Deploy Path — clean-DB init via the real Railway script
+  # ============================================================================
+  deploy-path-db:
+    name: Deploy Path (clean DB + candidate schema)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: activekg
+          POSTGRES_PASSWORD: activekg
+          POSTGRES_DB: activekg
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-timeout
+          pip install -r requirements.txt
+
+      - name: Run Railway init script on a clean database (as deploys do)
+        env:
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
+        run: |
+          python scripts/init_railway_db.py
+
+      - name: Re-run init script (idempotency + ledger check)
+        env:
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
+        run: |
+          python scripts/init_railway_db.py
+
+      - name: Assert schema, RLS, ledger and runtime-role posture
+        env:
+          PGPASSWORD: activekg
+        run: |
+          for table in candidates candidate_identifiers candidate_source_records; do
+            rls=$(psql -h localhost -U activekg -d activekg -tAc \
+              "SELECT relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '$table';")
+            if [ "$rls" != "t" ]; then
+              echo "FAIL: table $table missing or RLS disabled (got: '$rls')"
+              exit 1
+            fi
+            echo "OK: $table exists with RLS enabled"
+          done
+          ledger=$(psql -h localhost -U activekg -d activekg -tAc "SELECT count(*) FROM schema_migrations;")
+          echo "OK: migration ledger has $ledger entries"
+          posture=$(psql -h localhost -U activekg -d activekg -tAc \
+            "SELECT rolsuper || '|' || rolbypassrls FROM pg_roles WHERE rolname = 'activekg_app';")
+          if [ "$posture" != "f|f" ]; then
+            echo "FAIL: runtime role posture wrong (got: '$posture', want 'f|f')"
+            exit 1
+          fi
+          echo "OK: runtime role is NOSUPERUSER NOBYPASSRLS"
+
+      - name: Run RLS enforcement tests as the restricted runtime role
+        env:
+          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_RLS_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
+        run: |
+          pytest tests/test_candidate_rls_enforcement.py -v --tb=short --timeout=60
+
+      # Repository/endpoint logic tests run as the owner role: they exercise
+      # merge/resolve logic, not isolation — isolation is proven above by the
+      # dedicated enforcement suite running as the restricted role.
+      - name: Run candidate identity tests against the migrated schema
+        env:
+          ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          JWT_ENABLED: "false"
+          LLM_ENABLED: "false"
+          RUN_SCHEDULER: "false"
+          RATE_LIMIT_ENABLED: "false"
+          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
+        run: |
+          pytest tests/test_candidate_*.py --ignore=tests/test_candidate_rls_enforcement.py -v --tb=short --timeout=60
+
+  # ============================================================================
   # Job 4: E2E Integration Tests with PostgreSQL + Redis
   # ============================================================================
   integration-tests:
@@ -422,7 +517,7 @@ jobs:
   build-summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [lint, fast-unit-tests, unit-tests, integration-tests]
+    needs: [lint, fast-unit-tests, unit-tests, deploy-path-db, integration-tests]
     if: always()
     steps:
       - name: Check build status
@@ -431,10 +526,12 @@ jobs:
           echo "  Lint: ${{ needs.lint.result }}"
           echo "  Fast Unit Tests: ${{ needs.fast-unit-tests.result }}"
           echo "  Unit Tests (DB): ${{ needs.unit-tests.result }}"
+          echo "  Deploy Path (DB): ${{ needs.deploy-path-db.result }}"
           echo "  Integration Tests: ${{ needs.integration-tests.result }}"
 
           if [ "${{ needs.fast-unit-tests.result }}" != "success" ] || \
              [ "${{ needs.unit-tests.result }}" != "success" ] || \
+             [ "${{ needs.deploy-path-db.result }}" != "success" ] || \
              [ "${{ needs.integration-tests.result }}" != "success" ]; then
             echo "❌ Build failed - required jobs did not pass"
             exit 1
