@@ -13,18 +13,12 @@ BEGIN
     END IF;
 END$$;
 
--- Create app_user role for regular API access
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user') THEN
-        CREATE ROLE app_user LOGIN PASSWORD 'change_me_in_production';
-    END IF;
-END$$;
-
--- Grant usage to app_user
-GRANT USAGE ON SCHEMA public TO app_user;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO app_user;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO app_user;
+-- NOTE: no login roles are provisioned here. This file runs on the startup
+-- path (scripts/init_railway_db.py), so it must never create credentials.
+-- The restricted runtime role is provisioned at deploy time — either manually
+-- or via ACTIVEKG_RUNTIME_ROLE / ACTIVEKG_RUNTIME_PASSWORD env vars consumed
+-- by init_railway_db.py — with NOSUPERUSER NOBYPASSRLS and table grants only
+-- (never ownership), so RLS policies actually apply to it.
 
 -- ============================================================================
 -- NODES TABLE

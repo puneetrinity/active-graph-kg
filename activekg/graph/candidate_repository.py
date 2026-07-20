@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from psycopg_pool import ConnectionPool
@@ -48,12 +50,32 @@ class CandidateRepository:
         if self._owns_pool:
             self.pool.close()
 
+    @contextmanager
+    def _conn(self, tenant_id: str | None = None) -> Iterator[Any]:
+        """Pooled connection with transaction-scoped tenant context for RLS.
+
+        Mirrors ``GraphRepository._conn()``: sets ``app.current_tenant_id``
+        via ``set_config(..., true)`` (SET LOCAL semantics) inside an explicit
+        transaction, so RLS policies see the caller's tenant and the setting
+        never leaks back into the pool. An unset/None tenant installs an empty
+        GUC, which matches no rows under the equality policies — a caller
+        without tenant context reads and writes nothing.
+        """
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT set_config('app.current_tenant_id', %s, true)",
+                        ("" if tenant_id is None else tenant_id,),
+                    )
+                yield conn
+
     # ------------------------------------------------------------------
     # candidates
     # ------------------------------------------------------------------
 
     def create_candidate(self, candidate: Candidate) -> str:
-        with self.pool.connection() as conn:
+        with self._conn(candidate.tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -88,7 +110,7 @@ class CandidateRepository:
                 return str(cur.fetchone()[0])
 
     def get_candidate(self, candidate_id: str, tenant_id: str | None = None) -> Candidate | None:
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 if tenant_id is None:
                     cur.execute(
@@ -188,13 +210,13 @@ class CandidateRepository:
         if tenant_id is not None:
             sql += " AND tenant_id IS NOT DISTINCT FROM %s"
             params.append(tenant_id)
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return cur.rowcount > 0
 
     def delete_candidate(self, candidate_id: str, tenant_id: str | None = None) -> bool:
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 if tenant_id is None:
                     cur.execute("DELETE FROM candidates WHERE candidate_id = %s", (candidate_id,))
@@ -239,7 +261,7 @@ class CandidateRepository:
             confidence=confidence,
             metadata=metadata or {},
         )
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -284,7 +306,7 @@ class CandidateRepository:
     def list_identifiers(
         self, candidate_id: str, tenant_id: str | None = None
     ) -> list[CandidateIdentifier]:
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 if tenant_id is None:
                     cur.execute(
@@ -319,7 +341,7 @@ class CandidateRepository:
     ) -> Candidate | None:
         """Look up a canonical candidate by any of its identifiers."""
         normalized = normalize_identifier(identifier_type, value)
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -345,7 +367,7 @@ class CandidateRepository:
         tenant_id: str | None = None,
     ) -> bool:
         normalized = normalize_identifier(identifier_type, value)
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -365,7 +387,7 @@ class CandidateRepository:
     def upsert_source_record(self, record: CandidateSourceRecord) -> CandidateSourceRecord:
         """Insert or update a source record. Idempotent on
         ``(tenant_id, source, source_record_type, source_record_id)``."""
-        with self.pool.connection() as conn:
+        with self._conn(record.tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -438,7 +460,7 @@ class CandidateRepository:
             sql.append("AND tenant_id IS NOT DISTINCT FROM %s")
             params.append(tenant_id)
         sql.append("ORDER BY source, source_record_type, source_record_id")
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute("\n".join(sql), params)
                 return [self._row_to_source_record(r) for r in cur.fetchall()]
@@ -451,7 +473,7 @@ class CandidateRepository:
         self, org_id: str, *, tenant_id: str | None = None
     ) -> list[Candidate]:
         """Return canonical candidates that have a VantaHire source record for org_id."""
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -472,7 +494,7 @@ class CandidateRepository:
         self, recruiter_id: str, *, tenant_id: str | None = None
     ) -> list[Candidate]:
         """Return canonical candidates with a VantaHire record for effective_recruiter_id."""
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -493,7 +515,7 @@ class CandidateRepository:
         self, user_id: str, *, tenant_id: str | None = None
     ) -> list[Candidate]:
         """Return canonical candidates with a VantaHire record created by user_id."""
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -535,7 +557,7 @@ class CandidateRepository:
         min_overlap = math.ceil(0.7 * len(tags))
         query_tags = tags  # already normalized by the caller
 
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -703,7 +725,7 @@ class CandidateRepository:
     def _find_candidate_by_normalized(
         self, identifier_type: str, value_normalized: str, *, tenant_id: str | None
     ) -> Candidate | None:
-        with self.pool.connection() as conn:
+        with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """

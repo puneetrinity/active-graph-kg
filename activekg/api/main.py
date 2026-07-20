@@ -27,7 +27,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -583,6 +583,102 @@ def health() -> HealthCheckResponse:
         llm_backend=LLM_BACKEND if LLM_ENABLED and llm else None,
         llm_model=LLM_MODEL if LLM_ENABLED and llm else None,
     )
+
+
+_READINESS_CANDIDATE_TABLES = ("candidates", "candidate_identifiers", "candidate_source_records")
+
+# Transitional escape hatch for single-DSN dev environments where the runtime
+# role still owns the tables (RLS nominal). Production must NOT set this.
+_READYZ_ALLOW_OWNER = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
+
+
+@app.get("/readyz", response_model=None)
+def readyz() -> JSONResponse:
+    """Readiness probe: schema, migrations, RLS and runtime-role posture.
+
+    Checks, in order: DB reachable; migration ledger contains every manifest
+    entry; candidate tables exist with RLS enabled and tenant policies
+    installed; the connected runtime role is NOSUPERUSER/NOBYPASSRLS and does
+    not own the candidate tables (owners bypass ordinary RLS). /health stays
+    a liveness probe with no schema dependency. Raw database errors are
+    logged, never returned.
+    """
+    problems: list[str] = []
+    if candidate_repo is None:
+        problems.append("candidate repository not initialized (TEST_MODE)")
+    else:
+        try:
+            from activekg.common.migration_manifest import MIGRATIONS
+
+            with candidate_repo.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    # 1. Migration ledger completeness
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables WHERE table_name = 'schema_migrations'"
+                    )
+                    if cur.fetchone() is None:
+                        problems.append("migration ledger missing")
+                    else:
+                        cur.execute("SELECT filename FROM schema_migrations")
+                        applied = {row[0] for row in cur.fetchall()}
+                        missing = [m for m in MIGRATIONS if m not in applied]
+                        if missing:
+                            problems.append(f"migrations not applied: {', '.join(missing)}")
+
+                    # 2. Candidate tables exist, RLS enabled, owner recorded
+                    cur.execute(
+                        """
+                        SELECT c.relname, c.relrowsecurity, pg_get_userbyid(c.relowner)
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'public' AND c.relname = ANY(%s)
+                        """,
+                        (list(_READINESS_CANDIDATE_TABLES),),
+                    )
+                    found = {name: (bool(rls), owner) for name, rls, owner in cur.fetchall()}
+                    for table in _READINESS_CANDIDATE_TABLES:
+                        if table not in found:
+                            problems.append(f"missing table: {table}")
+                        elif not found[table][0]:
+                            problems.append(f"rls disabled: {table}")
+
+                    # 3. Tenant policies installed (tenant isolation + admin = 2)
+                    cur.execute(
+                        "SELECT tablename, count(*) FROM pg_policies "
+                        "WHERE tablename = ANY(%s) GROUP BY tablename",
+                        (list(_READINESS_CANDIDATE_TABLES),),
+                    )
+                    policy_counts = dict(cur.fetchall())
+                    for table in _READINESS_CANDIDATE_TABLES:
+                        if policy_counts.get(table, 0) < 2:
+                            problems.append(f"tenant policies missing: {table}")
+
+                    # 4. Runtime role posture: RLS must actually apply to it
+                    cur.execute(
+                        "SELECT current_user, rolsuper, rolbypassrls "
+                        "FROM pg_roles WHERE rolname = current_user"
+                    )
+                    role_row = cur.fetchone()
+                    if role_row:
+                        role_name, is_super, bypasses = role_row
+                        if is_super:
+                            problems.append("runtime role is superuser (bypasses RLS)")
+                        if bypasses:
+                            problems.append("runtime role has BYPASSRLS")
+                        if not _READYZ_ALLOW_OWNER:
+                            owned = [t for t, (_rls, owner) in found.items() if owner == role_name]
+                            if owned:
+                                problems.append(
+                                    "runtime role owns candidate tables (RLS not effective): "
+                                    + ", ".join(sorted(owned))
+                                )
+        except Exception:
+            logger.exception("readyz database check failed")
+            problems.append("database check failed (see logs)")
+
+    if problems:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})
+    return JSONResponse(content={"status": "ready"})
 
 
 @app.get("/_admin/connectors/cache/health", response_model=None)
