@@ -17,6 +17,7 @@ MIGRATIONS: tuple[str, ...] = (
     "009_embedding_queue_status.sql",
     "010_update_text_search_vector.sql",
     "011_unique_tenant_external_id.sql",
+    "012_global_memory.sql",
     "012_candidate_identity.sql",
     "013_vantahire_provenance.sql",
     "014_signal_job_tags.sql",
