@@ -4380,16 +4380,27 @@ class CandidateTagSearchResult(BaseModel):
     profile: dict[str, Any] | None = None
 
 
+# Server-side ceiling for tag-search results per call. Requests above it are
+# clamped (not rejected) and reported via total_matched/truncated so callers
+# can log honestly instead of silently losing candidates.
+TAG_SEARCH_MAX_LIMIT = int(os.getenv("ACTIVEKG_TAG_SEARCH_MAX_LIMIT", "500"))
+
+
 class CandidateSearchByTagsRequest(BaseModel):
     tags: list[str]
     tenant_id: str | None = None
-    limit: int = Field(default=100, ge=1, le=100)
+    limit: int = Field(default=100, ge=1)
 
 
 class CandidateSearchByTagsResponse(BaseModel):
     results: list[CandidateTagSearchResult]
     query_tags: list[str]
     total: int
+    # Contract fields for callers: how many candidates cleared the overlap
+    # threshold in total, and whether the response was cut by the limit.
+    total_matched: int = 0
+    truncated: bool = False
+    applied_limit: int = 0
 
 
 def _evaluate_strong_signal_mismatch(
@@ -5289,10 +5300,11 @@ def search_candidates_by_tags(
     if not normalized_query_tags:
         return CandidateSearchByTagsResponse(results=[], query_tags=[], total=0)
 
-    rows = candidate_repo.search_candidates_by_signal_tags(
+    applied_limit = min(payload.limit, TAG_SEARCH_MAX_LIMIT)
+    rows, total_matched = candidate_repo.search_candidates_by_signal_tags(
         normalized_query_tags,
         tenant_id=tenant_id,
-        limit=payload.limit,
+        limit=applied_limit,
     )
 
     results = [
@@ -5314,4 +5326,7 @@ def search_candidates_by_tags(
         results=results,
         query_tags=normalized_query_tags,
         total=len(results),
+        total_matched=total_matched,
+        truncated=total_matched > len(results),
+        applied_limit=applied_limit,
     )

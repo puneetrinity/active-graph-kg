@@ -542,18 +542,20 @@ class CandidateRepository:
         *,
         tenant_id: str | None = None,
         limit: int = 100,
-    ) -> list[SignalTagSearchRow]:
-        """Return candidates whose Signal source record job_tags overlap with *tags*.
+    ) -> tuple[list[SignalTagSearchRow], int]:
+        """Return (rows, total_matched) for candidates whose job_tags overlap *tags*.
 
         A candidate's source record is considered a match when the number of
         query tags present in its stored tags is >= ceil(0.7 * len(tags)).
         Results are ranked by overlap count descending. If a candidate has
         multiple qualifying Signal source records only the highest-overlap record
-        is returned. Never returns more than *limit* rows (max 100).
+        is returned. ``total_matched`` counts ALL candidates that cleared the
+        threshold, so callers can detect truncation when it exceeds len(rows).
+        The API layer owns the business limit; this clamp is a safety ceiling.
         """
         if not tags:
-            return []
-        limit = min(limit, 100)
+            return [], 0
+        limit = min(limit, 1000)
         min_overlap = math.ceil(0.7 * len(tags))
         query_tags = tags  # already normalized by the caller
 
@@ -591,7 +593,7 @@ class CandidateRepository:
                         FROM filtered
                         ORDER BY candidate_id, overlap_count DESC
                     )
-                    SELECT * FROM deduped
+                    SELECT *, count(*) OVER () AS total_matched FROM deduped
                     ORDER BY overlap_count DESC, candidate_id
                     LIMIT %s
                     """,
@@ -600,6 +602,7 @@ class CandidateRepository:
                 rows = cur.fetchall()
 
         results = []
+        total_matched = int(rows[0][9]) if rows else 0
         for row in rows:
             overlap_count = int(row[8])
             overlap_ratio = overlap_count / len(tags) if tags else 0.0
@@ -617,7 +620,7 @@ class CandidateRepository:
                     overlap_ratio=overlap_ratio,
                 )
             )
-        return results
+        return results, total_matched
 
     # ------------------------------------------------------------------
     # high-level merge helper
