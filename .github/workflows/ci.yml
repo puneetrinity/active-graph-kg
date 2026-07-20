@@ -204,9 +204,9 @@ jobs:
           ledger=$(psql -h localhost -U activekg -d activekg -tAc "SELECT count(*) FROM schema_migrations;")
           echo "OK: migration ledger has $ledger entries"
           posture=$(psql -h localhost -U activekg -d activekg -tAc \
-            "SELECT rolsuper || '|' || rolbypassrls FROM pg_roles WHERE rolname = 'activekg_app';")
-          if [ "$posture" != "f|f" ]; then
-            echo "FAIL: runtime role posture wrong (got: '$posture', want 'f|f')"
+            "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
+          if [ "$posture" != "t" ]; then
+            echo "FAIL: runtime role posture wrong (got: '$posture', want 't' = not superuser, no bypassrls)"
             exit 1
           fi
           echo "OK: runtime role is NOSUPERUSER NOBYPASSRLS"
