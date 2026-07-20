@@ -154,3 +154,33 @@ def test_search_tenant_isolation(client: TestClient):
     # Searching from tenant_b should not see tenant_a's candidate.
     resp = _search(client, tags=[shared_tag], tenant=tenant_b)
     assert not any(r["candidate_id"] == cid for r in resp["results"])
+
+
+def test_truncation_contract_reports_total_matched(client: TestClient, tenant: str):
+    """Slice (b) contract: the caller must be able to detect result truncation."""
+    tags = ["python", "django", "backend"]
+    for i in range(3):
+        _ingest(client, sig_id=f"trunc-{i}-{uuid.uuid4().hex[:6]}", tags=tags, tenant=tenant)
+
+    body = _search(client, tags=tags, tenant=tenant, limit=2)
+    assert body["total"] == 2
+    assert body["total_matched"] == 3
+    assert body["truncated"] is True
+    assert body["applied_limit"] == 2
+
+    full = _search(client, tags=tags, tenant=tenant, limit=100)
+    assert full["total"] == 3
+    assert full["total_matched"] == 3
+    assert full["truncated"] is False
+
+
+def test_limit_above_legacy_cap_is_accepted_and_clamped(client: TestClient, tenant: str):
+    """Requests above the old le=100 model cap must not 422; the server clamps
+    to ACTIVEKG_TAG_SEARCH_MAX_LIMIT and reports the applied limit."""
+    tags = ["golang", "kubernetes"]
+    _ingest(client, sig_id=f"cap-{uuid.uuid4().hex[:6]}", tags=tags, tenant=tenant)
+
+    body = _search(client, tags=tags, tenant=tenant, limit=300)
+    assert body["applied_limit"] == 300  # default server max is 500
+    assert body["total"] == 1
+    assert body["truncated"] is False
