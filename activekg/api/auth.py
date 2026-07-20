@@ -236,3 +236,41 @@ def require_scope(required_scope: str):
             )
 
     return _check
+
+
+def verification_key_problems() -> list[str]:
+    """Report JWT configuration problems for readiness checks.
+
+    Presence is not usability: an RS256 deployment needs parseable PEM public
+    keys; an HS256 deployment needs a non-trivial shared secret. The Signal
+    issuer's key, when configured, must parse too.
+    """
+    problems: list[str] = []
+    if not JWT_ENABLED:
+        return problems
+
+    def _pem_parses(pem: str) -> bool:
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+            load_pem_public_key(pem.encode("utf-8"))
+            return True
+        except Exception:
+            return False
+
+    if JWT_ALGORITHM.startswith("RS"):
+        if not JWT_PUBLIC_KEY:
+            problems.append("JWT_ALGORITHM is RS* but JWT_PUBLIC_KEY is not set")
+        elif not _pem_parses(JWT_PUBLIC_KEY):
+            problems.append("JWT_PUBLIC_KEY is not a parseable PEM public key")
+    elif JWT_ALGORITHM.startswith("HS"):
+        if not JWT_SECRET_KEY:
+            problems.append("JWT_ALGORITHM is HS* but JWT_SECRET_KEY is not set")
+        elif len(JWT_SECRET_KEY) < 32:
+            problems.append("JWT_SECRET_KEY is shorter than 32 characters")
+    else:
+        problems.append(f"unsupported JWT_ALGORITHM: {JWT_ALGORITHM}")
+
+    if SIGNAL_JWT_PUBLIC_KEY and not _pem_parses(SIGNAL_JWT_PUBLIC_KEY):
+        problems.append("SIGNAL_JWT_PUBLIC_KEY is not a parseable PEM public key")
+    return problems

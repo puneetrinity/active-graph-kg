@@ -66,11 +66,13 @@ CHECKSUM_TRANSITIONS: dict[str, dict[str, str]] = {
 }
 
 # Baseline verifiers: before a migration may be recorded as baselined off a
-# duplicate-object error, EVERY listed object must already exist — one stray
-# duplicate must not vouch for a partially migrated legacy database.
+# duplicate-object error, EVERY object it creates must already exist — one
+# stray duplicate must not vouch for a partially migrated legacy database.
+# Previously-baselined ledger rows are re-verified on every boot.
 # Forms: ("table", name) | ("column", table, column) | ("index", name)
 #        | ("constraint", name) | ("policy", table, name)
 #        | ("function", name) | ("trigger", table, name)
+#        | ("notnull", table, column)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
     "004_add_external_id_index.sql": [
@@ -79,43 +81,130 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
     ],
     "add_text_search.sql": [
         ("column", "nodes", "text_search_vector"),
+        ("function", "update_text_search_vector"),
         ("trigger", "nodes", "nodes_text_search_update"),
+        ("index", "idx_nodes_text_search"),
     ],
-    "005_connector_configs_table.sql": [("table", "connector_configs")],
-    "006_add_key_version.sql": [("column", "connector_configs", "key_version")],
+    "005_connector_configs_table.sql": [
+        ("table", "connector_configs"),
+        ("index", "idx_connector_configs_enabled"),
+        ("index", "idx_connector_configs_tenant"),
+        ("function", "update_connector_configs_updated_at"),
+        ("trigger", "connector_configs", "connector_configs_updated_at"),
+    ],
+    "006_add_key_version.sql": [
+        ("column", "connector_configs", "key_version"),
+        ("index", "idx_connector_configs_key_version"),
+        ("index", "idx_connector_configs_provider_key_version"),
+    ],
     "007_add_provider_check.sql": [("constraint", "chk_provider_valid")],
-    "008_connector_cursors_table.sql": [("table", "connector_cursors")],
+    "008_connector_cursors_table.sql": [
+        ("table", "connector_cursors"),
+        ("index", "idx_connector_cursors_provider"),
+        ("index", "idx_connector_cursors_tenant"),
+        ("index", "idx_connector_cursors_updated_at"),
+        ("function", "update_connector_cursors_updated_at"),
+        ("trigger", "connector_cursors", "connector_cursors_updated_at"),
+    ],
     "009_embedding_queue_status.sql": [
         ("column", "nodes", "embedding_status"),
+        ("column", "nodes", "embedding_error"),
         ("column", "nodes", "embedding_attempts"),
+        ("column", "nodes", "embedding_updated_at"),
+        ("index", "idx_nodes_embedding_status"),
+        ("index", "idx_nodes_embedding_updated_at"),
     ],
     "010_update_text_search_vector.sql": [("function", "update_text_search_vector")],
     "011_unique_tenant_external_id.sql": [("index", "idx_nodes_tenant_external_id_unique")],
     "012_global_memory.sql": [
         ("table", "global_candidates"),
         ("table", "candidate_provenance"),
+        ("table", "tenant_candidate_access"),
+        ("table", "feedback_events"),
+        ("index", "idx_gc_linkedin_id"),
+        ("index", "idx_gc_linkedin_url"),
+        ("index", "idx_gc_github_id"),
+        ("index", "idx_gc_email_hash"),
+        ("index", "idx_gc_role_family"),
+        ("index", "idx_gc_location"),
+        ("index", "idx_gc_skills"),
+        ("index", "idx_gc_embedding_status"),
+        ("index", "idx_gc_last_evidence"),
+        ("index", "idx_cp_global_candidate"),
+        ("index", "idx_cp_global_source_null_tenant"),
+        ("index", "idx_cp_source_type"),
+        ("index", "idx_cp_tenant"),
+        ("index", "idx_tca_tenant"),
+        ("index", "idx_tca_global_candidate"),
+        ("index", "idx_tca_visibility"),
+        ("index", "idx_fe_tenant_job"),
+        ("index", "idx_fe_global_candidate"),
+        ("index", "idx_fe_action"),
+        ("index", "idx_fe_created"),
+        ("index", "idx_fe_role_location"),
     ],
     "012_candidate_identity.sql": [
         ("table", "candidates"),
         ("table", "candidate_identifiers"),
         ("table", "candidate_source_records"),
+        ("index", "idx_candidates_tenant"),
+        ("index", "idx_candidates_node_id"),
+        ("index", "idx_candidates_primary_email"),
+        ("index", "idx_candidates_props"),
         ("index", "idx_candidate_identifiers_unique"),
+        ("index", "idx_candidate_identifiers_candidate"),
+        ("index", "idx_candidate_identifiers_lookup"),
+        ("index", "idx_candidate_source_records_unique"),
+        ("index", "idx_candidate_source_records_candidate"),
+        ("index", "idx_candidate_source_records_payload"),
     ],
-    "013_vantahire_provenance.sql": [("column", "candidate_source_records", "org_id")],
-    "014_signal_job_tags.sql": [("column", "candidate_source_records", "job_tags")],
+    "013_vantahire_provenance.sql": [
+        ("column", "candidate_source_records", "org_id"),
+        ("column", "candidate_source_records", "job_id"),
+        ("column", "candidate_source_records", "effective_recruiter_id"),
+        ("column", "candidate_source_records", "created_by_user_id"),
+        ("column", "candidate_source_records", "resume_source"),
+        ("index", "idx_csr_vantahire_org_id"),
+        ("index", "idx_csr_vantahire_recruiter"),
+        ("index", "idx_csr_vantahire_uploader"),
+        ("index", "idx_csr_vantahire_job_id"),
+    ],
+    "014_signal_job_tags.sql": [
+        ("column", "candidate_source_records", "job_tags"),
+        ("index", "idx_csr_signal_job_tags"),
+    ],
     "015_candidate_profile.sql": [
         ("column", "candidates", "profile"),
+        ("column", "candidates", "headline"),
+        ("column", "candidates", "location_raw"),
         ("column", "candidates", "skills"),
+        ("column", "candidates", "seniority_level"),
+        ("column", "candidates", "linkedin_url"),
+        ("column", "candidates", "linkedin_id"),
+        ("column", "candidates", "profile_picture_url"),
+        ("index", "idx_candidates_skills_gin"),
+        ("index", "idx_candidates_location"),
+        ("index", "idx_candidates_seniority"),
+        ("index", "idx_candidates_linkedin_id"),
     ],
     "016_candidate_rls.sql": [
         ("policy", "candidates", "tenant_isolation_candidates"),
+        ("policy", "candidates", "admin_all_candidates"),
         ("policy", "candidate_identifiers", "tenant_isolation_candidate_identifiers"),
+        ("policy", "candidate_identifiers", "admin_all_candidate_identifiers"),
         ("policy", "candidate_source_records", "tenant_isolation_candidate_source_records"),
+        ("policy", "candidate_source_records", "admin_all_candidate_source_records"),
+        ("constraint", "candidates_tenant_candidate_uniq"),
         ("constraint", "candidate_identifiers_tenant_candidate_fkey"),
         ("constraint", "candidate_source_records_tenant_candidate_fkey"),
+        ("notnull", "candidates", "tenant_id"),
+        ("notnull", "candidate_identifiers", "tenant_id"),
+        ("notnull", "candidate_source_records", "tenant_id"),
     ],
     "017_reserve_quarantine_tenant.sql": [
         ("policy", "candidates", "tenant_isolation_candidates"),
+        ("policy", "candidate_identifiers", "tenant_isolation_candidate_identifiers"),
+        ("policy", "candidate_source_records", "tenant_isolation_candidate_source_records"),
     ],
     "018_tenant_nonblank.sql": [
         ("constraint", "candidates_tenant_nonblank"),
@@ -157,6 +246,13 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         cur.execute(
             "SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
             "WHERE c.relname = %s AND t.tgname = %s",
+            (check[1], check[2]),
+        )
+    elif kind == "notnull":
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s "
+            "AND column_name = %s AND is_nullable = 'NO'",
             (check[1], check[2]),
         )
     else:
@@ -277,8 +373,24 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
         """
     )
     cur.execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT")
-    cur.execute("SELECT filename, checksum FROM schema_migrations")
-    ledger = {row[0]: row[1] for row in cur.fetchall()}
+    cur.execute("SELECT filename, checksum, baselined FROM schema_migrations")
+    rows = cur.fetchall()
+    ledger = {row[0]: row[1] for row in rows}
+
+    # Baselined rows were accepted on trust that their objects exist — re-prove
+    # that on every boot so a bad historical baseline cannot persist silently.
+    for filename, _checksum, was_baselined in rows:
+        if not was_baselined or filename not in migrations:
+            continue
+        ok, detail = _verify_baseline(cur, filename)
+        if not ok:
+            print(
+                f"ERROR: previously baselined migration {filename} fails "
+                f"re-verification: {detail}. The database is partially "
+                "migrated; reconcile it manually (or delete the ledger row to "
+                "re-apply the migration)."
+            )
+            sys.exit(1)
 
     applied = 0
     baselined = 0

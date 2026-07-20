@@ -135,9 +135,14 @@ Create a new Railway service with Docker image:
 - Set env: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
 - Use a persistent volume
 
-Configure the API service’s `ACTIVEKG_DSN` to point to the DB service hostname inside Railway.
+Configure the API service's DSNs to point to the DB service hostname inside
+Railway using the split-DSN model: `ACTIVEKG_MIGRATE_DSN` (the owner
+credential, used only by the boot-time migration script) plus
+`ACTIVEKG_RUNTIME_ROLE`/`ACTIVEKG_RUNTIME_PASSWORD` and `ACTIVEKG_DSN` (the
+restricted runtime role).
 
-Initialize and index as above (`db/init.sql`, `enable_rls_policies.sql`, `/admin/indexes`).
+Schema, RLS and migrations run automatically at boot; build ANN indexes via
+`/admin/indexes` as above.
 
 ---
 
@@ -169,12 +174,17 @@ For production deployments with **automatic connector ingestion** (GCS/S3/Drive)
 ### Service 1: API Server
 
 **Config:** `railway.json`
-**Start Command:** `uvicorn activekg.api.main:app --host 0.0.0.0 --port $PORT`
+**Start Command:** leave unset — the Dockerfile runs `scripts/start_railway.sh`
+(migrations + runtime-role provisioning, then Uvicorn). Never start Uvicorn
+directly in production.
 
 **Environment Variables:**
 ```bash
-# Core
-ACTIVEKG_DSN=postgresql://...  # Or use DATABASE_URL
+# Core (split-DSN model — see "Configure Environment Variables" above)
+ACTIVEKG_MIGRATE_DSN=postgresql://owner:...   # privileged; migrations only
+ACTIVEKG_RUNTIME_ROLE=activekg_app
+ACTIVEKG_RUNTIME_PASSWORD=...
+ACTIVEKG_DSN=postgresql://activekg_app:...    # restricted runtime role
 EMBEDDING_BACKEND=sentence-transformers
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 
@@ -341,10 +351,10 @@ The connector tries credentials in this order:
 ### Basic Deployment (API Only)
 - [ ] API service deployed with `railway.json`
 - [ ] PostgreSQL with pgvector provisioned
-- [ ] Database initialized (`db/init.sql`, `enable_rls_policies.sql`)
+- [ ] Split-DSN env vars set (`ACTIVEKG_MIGRATE_DSN`, runtime role vars, `ACTIVEKG_DSN`) — schema/migrations run automatically at boot
 - [ ] JWT configured and tokens generated
 - [ ] ANN indexes created via `/admin/indexes`
-- [ ] Health check passes (`/health`)
+- [ ] Readiness passes (`/readyz` returns `{"status":"ready"}`)
 
 ### Full Deployment (With Connectors)
 - [ ] **API service** deployed with `RUN_SCHEDULER=true`
