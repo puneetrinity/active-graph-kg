@@ -32,10 +32,10 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from activekg.api.admin_connectors import router as connectors_admin_router
-from activekg.api.global_memory import router as global_memory_router
 
 # JWT authentication and rate limiting
 from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims, require_scope
+from activekg.api.global_memory import router as global_memory_router
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.common.env import env_str

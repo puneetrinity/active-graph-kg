@@ -32,28 +32,90 @@ GLOBAL_MEMORY_ENABLED = os.getenv("GLOBAL_MEMORY_ENABLED", "false").lower() == "
 # ---------------------------------------------------------------------------
 
 _COUNTRY_NAME_TO_CODE: dict[str, str] = {
-    "united states": "US", "united states of america": "US", "usa": "US", "us": "US",
-    "united kingdom": "GB", "uk": "GB", "great britain": "GB", "england": "GB",
-    "india": "IN", "canada": "CA", "australia": "AU", "germany": "DE", "deutschland": "DE",
-    "france": "FR", "brazil": "BR", "brasil": "BR", "japan": "JP", "china": "CN",
-    "south korea": "KR", "korea": "KR", "republic of korea": "KR",
-    "israel": "IL", "singapore": "SG", "netherlands": "NL", "holland": "NL",
-    "sweden": "SE", "norway": "NO", "denmark": "DK", "finland": "FI",
-    "ireland": "IE", "switzerland": "CH", "austria": "AT", "belgium": "BE",
-    "spain": "ES", "italy": "IT", "portugal": "PT", "poland": "PL",
-    "czech republic": "CZ", "czechia": "CZ", "romania": "RO", "hungary": "HU",
-    "turkey": "TR", "türkiye": "TR", "mexico": "MX", "argentina": "AR",
-    "colombia": "CO", "chile": "CL", "peru": "PE",
-    "south africa": "ZA", "nigeria": "NG", "kenya": "KE", "egypt": "EG",
-    "united arab emirates": "AE", "uae": "AE", "saudi arabia": "SA",
-    "indonesia": "ID", "malaysia": "MY", "philippines": "PH", "vietnam": "VN",
-    "thailand": "TH", "taiwan": "TW", "hong kong": "HK",
-    "new zealand": "NZ", "pakistan": "PK", "bangladesh": "BD", "sri lanka": "LK",
-    "ukraine": "UA", "russia": "RU", "russian federation": "RU",
-    "estonia": "EE", "latvia": "LV", "lithuania": "LT",
-    "croatia": "HR", "serbia": "RS", "bulgaria": "BG", "greece": "GR",
-    "luxembourg": "LU", "iceland": "IS", "costa rica": "CR", "uruguay": "UY",
-    "ghana": "GH", "ethiopia": "ET", "morocco": "MA", "tunisia": "TN",
+    "united states": "US",
+    "united states of america": "US",
+    "usa": "US",
+    "us": "US",
+    "united kingdom": "GB",
+    "uk": "GB",
+    "great britain": "GB",
+    "england": "GB",
+    "india": "IN",
+    "canada": "CA",
+    "australia": "AU",
+    "germany": "DE",
+    "deutschland": "DE",
+    "france": "FR",
+    "brazil": "BR",
+    "brasil": "BR",
+    "japan": "JP",
+    "china": "CN",
+    "south korea": "KR",
+    "korea": "KR",
+    "republic of korea": "KR",
+    "israel": "IL",
+    "singapore": "SG",
+    "netherlands": "NL",
+    "holland": "NL",
+    "sweden": "SE",
+    "norway": "NO",
+    "denmark": "DK",
+    "finland": "FI",
+    "ireland": "IE",
+    "switzerland": "CH",
+    "austria": "AT",
+    "belgium": "BE",
+    "spain": "ES",
+    "italy": "IT",
+    "portugal": "PT",
+    "poland": "PL",
+    "czech republic": "CZ",
+    "czechia": "CZ",
+    "romania": "RO",
+    "hungary": "HU",
+    "turkey": "TR",
+    "türkiye": "TR",
+    "mexico": "MX",
+    "argentina": "AR",
+    "colombia": "CO",
+    "chile": "CL",
+    "peru": "PE",
+    "south africa": "ZA",
+    "nigeria": "NG",
+    "kenya": "KE",
+    "egypt": "EG",
+    "united arab emirates": "AE",
+    "uae": "AE",
+    "saudi arabia": "SA",
+    "indonesia": "ID",
+    "malaysia": "MY",
+    "philippines": "PH",
+    "vietnam": "VN",
+    "thailand": "TH",
+    "taiwan": "TW",
+    "hong kong": "HK",
+    "new zealand": "NZ",
+    "pakistan": "PK",
+    "bangladesh": "BD",
+    "sri lanka": "LK",
+    "ukraine": "UA",
+    "russia": "RU",
+    "russian federation": "RU",
+    "estonia": "EE",
+    "latvia": "LV",
+    "lithuania": "LT",
+    "croatia": "HR",
+    "serbia": "RS",
+    "bulgaria": "BG",
+    "greece": "GR",
+    "luxembourg": "LU",
+    "iceland": "IS",
+    "costa rica": "CR",
+    "uruguay": "UY",
+    "ghana": "GH",
+    "ethiopia": "ET",
+    "morocco": "MA",
+    "tunisia": "TN",
 }
 
 _ISO_ALPHA2 = re.compile(r"^[A-Z]{2}$")
@@ -99,9 +161,20 @@ def _normalize_role_family(raw: str | None) -> str | None:
         return mapped
     # If already a valid Signal role family (e.g. non-tech families), pass through
     _SIGNAL_ROLE_FAMILIES = {
-        "backend", "frontend", "fullstack", "devops", "data", "qa", "security", "mobile",
-        "technical_account_manager", "sales_engineer", "customer_success",
-        "account_executive", "business_development", "account_manager",
+        "backend",
+        "frontend",
+        "fullstack",
+        "devops",
+        "data",
+        "qa",
+        "security",
+        "mobile",
+        "technical_account_manager",
+        "sales_engineer",
+        "customer_success",
+        "account_executive",
+        "business_development",
+        "account_manager",
     }
     if val in _SIGNAL_ROLE_FAMILIES:
         return val
@@ -247,14 +320,16 @@ _CANDIDATE_FIELDS = [
 # Fields that always overwrite on update (identity anchors + merge control).
 # All other _CANDIDATE_FIELDS use COALESCE (non-destructive merge).
 _ALWAYS_OVERWRITE_FIELDS = {
-    "linkedin_id", "linkedin_url", "github_id", "email_hash",
-    "identity_confidence", "merge_status",
+    "linkedin_id",
+    "linkedin_url",
+    "github_id",
+    "email_hash",
+    "identity_confidence",
+    "merge_status",
 }
 
 
-def _find_existing(
-    cur: psycopg.Cursor, body: GlobalCandidateUpsert
-) -> dict[str, Any] | None:
+def _find_existing(cur: psycopg.Cursor, body: GlobalCandidateUpsert) -> dict[str, Any] | None:
     """Lookup existing global_candidate by anchor priority: linkedin_id > github_id > email_hash."""
     for anchor, value in [
         ("linkedin_id", body.linkedin_id),
@@ -270,13 +345,13 @@ def _find_existing(
         row = cur.fetchone()
         if row:
             cols = [d.name for d in cur.description]
-            return dict(zip(cols, row))
+            return dict(zip(cols, row, strict=False))
     return None
 
 
 def _row_to_dict(cur: psycopg.Cursor, row: tuple) -> dict[str, Any]:
     cols = [d.name for d in cur.description]
-    result = dict(zip(cols, row))
+    result = dict(zip(cols, row, strict=False))
     # Serialize non-JSON-native types for the response.
     for k, v in result.items():
         if hasattr(v, "isoformat"):
@@ -357,9 +432,7 @@ def upsert_global_candidate(
                         params,
                     )
                 else:
-                    cur.execute(
-                        "INSERT INTO global_candidates DEFAULT VALUES RETURNING id"
-                    )
+                    cur.execute("INSERT INTO global_candidates DEFAULT VALUES RETURNING id")
 
                 new_id = str(cur.fetchone()[0])
                 logger.info(
@@ -748,12 +821,14 @@ def sync_applicant_to_global_memory(
                 (
                     gc_id,
                     tenant_id,
-                    json.dumps({
-                        "application_id": str(application_id) if application_id else None,
-                        "job_id": str(job_id) if job_id else None,
-                        "org_id": str(org_id) if org_id else None,
-                        "resume_node_id": node_id,
-                    }),
+                    json.dumps(
+                        {
+                            "application_id": str(application_id) if application_id else None,
+                            "job_id": str(job_id) if job_id else None,
+                            "org_id": str(org_id) if org_id else None,
+                            "resume_node_id": node_id,
+                        }
+                    ),
                 ),
             )
 
