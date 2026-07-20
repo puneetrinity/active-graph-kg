@@ -295,13 +295,21 @@ make open-grafana            # opens http://localhost:3000/d/activekg-ops
 
 ## Railway DB Initialization
 
-For Railway deployments, initialize the database (pgvector + schema + migrations) using:
+Railway deployments initialize the database **automatically on every boot**:
+the Dockerfile runs `scripts/start_railway.sh`, which executes
+`scripts/init_railway_db.py` (extensions + schema + ledger-tracked migrations +
+restricted runtime-role provisioning) before starting Uvicorn, then removes the
+privileged credentials from the environment. Do not initialize manually and do
+not start Uvicorn directly in production — that bypasses migrations, role
+provisioning and credential scoping, and `/readyz` will refuse readiness.
+
+For local/one-off use the script is idempotent and can be run by hand with
+`ACTIVEKG_MIGRATE_DSN` set to a privileged DSN:
 
 ```bash
+ACTIVEKG_MIGRATE_DSN=postgresql://owner:pw@localhost:5432/activekg \
 python3 scripts/init_railway_db.py
 ```
-
-The script is safe to run multiple times and applies all migrations in `db/migrations/`.
 
 ### Demo Run (Quick)
 

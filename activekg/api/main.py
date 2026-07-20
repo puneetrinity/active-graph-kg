@@ -34,7 +34,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from activekg.api.admin_connectors import router as connectors_admin_router
 
 # JWT authentication and rate limiting
-from activekg.api.auth import JWT_ENABLED, JWTClaims, get_jwt_claims, require_scope
+from activekg.api.auth import (
+    JWT_ENABLED,
+    JWT_PUBLIC_KEY,
+    JWT_SECRET_KEY,
+    JWTClaims,
+    get_jwt_claims,
+    require_scope,
+)
 from activekg.api.global_memory import router as global_memory_router
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
@@ -636,8 +643,13 @@ def readyz() -> JSONResponse:
                             os.path.dirname(__file__), "..", "..", "db", "migrations"
                         )
                         for m in MIGRATIONS:
+                            if m not in applied:
+                                continue  # already reported under "not applied"
                             recorded = applied.get(m)
                             if not recorded:
+                                # Init backfills NULLs at boot; a NULL here means
+                                # the ledger was not written by this build's script.
+                                drifted.append(f"{m} (checksum not recorded)")
                                 continue
                             path = os.path.join(migrations_dir, m)
                             try:
@@ -668,16 +680,23 @@ def readyz() -> JSONResponse:
                         elif not found[table][0]:
                             problems.append(f"rls disabled: {table}")
 
-                    # 3. Tenant policies installed (tenant isolation + admin = 2)
+                    # 3. Tenant policies verified by identity AND definition:
+                    # the tenant policy must bind the session GUC and exclude
+                    # the __quarantine__ sentinel; the admin policy must exist.
                     cur.execute(
-                        "SELECT tablename, count(*) FROM pg_policies "
-                        "WHERE tablename = ANY(%s) GROUP BY tablename",
+                        "SELECT tablename, policyname, COALESCE(qual::text, '') "
+                        "FROM pg_policies WHERE tablename = ANY(%s)",
                         (list(_READINESS_CANDIDATE_TABLES),),
                     )
-                    policy_counts = dict(cur.fetchall())
+                    policies = {(t, p): q for t, p, q in cur.fetchall()}
                     for table in _READINESS_CANDIDATE_TABLES:
-                        if policy_counts.get(table, 0) < 2:
-                            problems.append(f"tenant policies missing: {table}")
+                        qual = policies.get((table, f"tenant_isolation_{table}"))
+                        if qual is None:
+                            problems.append(f"tenant policy missing: {table}")
+                        elif "app.current_tenant_id" not in qual or "__quarantine__" not in qual:
+                            problems.append(f"tenant policy definition unexpected: {table}")
+                        if (table, f"admin_all_{table}") not in policies:
+                            problems.append(f"admin policy missing: {table}")
 
                     # 4. Runtime role posture: RLS must actually apply to it
                     cur.execute(
@@ -711,12 +730,14 @@ def readyz() -> JSONResponse:
             logger.exception("readyz database check failed")
             problems.append("database check failed (see logs)")
 
-        # 6. Auth must be on outside development
+        # 6. Auth must be on outside development — and actually usable
         if not JWT_ENABLED and not _READYZ_ALLOW_NO_JWT:
             problems.append(
                 "JWT authentication disabled "
                 "(set ACTIVEKG_READYZ_ALLOW_NO_JWT=true only in development)"
             )
+        elif JWT_ENABLED and not (JWT_PUBLIC_KEY or JWT_SECRET_KEY):
+            problems.append("JWT enabled but no verification key configured")
 
     if problems:
         return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})
