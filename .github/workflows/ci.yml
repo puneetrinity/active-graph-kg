@@ -322,10 +322,44 @@ jobs:
           assert r2.status_code == 403, f"expected 403 for __quarantine__, got {r2.status_code}"
           PY
 
+      - name: Readiness must detect tampered policies and ledger
+        env:
+          PGPASSWORD: activekg
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+        run: |
+          check_readyz() {
+            curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/readyz
+          }
+          # Malformed policy: dropping the tenant policy must flip readiness.
+          psql -h localhost -U activekg -d activekg -c \
+            "DROP POLICY tenant_isolation_candidates ON candidates;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code after policy drop (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -f db/migrations/017_reserve_quarantine_tenant.sql
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after policy restore (want 200)"; exit 1; }
+          # NULL ledger checksum must flip readiness.
+          psql -h localhost -U activekg -d activekg -c \
+            "UPDATE schema_migrations SET checksum = NULL WHERE filename = '018_tenant_nonblank.sql';"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with NULL checksum (want 503)"; exit 1; }
+          python scripts/init_railway_db.py  # backfills the NULL
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after checksum backfill (want 200)"; exit 1; }
+          echo "OK: readiness detects tampered policies and ledger"
+        # the init re-run above needs the migrate DSN
+        # (guards tests below run it the same way)
+
       - name: Stop API server
         if: always()
         run: |
           if [ -f api_server.pid ]; then kill $(cat api_server.pid) || true; fi
+
+      - name: Run deploy-path guard regression tests
+        env:
+          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+        run: |
+          pytest tests/test_deploy_path_guards.py -v --tb=short --timeout=180
 
       # Repository/endpoint logic tests run as the owner role: they exercise
       # merge/resolve logic, not isolation — isolation is proven above by the

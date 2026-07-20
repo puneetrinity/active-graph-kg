@@ -143,9 +143,9 @@ pip install -r requirements.txt
 
 ### 4. Start API Server
 ```bash
-# Database (DSN fallback: ACTIVEKG_DSN or DATABASE_URL for PaaS)
+# Database (local development; production uses the split-DSN model — see
+# "Deploy on Railway" below. DATABASE_URL is a dev-only fallback.)
 export ACTIVEKG_DSN='postgresql://activekg:activekg@localhost:5432/activekg'
-# Or for Railway/PaaS: uses DATABASE_URL automatically if ACTIVEKG_DSN not set
 
 export EMBEDDING_BACKEND='sentence-transformers'
 export EMBEDDING_MODEL='all-MiniLM-L6-v2'
@@ -320,7 +320,10 @@ make demo-run && make open-grafana
 ```
 
 Notes:
-- The API accepts either `ACTIVEKG_DSN` or `DATABASE_URL` for the database connection.
+- Production uses the split-DSN model: `ACTIVEKG_MIGRATE_DSN` (owner, migrations
+  only) + `ACTIVEKG_DSN` (restricted runtime role). `DATABASE_URL` is a
+  development-only fallback and is removed from the API environment at startup
+  when `ACTIVEKG_DSN` is set.
 - Run exactly one API instance with `RUN_SCHEDULER=true`.
 - `make open-grafana` opens `GRAFANA_URL` (defaults to `http://localhost:3000/d/activekg-ops`) using your OS opener.
 

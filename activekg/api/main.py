@@ -36,11 +36,10 @@ from activekg.api.admin_connectors import router as connectors_admin_router
 # JWT authentication and rate limiting
 from activekg.api.auth import (
     JWT_ENABLED,
-    JWT_PUBLIC_KEY,
-    JWT_SECRET_KEY,
     JWTClaims,
     get_jwt_claims,
     require_scope,
+    verification_key_problems,
 )
 from activekg.api.global_memory import router as global_memory_router
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
@@ -680,23 +679,39 @@ def readyz() -> JSONResponse:
                         elif not found[table][0]:
                             problems.append(f"rls disabled: {table}")
 
-                    # 3. Tenant policies verified by identity AND definition:
-                    # the tenant policy must bind the session GUC and exclude
-                    # the __quarantine__ sentinel; the admin policy must exist.
+                    # 3. Tenant policies verified across every dimension:
+                    # identity, permissiveness, command, roles, and both the
+                    # USING and WITH CHECK expressions (GUC binding + the
+                    # __quarantine__ exclusion). The admin policy's definition
+                    # is verified too, not just its existence.
                     cur.execute(
-                        "SELECT tablename, policyname, COALESCE(qual::text, '') "
-                        "FROM pg_policies WHERE tablename = ANY(%s)",
+                        "SELECT schemaname, tablename, policyname, permissive, roles::text, "
+                        "cmd, COALESCE(qual::text, ''), COALESCE(with_check::text, '') "
+                        "FROM pg_policies WHERE schemaname = 'public' AND tablename = ANY(%s)",
                         (list(_READINESS_CANDIDATE_TABLES),),
                     )
-                    policies = {(t, p): q for t, p, q in cur.fetchall()}
+                    policies = {(r[1], r[2]): r for r in cur.fetchall()}
+
+                    def _tenant_expr_ok(expr: str) -> bool:
+                        return "app.current_tenant_id" in expr and "__quarantine__" in expr
+
                     for table in _READINESS_CANDIDATE_TABLES:
-                        qual = policies.get((table, f"tenant_isolation_{table}"))
-                        if qual is None:
+                        row = policies.get((table, f"tenant_isolation_{table}"))
+                        if row is None:
                             problems.append(f"tenant policy missing: {table}")
-                        elif "app.current_tenant_id" not in qual or "__quarantine__" not in qual:
-                            problems.append(f"tenant policy definition unexpected: {table}")
-                        if (table, f"admin_all_{table}") not in policies:
+                        else:
+                            _s, _t, _p, permissive, roles, cmd, qual, with_check = row
+                            if permissive != "PERMISSIVE" or cmd != "ALL" or "public" not in roles:
+                                problems.append(f"tenant policy attributes unexpected: {table}")
+                            if not _tenant_expr_ok(qual) or not _tenant_expr_ok(with_check):
+                                problems.append(f"tenant policy definition unexpected: {table}")
+                        arow = policies.get((table, f"admin_all_{table}"))
+                        if arow is None:
                             problems.append(f"admin policy missing: {table}")
+                        else:
+                            _s, _t, _p, _perm, aroles, _cmd, aqual, acheck = arow
+                            if "admin_role" not in aroles or aqual != "true" or acheck != "true":
+                                problems.append(f"admin policy definition unexpected: {table}")
 
                     # 4. Runtime role posture: RLS must actually apply to it
                     cur.execute(
@@ -730,14 +745,15 @@ def readyz() -> JSONResponse:
             logger.exception("readyz database check failed")
             problems.append("database check failed (see logs)")
 
-        # 6. Auth must be on outside development — and actually usable
+        # 6. Auth must be on outside development — and actually usable:
+        # algorithm/key compatibility, PEM parseability, Signal issuer key.
         if not JWT_ENABLED and not _READYZ_ALLOW_NO_JWT:
             problems.append(
                 "JWT authentication disabled "
                 "(set ACTIVEKG_READYZ_ALLOW_NO_JWT=true only in development)"
             )
-        elif JWT_ENABLED and not (JWT_PUBLIC_KEY or JWT_SECRET_KEY):
-            problems.append("JWT enabled but no verification key configured")
+        else:
+            problems.extend(verification_key_problems())
 
     if problems:
         return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})
