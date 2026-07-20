@@ -100,20 +100,14 @@ python -m activekg.embedding.worker
 Note: the worker has no HTTP server, so healthcheck should be disabled (handled by `railway.worker.json`).
 
 ### Initialize the Database
-Option 1 (recommended): run the bootstrap helper (uses ACTIVEKG_DSN or DATABASE_URL automatically):
-```bash
-make db-bootstrap
-```
-
-Option 2: run these once from your laptop or any psql client:
-```bash
-export ACTIVEKG_DSN='postgresql://USER:PASSWORD@HOST:5432/DBNAME'
-psql $ACTIVEKG_DSN -c "CREATE EXTENSION IF NOT EXISTS vector;"
-psql $ACTIVEKG_DSN -f db/init.sql
-psql $ACTIVEKG_DSN -f enable_rls_policies.sql
-# Optional: text search
-psql $ACTIVEKG_DSN -f db/migrations/add_text_search.sql
-```
+No manual initialization is needed — and none should be performed. The API
+service boots via `scripts/start_railway.sh`, which runs
+`scripts/init_railway_db.py` (extensions, `db/init.sql`, RLS policies, all
+ledger-tracked migrations, restricted runtime-role provisioning) using
+`ACTIVEKG_MIGRATE_DSN`, then removes privileged credentials from the
+environment before starting Uvicorn. Manual psql initialization or starting
+Uvicorn directly bypasses the ledger, role provisioning and credential
+scoping; `/readyz` will hold such a deployment not-ready.
 
 Build ANN indexes (non-blocking, concurrent):
 ```bash

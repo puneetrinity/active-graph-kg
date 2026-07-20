@@ -53,6 +53,127 @@ DUPLICATE_OBJECT_SQLSTATES = {
     "42P06",  # duplicate_schema
 }
 
+# Migrations that were edited before the immutability rule took effect.
+# Maps filename -> {old recorded checksum: new expected checksum}; a mismatch
+# matching one of these pairs is upgraded in place instead of failing boot.
+CHECKSUM_TRANSITIONS: dict[str, dict[str, str]] = {
+    "016_candidate_rls.sql": {
+        # PR #11 preflight -> PR #12 effective-tenant preflight rewrite
+        "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21": (
+            "2294ef74ce9436782dc5f3c1484939bb53edec69e963233f5ee705a3849d6a63"
+        ),
+    },
+}
+
+# Baseline verifiers: before a migration may be recorded as baselined off a
+# duplicate-object error, EVERY listed object must already exist — one stray
+# duplicate must not vouch for a partially migrated legacy database.
+# Forms: ("table", name) | ("column", table, column) | ("index", name)
+#        | ("constraint", name) | ("policy", table, name)
+#        | ("function", name) | ("trigger", table, name)
+BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
+    "004_add_external_id_index.sql": [
+        ("index", "idx_nodes_external_id"),
+        ("index", "idx_nodes_external_id_parent"),
+    ],
+    "add_text_search.sql": [
+        ("column", "nodes", "text_search_vector"),
+        ("trigger", "nodes", "nodes_text_search_update"),
+    ],
+    "005_connector_configs_table.sql": [("table", "connector_configs")],
+    "006_add_key_version.sql": [("column", "connector_configs", "key_version")],
+    "007_add_provider_check.sql": [("constraint", "chk_provider_valid")],
+    "008_connector_cursors_table.sql": [("table", "connector_cursors")],
+    "009_embedding_queue_status.sql": [
+        ("column", "nodes", "embedding_status"),
+        ("column", "nodes", "embedding_attempts"),
+    ],
+    "010_update_text_search_vector.sql": [("function", "update_text_search_vector")],
+    "011_unique_tenant_external_id.sql": [("index", "idx_nodes_tenant_external_id_unique")],
+    "012_global_memory.sql": [
+        ("table", "global_candidates"),
+        ("table", "candidate_provenance"),
+    ],
+    "012_candidate_identity.sql": [
+        ("table", "candidates"),
+        ("table", "candidate_identifiers"),
+        ("table", "candidate_source_records"),
+        ("index", "idx_candidate_identifiers_unique"),
+    ],
+    "013_vantahire_provenance.sql": [("column", "candidate_source_records", "org_id")],
+    "014_signal_job_tags.sql": [("column", "candidate_source_records", "job_tags")],
+    "015_candidate_profile.sql": [
+        ("column", "candidates", "profile"),
+        ("column", "candidates", "skills"),
+    ],
+    "016_candidate_rls.sql": [
+        ("policy", "candidates", "tenant_isolation_candidates"),
+        ("policy", "candidate_identifiers", "tenant_isolation_candidate_identifiers"),
+        ("policy", "candidate_source_records", "tenant_isolation_candidate_source_records"),
+        ("constraint", "candidate_identifiers_tenant_candidate_fkey"),
+        ("constraint", "candidate_source_records_tenant_candidate_fkey"),
+    ],
+    "017_reserve_quarantine_tenant.sql": [
+        ("policy", "candidates", "tenant_isolation_candidates"),
+    ],
+    "018_tenant_nonblank.sql": [
+        ("constraint", "candidates_tenant_nonblank"),
+        ("constraint", "candidate_identifiers_tenant_nonblank"),
+        ("constraint", "candidate_source_records_tenant_nonblank"),
+    ],
+}
+
+
+def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
+    kind = check[0]
+    if kind == "table":
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (check[1],),
+        )
+    elif kind == "column":
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+            (check[1], check[2]),
+        )
+    elif kind == "index":
+        cur.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = %s",
+            (check[1],),
+        )
+    elif kind == "constraint":
+        cur.execute("SELECT 1 FROM pg_constraint WHERE conname = %s", (check[1],))
+    elif kind == "policy":
+        cur.execute(
+            "SELECT 1 FROM pg_policies WHERE tablename = %s AND policyname = %s",
+            (check[1], check[2]),
+        )
+    elif kind == "function":
+        cur.execute("SELECT 1 FROM pg_proc WHERE proname = %s", (check[1],))
+    elif kind == "trigger":
+        cur.execute(
+            "SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+            "WHERE c.relname = %s AND t.tgname = %s",
+            (check[1], check[2]),
+        )
+    else:
+        return False
+    return cur.fetchone() is not None
+
+
+def _verify_baseline(cur: psycopg.Cursor, migration_file: str) -> tuple[bool, str]:
+    """Return (ok, detail) — whether every object this migration creates exists."""
+    checks = BASELINE_VERIFIERS.get(migration_file)
+    if checks is None:
+        return False, "no baseline verifier defined for this migration"
+    missing = [" ".join(c) for c in checks if not _object_exists(cur, c)]
+    if missing:
+        return False, f"objects missing: {', '.join(missing)}"
+    return True, ""
+
 
 def _load_manifest() -> tuple[str, ...]:
     """Load the migration manifest without importing the activekg package."""
@@ -186,6 +307,18 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
                 )
                 print(f"⊙ Backfilled checksum for {migration_file}")
             elif recorded != checksum:
+                transition = CHECKSUM_TRANSITIONS.get(migration_file, {}).get(recorded)
+                if transition == checksum:
+                    cur.execute(
+                        "UPDATE schema_migrations SET checksum = %s WHERE filename = %s",
+                        (checksum, migration_file),
+                    )
+                    print(
+                        f"⊙ {migration_file}: known checksum transition applied "
+                        f"({recorded[:12]} → {checksum[:12]})"
+                    )
+                    ledger_skipped += 1
+                    continue
                 if os.getenv("ACTIVEKG_ALLOW_MIGRATION_DRIFT", "false").lower() == "true":
                     print(
                         f"WARNING: {migration_file} changed since it was applied "
@@ -208,7 +341,17 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
             _execute_migration_sql(cur, migration_sql)
         except Exception as e:
             if _is_duplicate_object_error(e):
-                print(f"⊙ Migration {migration_file} baselined (objects already exist)")
+                # One duplicate error is not proof the whole migration is
+                # present — verify every object it creates before baselining.
+                ok, detail = _verify_baseline(cur, migration_file)
+                if not ok:
+                    print(
+                        f"ERROR: migration {migration_file} hit a duplicate-object "
+                        f"error but cannot be baselined: {detail}. The database "
+                        "appears partially migrated; reconcile it manually."
+                    )
+                    sys.exit(1)
+                print(f"⊙ Migration {migration_file} baselined (all objects verified present)")
                 cur.execute(
                     "INSERT INTO schema_migrations (filename, baselined, checksum) "
                     "VALUES (%s, true, %s)",
@@ -239,6 +382,18 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
         return
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
         print(f"ERROR: invalid ACTIVEKG_RUNTIME_ROLE name: {role!r}")
+        sys.exit(1)
+
+    # Refuse to provision reserved or self-defeating role names: hardening the
+    # migration user would demote the owner mid-flight, and app_user is set
+    # NOLOGIN by the legacy remediation right after provisioning.
+    cur.execute("SELECT current_user")
+    migration_user = cur.fetchone()[0]
+    if role in {migration_user, "postgres", "app_user", "admin_role"}:
+        print(
+            f"ERROR: ACTIVEKG_RUNTIME_ROLE must be a dedicated role, not {role!r} "
+            f"(migration user: {migration_user!r}; reserved: postgres, app_user, admin_role)"
+        )
         sys.exit(1)
 
     password = os.environ.get("ACTIVEKG_RUNTIME_PASSWORD")
