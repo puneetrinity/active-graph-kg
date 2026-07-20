@@ -273,4 +273,10 @@ def verification_key_problems() -> list[str]:
 
     if SIGNAL_JWT_PUBLIC_KEY and not _pem_parses(SIGNAL_JWT_PUBLIC_KEY):
         problems.append("SIGNAL_JWT_PUBLIC_KEY is not a parseable PEM public key")
+    elif not SIGNAL_JWT_PUBLIC_KEY and (
+        os.getenv("ACTIVEKG_REQUIRE_SIGNAL_ISSUER", "false").lower() == "true"
+    ):
+        # Deployments serving Signal/Discover must not report ready while
+        # silently rejecting every token from the signal issuer.
+        problems.append("SIGNAL_JWT_PUBLIC_KEY not set but ACTIVEKG_REQUIRE_SIGNAL_ISSUER=true")
     return problems

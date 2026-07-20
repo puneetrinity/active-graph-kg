@@ -4383,7 +4383,9 @@ class CandidateTagSearchResult(BaseModel):
 # Server-side ceiling for tag-search results per call. Requests above it are
 # clamped (not rejected) and reported via total_matched/truncated so callers
 # can log honestly instead of silently losing candidates.
-TAG_SEARCH_MAX_LIMIT = int(os.getenv("ACTIVEKG_TAG_SEARCH_MAX_LIMIT", "500"))
+# Clamped to the repository's hard ceiling (1000) so applied_limit can never
+# overstate what the storage layer will actually return.
+TAG_SEARCH_MAX_LIMIT = min(int(os.getenv("ACTIVEKG_TAG_SEARCH_MAX_LIMIT", "500")), 1000)
 
 
 class CandidateSearchByTagsRequest(BaseModel):
