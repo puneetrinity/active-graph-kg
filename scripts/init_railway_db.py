@@ -177,12 +177,29 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
 
         if migration_file in ledger:
             recorded = ledger[migration_file]
-            if recorded and recorded != checksum:
-                print(
-                    f"WARNING: {migration_file} changed since it was applied "
-                    f"(recorded {recorded[:12]}, on disk {checksum[:12]}). "
-                    "Applied databases keep the recorded version; review the edit."
+            if recorded is None:
+                # Rows recorded before the checksum column existed: adopt the
+                # current file as the trusted baseline.
+                cur.execute(
+                    "UPDATE schema_migrations SET checksum = %s WHERE filename = %s",
+                    (checksum, migration_file),
                 )
+                print(f"⊙ Backfilled checksum for {migration_file}")
+            elif recorded != checksum:
+                if os.getenv("ACTIVEKG_ALLOW_MIGRATION_DRIFT", "false").lower() == "true":
+                    print(
+                        f"WARNING: {migration_file} changed since it was applied "
+                        f"(recorded {recorded[:12]}, on disk {checksum[:12]}); "
+                        "continuing because ACTIVEKG_ALLOW_MIGRATION_DRIFT=true."
+                    )
+                else:
+                    print(
+                        f"ERROR: {migration_file} changed since it was applied "
+                        f"(recorded {recorded[:12]}, on disk {checksum[:12]}). "
+                        "Applied migrations are immutable; add a new migration instead, "
+                        "or set ACTIVEKG_ALLOW_MIGRATION_DRIFT=true to override."
+                    )
+                    sys.exit(1)
             ledger_skipped += 1
             continue
 
@@ -270,18 +287,18 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
         ).format(role_ident)
     )
 
-    # The runtime role must never hold the admin_role RLS bypass.
-    cur.execute(
-        """
-        SELECT 1 FROM pg_auth_members m
-        JOIN pg_roles r ON r.oid = m.roleid
-        JOIN pg_roles mem ON mem.oid = m.member
-        WHERE r.rolname = 'admin_role' AND mem.rolname = %s
-        """,
-        (role,),
-    )
-    if cur.fetchone():
+    # The runtime role must never hold the admin_role RLS bypass — including
+    # through inherited (indirect) membership.
+    cur.execute("SELECT pg_has_role(%s, 'admin_role', 'MEMBER')", (role,))
+    if cur.fetchone()[0]:
         cur.execute(sql.SQL("REVOKE admin_role FROM {}").format(role_ident))
+        cur.execute("SELECT pg_has_role(%s, 'admin_role', 'MEMBER')", (role,))
+        if cur.fetchone()[0]:
+            print(
+                f"ERROR: {role} still inherits admin_role through an intermediate "
+                "role; revoke that membership chain manually."
+            )
+            sys.exit(1)
         print(f"✓ Revoked admin_role membership from {role}")
 
     # The ledger is readiness-trusted state: the app may read it, never write it.

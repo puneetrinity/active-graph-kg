@@ -624,11 +624,32 @@ def readyz() -> JSONResponse:
                     if cur.fetchone() is None:
                         problems.append("migration ledger missing")
                     else:
-                        cur.execute("SELECT filename FROM schema_migrations")
-                        applied = {row[0] for row in cur.fetchall()}
+                        cur.execute("SELECT filename, checksum FROM schema_migrations")
+                        applied = dict(cur.fetchall())
                         missing = [m for m in MIGRATIONS if m not in applied]
                         if missing:
                             problems.append(f"migrations not applied: {', '.join(missing)}")
+                        # Recorded checksums must match the files this build
+                        # ships (NULLs are backfilled at boot and tolerated).
+                        drifted = []
+                        migrations_dir = os.path.join(
+                            os.path.dirname(__file__), "..", "..", "db", "migrations"
+                        )
+                        for m in MIGRATIONS:
+                            recorded = applied.get(m)
+                            if not recorded:
+                                continue
+                            path = os.path.join(migrations_dir, m)
+                            try:
+                                with open(path, "rb") as fh:
+                                    on_disk = hashlib.sha256(fh.read()).hexdigest()
+                            except OSError:
+                                drifted.append(f"{m} (file missing)")
+                                continue
+                            if on_disk != recorded:
+                                drifted.append(m)
+                        if drifted:
+                            problems.append(f"migration checksum drift: {', '.join(drifted)}")
 
                     # 2. Candidate tables exist, RLS enabled, owner recorded
                     cur.execute(
@@ -678,16 +699,13 @@ def readyz() -> JSONResponse:
                                     + ", ".join(sorted(owned))
                                 )
 
-                        # 5. The runtime role must not inherit the RLS bypass
+                        # 5. The runtime role must not hold admin_role, even
+                        # through inherited (indirect) membership
                         cur.execute(
-                            """
-                            SELECT 1 FROM pg_auth_members m
-                            JOIN pg_roles r ON r.oid = m.roleid
-                            JOIN pg_roles mem ON mem.oid = m.member
-                            WHERE r.rolname = 'admin_role' AND mem.rolname = current_user
-                            """
+                            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin_role') "
+                            "AND pg_has_role(current_user, 'admin_role', 'MEMBER')"
                         )
-                        if cur.fetchone():
+                        if cur.fetchone()[0]:
                             problems.append("runtime role is a member of admin_role (RLS bypass)")
         except Exception:
             logger.exception("readyz database check failed")
