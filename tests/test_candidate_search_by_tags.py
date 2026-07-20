@@ -181,6 +181,22 @@ def test_limit_above_legacy_cap_is_accepted_and_clamped(client: TestClient, tena
     _ingest(client, sig_id=f"cap-{uuid.uuid4().hex[:6]}", tags=tags, tenant=tenant)
 
     body = _search(client, tags=tags, tenant=tenant, limit=300)
-    assert body["applied_limit"] == 300  # default server max is 500
+    assert body["applied_limit"] == 300  # under the 500 default max: passed through
     assert body["total"] == 1
     assert body["truncated"] is False
+
+    # Above the server cap: actually clamped, and applied_limit says so.
+    over = _search(client, tags=tags, tenant=tenant, limit=600)
+    assert over["applied_limit"] == 500
+
+    # Zero/negative limits are rejected by validation, not silently mangled.
+    r = client.post(
+        "/candidates/search/by-tags",
+        json={"tags": tags, "tenant_id": tenant, "limit": 0},
+    )
+    assert r.status_code == 422
+    r = client.post(
+        "/candidates/search/by-tags",
+        json={"tags": tags, "tenant_id": tenant, "limit": -5},
+    )
+    assert r.status_code == 422

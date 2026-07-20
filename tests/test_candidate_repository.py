@@ -256,7 +256,7 @@ def test_signal_tag_search_exact_match(candidate_repo: CandidateRepository, tena
         tags=["python", "go", "distributed systems"],
     )
 
-    results = candidate_repo.search_candidates_by_signal_tags(
+    results, _total = candidate_repo.search_candidates_by_signal_tags(
         ["python", "go", "distributed systems"], tenant_id=tenant
     )
     assert any(r.candidate_id == c.candidate_id for r in results)
@@ -275,7 +275,7 @@ def test_signal_tag_search_70_percent_threshold_match(
     query = ["a", "b", "c", "d", "e", "f", "g", "x", "y", "z"]
     _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=stored)
 
-    results = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
+    results, _total = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
     assert any(r.candidate_id == c.candidate_id for r in results)
 
 
@@ -289,7 +289,7 @@ def test_signal_tag_search_below_threshold_no_match(
     query = ["a", "b", "c", "d", "e", "f", "x", "y", "z", "w"]
     _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=stored)
 
-    results = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
+    results, _total = candidate_repo.search_candidates_by_signal_tags(query, tenant_id=tenant)
     assert not any(r.candidate_id == c.candidate_id for r in results)
 
 
@@ -315,7 +315,7 @@ def test_signal_tag_search_deduplicates_by_candidate(
         sig_id=f"SIG-B-{uuid.uuid4()}",
     )
 
-    results = candidate_repo.search_candidates_by_signal_tags(tags, tenant_id=tenant)
+    results, _total = candidate_repo.search_candidates_by_signal_tags(tags, tenant_id=tenant)
     matches = [r for r in results if r.candidate_id == c.candidate_id]
     assert len(matches) == 1
 
@@ -329,8 +329,12 @@ def test_signal_tag_search_result_limit_never_exceeds_100(
         candidate_repo.create_candidate(c)
         _make_signal_record(candidate_repo, candidate_id=c.candidate_id, tenant=tenant, tags=[tag])
 
-    results = candidate_repo.search_candidates_by_signal_tags([tag], tenant_id=tenant, limit=2)
+    results, _total = candidate_repo.search_candidates_by_signal_tags(
+        [tag], tenant_id=tenant, limit=2
+    )
     assert len(results) <= 2
 
-    results_default = candidate_repo.search_candidates_by_signal_tags([tag], tenant_id=tenant)
+    results_default, _total_default = candidate_repo.search_candidates_by_signal_tags(
+        [tag], tenant_id=tenant
+    )
     assert len(results_default) <= 100
