@@ -213,11 +213,11 @@ jobs:
           done
           ledger=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "19|0" ]; then
-            echo "FAIL: ledger should have exactly 19 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "20|0" ]; then
+            echo "FAIL: ledger should have exactly 20 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 19 applied, 0 baselined"
+          echo "OK: migration ledger has 20 applied, 0 baselined"
           posture=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
