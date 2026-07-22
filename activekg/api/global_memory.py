@@ -29,6 +29,10 @@ _DSN = os.getenv("ACTIVEKG_DSN") or os.getenv("DATABASE_URL", "")
 
 GLOBAL_MEMORY_ENABLED = os.getenv("GLOBAL_MEMORY_ENABLED", "false").lower() == "true"
 
+# Authoritative cap for /global-candidates/search. Callers may ask for less;
+# asking for more is clamped and reported back via applied_limit.
+_SEARCH_LIMIT_MAX = int(os.getenv("GLOBAL_SEARCH_LIMIT_MAX", "500"))
+
 
 # ---------------------------------------------------------------------------
 # Country name → ISO 3166-1 alpha-2 normalizer
@@ -1190,7 +1194,12 @@ def search_global_candidates(
         raise HTTPException(status_code=503, detail="Embedder not initialized")
 
     tenant_id = getattr(claims, "tenant_id", None) if claims else None
-    limit = max(1, min(body.limit, 200))
+    # Server-side cap is the authoritative binding limit (protects the ANN
+    # scan); the response carries applied_limit so callers can log truncation.
+    # The old hardcoded 200 silently truncated Signal's limit=300 requests —
+    # over an 815-row Bengaluru segment that cost half the fit-top-100
+    # (Stage-3 offline gate finding).
+    limit = max(1, min(body.limit, _SEARCH_LIMIT_MAX))
 
     vec = _embedder.encode([body.query_text])[0]
     vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec.tolist()) + "]"
@@ -1198,7 +1207,12 @@ def search_global_candidates(
     filters: list[str] = ["gc.embedding_status = 'ready'", "gc.embedding IS NOT NULL"]
     params: list[Any] = []
     if body.location_city:
-        filters.append("gc.location_city ILIKE %s")
+        # Substring match ('Greater Bengaluru Area' must pass 'Bengaluru'),
+        # and NULL passes through: rows whose location simply failed parsing
+        # stay retrievable — the caller's ranker already demotes unknown
+        # locations and its country guard treats no-location as an escape,
+        # so hiding them here silently shrank the pool instead.
+        filters.append("(gc.location_city ILIKE '%%' || %s || '%%' OR gc.location_city IS NULL)")
         params.append(body.location_city)
     if body.role_family:
         filters.append("gc.role_family = %s")
@@ -1255,7 +1269,7 @@ def search_global_candidates(
             cur.execute(sql, [vec_literal, *params, vec_literal, limit])
             rows = [_row_to_dict(cur, r) for r in cur.fetchall()]
         conn.commit()
-        return {"results": rows, "count": len(rows)}
+        return {"results": rows, "count": len(rows), "applied_limit": limit}
     finally:
         conn.close()
 
