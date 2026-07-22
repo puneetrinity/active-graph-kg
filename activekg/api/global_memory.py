@@ -533,6 +533,7 @@ def upsert_global_candidate(
 
                 if updates:
                     updates.append("last_evidence_at = now()")
+                    updates.append("embedding_status = 'queued'")  # re-embed on new evidence
                     updates.append("updated_at = now()")
                     params.append(existing["id"])
                     cur.execute(
@@ -910,7 +911,11 @@ def sync_applicant_to_global_memory(
                 # Non-destructive merge: profile fields use COALESCE; skills
                 # are UNION-merged (a new resume adds evidence, COALESCE would
                 # freeze the first-ever list); missing anchors are filled.
-                sets = ["last_evidence_at = now()", "updated_at = now()"]
+                sets = [
+                    "last_evidence_at = now()",
+                    "updated_at = now()",
+                    "embedding_status = 'queued'",
+                ]  # re-embed: profile evidence changed
                 params: list[Any] = []
                 for col, val in [
                     ("name", name),
@@ -1078,7 +1083,11 @@ def upsert_signal_candidate_to_global(
 
     if existing:
         gc_id = str(existing["id"])
-        sets = ["last_evidence_at = now()", "updated_at = now()"]
+        sets = [
+            "last_evidence_at = now()",
+            "updated_at = now()",
+            "embedding_status = 'queued'",
+        ]  # re-embed: profile evidence changed
         params: list[Any] = []
         for col, val in [
             ("name", name),
