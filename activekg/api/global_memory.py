@@ -1153,8 +1153,6 @@ def set_embedder(embedder: Any) -> None:
     _embedder = embedder
 
 
-
-
 class GlobalCandidateSearchRequest(BaseModel):
     query_text: str
     limit: int = 50

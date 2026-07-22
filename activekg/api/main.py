@@ -5277,7 +5277,9 @@ def resolve_candidate_from_signal(
         )
         for s in skipped
     ]
-    result = _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
+    result = _execute_candidate_resolve(
+        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+    )
 
     # ── #29: mirror sourced candidates into the platform-global canonical ────
     # Non-blocking: the tenant-side resolve is the durable record; a global

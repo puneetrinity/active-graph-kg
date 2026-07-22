@@ -40,6 +40,7 @@ def build_candidate_embedding_text(row: dict[str, Any]) -> str:
         parts.append(loc)
     return ". ".join(parts)
 
+
 _SELECT_COLS = (
     "id, name, headline, role_family, seniority_band, skills_normalized, "
     "location_city, location_country_code"
