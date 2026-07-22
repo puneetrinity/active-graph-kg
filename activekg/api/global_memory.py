@@ -1258,3 +1258,67 @@ def search_global_candidates(
         return {"results": rows, "count": len(rows)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Resume refs for sourced candidates (#Stage-5B — resume-to-recruiter)
+# ---------------------------------------------------------------------------
+
+
+class ResumeRefsRequest(BaseModel):
+    linkedin_ids: list[str]
+
+
+@router.post(
+    "/global-candidates/resume-refs",
+    dependencies=[Depends(require_scope("kg:read"))],
+)
+def resume_refs(
+    body: ResumeRefsRequest,
+    claims=Depends(get_jwt_claims),
+):
+    """Batch: which of these people have a resume the requesting tenant may see?
+
+    Joins global identity (linkedin_id) -> applicant/upload provenance and
+    returns the Flow application pointer so the caller can serve the resume
+    through its existing permission-gated streamer. RLS on candidate_provenance
+    scopes results to the requesting tenant's own applicant rows (cross-tenant
+    resume visibility is deliberately deferred to the consent work, #12).
+    """
+    _require_enabled()
+    tenant_id = getattr(claims, "tenant_id", None) if claims else None
+    slugs = [s.strip().lower() for s in body.linkedin_ids if s and s.strip()][:200]
+    if not slugs:
+        return {"refs": {}}
+
+    conn = _get_tenant_conn(tenant_id)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT gc.linkedin_id, cp.source_type, cp.source_detail
+                FROM global_candidates gc
+                JOIN candidate_provenance cp ON cp.global_candidate_id = gc.id
+                WHERE gc.linkedin_id = ANY(%s)
+                  AND cp.source_type IN ('platform_applicant', 'org_upload')
+                """,
+                (slugs,),
+            )
+            refs: dict[str, dict[str, Any]] = {}
+            for slug, source_type, detail in cur.fetchall():
+                if slug in refs:
+                    continue
+                detail = detail or {}
+                application_id = detail.get("application_id")
+                if not application_id:
+                    continue
+                refs[slug] = {
+                    "application_id": application_id,
+                    "org_id": detail.get("org_id"),
+                    "resume_node_id": detail.get("resume_node_id"),
+                    "source_type": source_type,
+                }
+        conn.commit()
+        return {"refs": refs}
+    finally:
+        conn.close()
