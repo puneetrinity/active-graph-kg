@@ -4681,21 +4681,27 @@ def _execute_candidate_resolve(
             and profile.primary_phone != candidate.primary_phone
         ):
             warnings.append("upstream primary_phone differs from canonical; canonical preserved")
-        if profile.profile is not None:
+        # Enrichment fields: freshest-wins, but NEVER replace something with
+        # nothing. The Signal handler defaults profile to {} and skills to []
+        # (never None), so `is not None` checks let a blob-less payload WIPE
+        # canonical data — a truthiness guard makes emptiness a no-op while a
+        # fuller payload still always overwrites. Canonical-trust invariant:
+        # "whatever is in Memory is the freshest representation of this person."
+        if profile.profile:
             updates["profile"] = profile.profile
-        if profile.headline is not None:
+        if profile.headline:
             updates["headline"] = profile.headline
-        if profile.location_raw is not None:
+        if profile.location_raw:
             updates["location_raw"] = profile.location_raw
-        if profile.skills is not None:
+        if profile.skills:
             updates["skills"] = profile.skills
-        if profile.seniority_level is not None:
+        if profile.seniority_level:
             updates["seniority_level"] = profile.seniority_level
-        if profile.linkedin_url is not None:
+        if profile.linkedin_url:
             updates["linkedin_url"] = profile.linkedin_url
-        if profile.linkedin_id is not None:
+        if profile.linkedin_id:
             updates["linkedin_id"] = profile.linkedin_id
-        if profile.profile_picture_url is not None:
+        if profile.profile_picture_url:
             updates["profile_picture_url"] = profile.profile_picture_url
 
         if updates:
