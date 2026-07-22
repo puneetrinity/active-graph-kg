@@ -1213,22 +1213,35 @@ def search_global_candidates(
     filters.append(visibility)
     params.append(tenant_id or "")
 
+    # Hydrate the tenant-side crustdata blob via the #29 link column so the
+    # caller's ranker gets full profiles. RLS on candidates limits the join to
+    # the requesting tenant's own rows (tenant conn sets the GUC); cross-tenant
+    # blob sharing for public rows is a follow-up (#12).
     sql = f"""
         SELECT gc.id, gc.name, gc.headline, gc.linkedin_url, gc.linkedin_id,
                gc.role_family, gc.seniority_band, gc.skills_normalized,
                gc.location_city, gc.location_country_code,
-               1 - (gc.embedding <=> %s::vector) AS similarity
+               1 - (gc.embedding <=> %s::vector) AS similarity,
+               tc.profile AS crustdata_profile,
+               tc.candidate_id AS tenant_candidate_id
         FROM global_candidates gc
+        LEFT JOIN LATERAL (
+            SELECT c.profile, c.candidate_id
+            FROM candidates c
+            WHERE c.global_candidate_id = gc.id
+            LIMIT 1
+        ) tc ON true
         WHERE {" AND ".join(filters)}
         ORDER BY gc.embedding <=> %s::vector
         LIMIT %s
     """
 
-    conn = _get_conn()
+    conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
             cur.execute(sql, [vec_literal, *params, vec_literal, limit])
             rows = [_row_to_dict(cur, r) for r in cur.fetchall()]
+        conn.commit()
         return {"results": rows, "count": len(rows)}
     finally:
         conn.close()
