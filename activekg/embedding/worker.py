@@ -55,6 +55,7 @@ class EmbeddingWorker:
         max_attempts: int = 5,
         retry_base_seconds: float = 10.0,
         retry_max_seconds: float = 300.0,
+        global_candidate_embedder=None,
     ):
         self.redis_client = redis_client
         self.repo = repo
@@ -63,6 +64,7 @@ class EmbeddingWorker:
         self.max_attempts = max_attempts
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.global_candidate_embedder = global_candidate_embedder
         self.running = True
 
         signal.signal(signal.SIGINT, self._shutdown_handler)
@@ -182,6 +184,10 @@ class EmbeddingWorker:
         while self.running:
             try:
                 move_due_retries(self.redis_client, limit=200)
+                if self.global_candidate_embedder is not None:
+                    # #29: opportunistic sweep — global_candidates rows have no
+                    # Redis producer; they are polled by embedding_status.
+                    self.global_candidate_embedder.maybe_sweep()
                 item = self.redis_client.brpop(QUEUE_KEY, timeout=int(self.poll_interval))
                 if not item:
                     continue
@@ -213,6 +219,17 @@ def start_worker() -> None:
         model_name=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
     )
 
+    global_candidate_embedder = None
+    if os.getenv("GLOBAL_MEMORY_ENABLED", "false").lower() == "true":
+        from activekg.embedding.global_candidates import GlobalCandidateEmbedder
+
+        global_candidate_embedder = GlobalCandidateEmbedder(
+            dsn,
+            embedder,
+            batch_size=int(os.getenv("GLOBAL_EMBED_BATCH_SIZE", "64")),
+            sweep_interval_seconds=float(os.getenv("GLOBAL_EMBED_SWEEP_INTERVAL", "15")),
+        )
+
     worker = EmbeddingWorker(
         redis_client=redis_client,
         repo=repo,
@@ -221,6 +238,7 @@ def start_worker() -> None:
         max_attempts=int(os.getenv("EMBEDDING_MAX_ATTEMPTS", "5")),
         retry_base_seconds=float(os.getenv("EMBEDDING_RETRY_BASE_SECONDS", "10")),
         retry_max_seconds=float(os.getenv("EMBEDDING_RETRY_MAX_SECONDS", "300")),
+        global_candidate_embedder=global_candidate_embedder,
     )
     worker.run()
 
