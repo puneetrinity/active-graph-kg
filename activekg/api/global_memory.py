@@ -1170,6 +1170,10 @@ class GlobalCandidateSearchRequest(BaseModel):
     query_text: str
     limit: int = 50
     location_city: str | None = None
+    # Alias expansion from the caller (e.g. ['bengaluru', 'bangalore']) — the
+    # caller owns city-alias knowledge; any one matching passes the filter.
+    # Takes precedence over location_city when provided.
+    location_cities: list[str] | None = None
     role_family: str | None = None
     seniority_band: str | None = None
     skills_any: list[str] | None = None
@@ -1206,14 +1210,23 @@ def search_global_candidates(
 
     filters: list[str] = ["gc.embedding_status = 'ready'", "gc.embedding IS NOT NULL"]
     params: list[Any] = []
-    if body.location_city:
-        # Substring match ('Greater Bengaluru Area' must pass 'Bengaluru'),
-        # and NULL passes through: rows whose location simply failed parsing
-        # stay retrievable — the caller's ranker already demotes unknown
-        # locations and its country guard treats no-location as an escape,
-        # so hiding them here silently shrank the pool instead.
-        filters.append("(gc.location_city ILIKE '%%' || %s || '%%' OR gc.location_city IS NULL)")
-        params.append(body.location_city)
+    cities = [
+        c.strip()
+        for c in (body.location_cities or ([body.location_city] if body.location_city else []))
+        if c and c.strip()
+    ]
+    if cities:
+        # Substring match over ALL alias spellings ('Bangalore Urban' must
+        # pass a 'Bengaluru' query — 5 of job-147's served members were alias
+        # spellings), and NULL/empty passes through: rows whose location
+        # simply failed parsing stay retrievable — the caller's ranker already
+        # demotes unknown locations and its country guard treats no-location
+        # as an escape, so hiding them here silently shrank the pool instead.
+        filters.append(
+            "(gc.location_city IS NULL OR gc.location_city = ''"
+            " OR gc.location_city ILIKE ANY(%s::text[]))"
+        )
+        params.append([f"%{c}%" for c in cities])
     if body.role_family:
         filters.append("gc.role_family = %s")
         params.append(body.role_family)
