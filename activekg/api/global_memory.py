@@ -1223,10 +1223,16 @@ def search_global_candidates(
                gc.location_city, gc.location_country_code,
                1 - (gc.embedding <=> %s::vector) AS similarity,
                tc.profile AS crustdata_profile,
-               tc.candidate_id AS tenant_candidate_id
+               tc.candidate_id AS tenant_candidate_id,
+               tc.signal_candidate_id
         FROM global_candidates gc
         LEFT JOIN LATERAL (
-            SELECT c.profile, c.candidate_id
+            SELECT c.profile, c.candidate_id,
+                   (SELECT ci.value_normalized FROM candidate_identifiers ci
+                    WHERE ci.candidate_id = c.candidate_id
+                      AND ci.tenant_id = c.tenant_id
+                      AND ci.identifier_type = 'signal_candidate_id'
+                    LIMIT 1) AS signal_candidate_id
             FROM candidates c
             WHERE c.global_candidate_id = gc.id
             LIMIT 1
