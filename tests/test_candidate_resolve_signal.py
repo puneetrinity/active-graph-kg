@@ -290,3 +290,135 @@ def test_signal_empty_tags_list_is_accepted(client: TestClient, tenant: str):
 
     records = _get_source_records(resp["candidate_id"], tenant)
     assert records[0].job_tags == []
+
+
+# ---------------------------------------------------------------------------
+# Canonical-freshness invariant (#Stage-1): "whatever is in Memory is the
+# freshest representation of this person."
+#   (a) a fuller payload always wins — enrichment fields are overwrite-latest
+#   (b) an emptier payload never wins — {} / [] / missing blob is a no-op
+# ---------------------------------------------------------------------------
+
+
+def _get_candidate(candidate_id: str, tenant: str):
+    from activekg.graph.candidate_repository import CandidateRepository
+
+    repo = CandidateRepository(DSN)
+    try:
+        return repo.get_candidate(candidate_id, tenant_id=tenant)
+    finally:
+        repo.close()
+
+
+def _signal_body(sig_id: str, url: str, crustdata: dict | None, headline: str | None = None):
+    body = {
+        "signal_candidate_id": sig_id,
+        "source_record_type": "sourced_candidate",
+        "linkedinUrl": url,
+        "display_name": "Freshness Probe",
+        "request_id": f"REQ-{uuid.uuid4()}",
+        "tags": ["backend"],
+    }
+    if crustdata is not None:
+        body["crustdata"] = crustdata
+    if headline is not None:
+        body["headline"] = headline
+    return body
+
+
+_BLOB_V1 = {
+    "basic_profile": {
+        "name": "Freshness Probe",
+        "headline": "Backend Engineer at OldCo",
+        "location": {"raw": "Bengaluru, India", "full_location": "Bengaluru, Karnataka, India"},
+    },
+    "skills": {"professional_network_skills": ["python", "postgresql"]},
+    "experience": {
+        "employment_details": {"current": [{"title": "Backend Engineer", "seniority_level": "Mid"}]}
+    },
+}
+
+_BLOB_V2 = {
+    "basic_profile": {
+        "name": "Freshness Probe",
+        "headline": "Senior Backend Engineer at NewCo",
+        "location": {"raw": "Bengaluru, India", "full_location": "Bengaluru, Karnataka, India"},
+    },
+    "skills": {"professional_network_skills": ["python", "postgresql", "kubernetes"]},
+    "experience": {
+        "employment_details": {
+            "current": [{"title": "Senior Backend Engineer", "seniority_level": "Senior"}]
+        }
+    },
+}
+
+
+def test_fresher_fuller_payload_always_wins(client: TestClient, tenant: str):
+    """(a) Re-ingest with a fuller blob must destructively refresh enrichment fields."""
+    url = f"https://www.linkedin.com/in/fresh-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+
+    first = _post(client, {**_signal_body(sig_id, url, _BLOB_V1), "tenant_id": tenant})
+    cid = first["candidate_id"]
+
+    second = _post(client, {**_signal_body(sig_id, url, _BLOB_V2), "tenant_id": tenant})
+    assert second["candidate_id"] == cid
+    assert second["resolution_status"] == "matched"
+
+    cand = _get_candidate(cid, tenant)
+    assert cand is not None
+    assert cand.profile == _BLOB_V2, "profile must hold the freshest blob"
+    assert cand.skills == ["python", "postgresql", "kubernetes"]
+    assert cand.seniority_level == "Senior"
+    assert cand.headline == "Senior Backend Engineer at NewCo"
+
+
+def test_emptier_payload_never_wins(client: TestClient, tenant: str):
+    """(b) A blob-less / skill-less re-ingest must be a no-op on enrichment fields.
+
+    The Signal handler defaults crustdata to {} and skills to [] — without the
+    truthiness guard these WIPED canonical profile/skills.
+    """
+    url = f"https://www.linkedin.com/in/fresh-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+
+    first = _post(client, {**_signal_body(sig_id, url, _BLOB_V2), "tenant_id": tenant})
+    cid = first["candidate_id"]
+
+    # Re-ingest with NO crustdata at all (e.g. a Serper-discovered duplicate).
+    second = _post(client, {**_signal_body(sig_id, url, None), "tenant_id": tenant})
+    assert second["candidate_id"] == cid
+
+    cand = _get_candidate(cid, tenant)
+    assert cand is not None
+    assert cand.profile == _BLOB_V2, "empty blob must not wipe canonical profile"
+    assert cand.skills == ["python", "postgresql", "kubernetes"], "empty skills must not wipe"
+    assert cand.seniority_level == "Senior"
+    assert cand.headline == "Senior Backend Engineer at NewCo"
+
+
+def test_partial_payload_updates_only_present_fields(client: TestClient, tenant: str):
+    """A blob with headline but no skills block refreshes headline, keeps skills."""
+    url = f"https://www.linkedin.com/in/fresh-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+
+    first = _post(client, {**_signal_body(sig_id, url, _BLOB_V2), "tenant_id": tenant})
+    cid = first["candidate_id"]
+
+    partial = {
+        "basic_profile": {
+            "name": "Freshness Probe",
+            "headline": "Principal Engineer at NewerCo",
+            "location": {"raw": "Bengaluru, India"},
+        },
+        # no "skills" key at all
+    }
+    _post(client, {**_signal_body(sig_id, url, partial), "tenant_id": tenant})
+
+    cand = _get_candidate(cid, tenant)
+    assert cand is not None
+    assert cand.profile == partial, "non-empty blob still wins (freshest)"
+    assert cand.skills == ["python", "postgresql", "kubernetes"], (
+        "missing skills block must preserve existing skills"
+    )
+    assert cand.headline == "Principal Engineer at NewerCo"
