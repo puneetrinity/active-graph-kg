@@ -385,6 +385,12 @@ app.include_router(connectors_admin_router)
 app.include_router(connectors_webhook_router)
 app.include_router(global_memory_router)
 
+# Global-candidate vector search reuses the process-wide embedding model.
+if embedder is not None:
+    from activekg.api.global_memory import set_embedder as _gm_set_embedder
+
+    _gm_set_embedder(embedder)
+
 # Initialize LLM provider(s)
 llm = None
 llm_fast = None
@@ -5271,7 +5277,61 @@ def resolve_candidate_from_signal(
         )
         for s in skipped
     ]
-    return _execute_candidate_resolve(resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped)
+    result = _execute_candidate_resolve(
+        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+    )
+
+    # ── #29: mirror sourced candidates into the platform-global canonical ────
+    # Non-blocking: the tenant-side resolve is the durable record; a global
+    # mirror failure must never fail Signal's ingest.
+    from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
+
+    if _GM_ENABLED and result.resolution_status in ("created", "matched") and result.candidate_id:
+        try:
+            from activekg.api.global_memory import (
+                _get_tenant_conn as _gm_tenant_conn,
+            )
+            from activekg.api.global_memory import (
+                upsert_signal_candidate_to_global,
+            )
+
+            bp = (crustdata or {}).get("basic_profile") or {}
+            loc = bp.get("location") or {}
+            gm_conn = _gm_tenant_conn(tenant_id)
+            try:
+                with gm_conn.cursor() as gm_cur:
+                    gc_id = upsert_signal_candidate_to_global(
+                        gm_cur,
+                        tenant_id=tenant_id,
+                        linkedin_url=payload.linkedinUrl,
+                        name=bp.get("name") or payload.display_name,
+                        headline=bp.get("headline") or headline_idx,
+                        location_city=loc.get("city"),
+                        location_country=loc.get("country"),
+                        seniority_band=seniority,
+                        skills=skills_idx or None,
+                        signal_candidate_id=payload.signal_candidate_id,
+                    )
+                    if gc_id:
+                        gm_cur.execute(
+                            "UPDATE candidates SET global_candidate_id = %s"
+                            " WHERE tenant_id = %s AND candidate_id = %s"
+                            " AND global_candidate_id IS DISTINCT FROM %s",
+                            (gc_id, tenant_id, result.candidate_id, gc_id),
+                        )
+                gm_conn.commit()
+            finally:
+                gm_conn.close()
+        except Exception as gm_err:  # pragma: no cover — mirror is best-effort
+            logger.warning(
+                "Global-memory mirror failed for signal candidate",
+                extra_fields={
+                    "signal_candidate_id": payload.signal_candidate_id,
+                    "error": str(gm_err),
+                },
+            )
+
+    return result
 
 
 @app.post(

@@ -293,7 +293,9 @@ class ExtractionWorker:
             return
 
         metadata = node.metadata or {}
-        if metadata.get("provenance_type") != "platform_applicant":
+        # platform_applicant = candidate-submitted (public per consent);
+        # org_upload = recruiter/bulk import (stays org-private via visibility).
+        if metadata.get("provenance_type") not in ("platform_applicant", "org_upload"):
             return
 
         try:

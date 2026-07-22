@@ -17,6 +17,9 @@ from pydantic import BaseModel
 
 from activekg.api.auth import get_jwt_claims, require_scope
 from activekg.common.logger import get_enhanced_logger
+from activekg.embedding.global_candidates import (  # noqa: F401 — shared with the embedding producer
+    build_candidate_embedding_text,
+)
 
 logger = get_enhanced_logger(__name__)
 
@@ -329,24 +332,96 @@ _ALWAYS_OVERWRITE_FIELDS = {
 }
 
 
-def _find_existing(cur: psycopg.Cursor, body: GlobalCandidateUpsert) -> dict[str, Any] | None:
-    """Lookup existing global_candidate by anchor priority: linkedin_id > github_id > email_hash."""
+_LINKEDIN_SLUG_RE = re.compile(r"linkedin\.com/in/([^/?#]+)", re.IGNORECASE)
+
+
+def linkedin_id_from_url(url: str | None) -> str | None:
+    """Canonical linkedin_id = lowercased /in/ slug. ONE normalizer for every
+    write path — tenant identifiers, applicant sync, and Signal ingest must
+    agree on this value or the same person lands in different rows."""
+    if not url:
+        return None
+    m = _LINKEDIN_SLUG_RE.search(url)
+    return m.group(1).lower() if m else None
+
+
+def _find_existing_all(
+    cur: psycopg.Cursor,
+    linkedin_id: str | None,
+    github_id: str | None,
+    email_hash: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Look up ALL anchor matches, priority-ordered linkedin > github > email.
+
+    Returns (primary, extras). The old first-match-only lookup meant a person
+    sourced via linkedin (row A) who later applied via email (row B) matched A,
+    then stamping B's email_hash onto A violated the partial-unique anchor
+    index — the sourced-then-applied flywheel case crashed the upsert.
+    """
+    seen_ids: set[str] = set()
+    matches: list[dict[str, Any]] = []
     for anchor, value in [
-        ("linkedin_id", body.linkedin_id),
-        ("github_id", body.github_id),
-        ("email_hash", body.email_hash),
+        ("linkedin_id", linkedin_id),
+        ("github_id", github_id),
+        ("email_hash", email_hash),
     ]:
         if value is None:
             continue
         cur.execute(
-            f"SELECT * FROM global_candidates WHERE {anchor} = %s LIMIT 1",
+            f"SELECT * FROM global_candidates WHERE {anchor} = %s LIMIT 1",  # noqa: S608 — anchor from fixed list
             (value,),
         )
         row = cur.fetchone()
         if row:
             cols = [d.name for d in cur.description]
-            return dict(zip(cols, row, strict=False))
-    return None
+            d = dict(zip(cols, row, strict=False))
+            rid = str(d["id"])
+            if rid not in seen_ids:
+                seen_ids.add(rid)
+                matches.append(d)
+    if not matches:
+        return None, []
+    return matches[0], matches[1:]
+
+
+def _enqueue_merge(
+    cur: psycopg.Cursor,
+    a_id: str,
+    b_id: str | None,
+    tenant_id: str | None,
+    reason: str,
+    details: dict[str, Any],
+) -> None:
+    """Persist an identity conflict as a durable work item (idempotent on the
+    open (pair, reason) via the partial-unique index)."""
+    cur.execute(
+        """
+        INSERT INTO candidate_merge_queue
+            (global_candidate_id_a, global_candidate_id_b, tenant_id, reason, details)
+        VALUES (%s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT DO NOTHING
+        """,
+        (a_id, b_id, tenant_id, reason, json.dumps(details)),
+    )
+
+
+def _names_conflict(existing_name: str | None, incoming_name: str | None) -> bool:
+    """Sanity guard for weak-anchor (email-only) matches: shared/fake emails
+    (careers@agency.com) must not silently COALESCE-merge different humans.
+    Conservative: only flags when both names exist and share no token."""
+    if not existing_name or not incoming_name:
+        return False
+    a = {t for t in re.split(r"[^a-z]+", existing_name.lower()) if len(t) > 1}
+    b = {t for t in re.split(r"[^a-z]+", incoming_name.lower()) if len(t) > 1}
+    if not a or not b:
+        return False
+    return not (a & b)
+
+
+def _find_existing(cur: psycopg.Cursor, body: GlobalCandidateUpsert) -> dict[str, Any] | None:
+    """Back-compat single-match lookup (primary anchor only)."""
+    primary, _ = _find_existing_all(cur, body.linkedin_id, body.github_id, body.email_hash)
+    return primary
 
 
 def _row_to_dict(cur: psycopg.Cursor, row: tuple) -> dict[str, Any]:
@@ -379,17 +454,77 @@ def upsert_global_candidate(
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
-            existing = _find_existing(cur, body)
+            existing, extras = _find_existing_all(
+                cur, body.linkedin_id, body.github_id, body.email_hash
+            )
+
+            # Cross-anchor conflict: this evidence bridges >1 existing row
+            # (e.g. sourced-by-linkedin row + applied-by-email row = same
+            # human). Queue a needs_merge item and mark the primary; do NOT
+            # stamp anchors owned by the other row — that violates the
+            # partial-unique anchor indexes (crash) or steals identity.
+            conflicted_anchors: set[str] = set()
+            if existing and extras:
+                for extra in extras:
+                    for anchor in ("linkedin_id", "github_id", "email_hash"):
+                        if extra.get(anchor) and getattr(body, anchor) == extra.get(anchor):
+                            conflicted_anchors.add(anchor)
+                    _enqueue_merge(
+                        cur,
+                        str(existing["id"]),
+                        str(extra["id"]),
+                        None,
+                        "needs_merge",
+                        {"bridging_anchors": sorted(conflicted_anchors), "source": "upsert"},
+                    )
+                cur.execute(
+                    "UPDATE global_candidates SET merge_status = 'needs_merge' WHERE id IN (%s, %s)",
+                    (existing["id"], extras[0]["id"]),
+                )
+
+            # Weak-anchor sanity guard: matched by email only + names disjoint
+            # → likely a shared mailbox, not the same person. Queue for review
+            # and skip profile fills so we never blend two humans.
+            weak_match_suspect = bool(
+                existing
+                and not extras
+                and body.email_hash
+                and existing.get("email_hash") == body.email_hash
+                and (body.linkedin_id is None or existing.get("linkedin_id") != body.linkedin_id)
+                and (body.github_id is None or existing.get("github_id") != body.github_id)
+                and _names_conflict(existing.get("name"), body.name)
+            )
+            if existing and weak_match_suspect:
+                _enqueue_merge(
+                    cur,
+                    str(existing["id"]),
+                    None,
+                    None,
+                    "review_required",
+                    {
+                        "existing_name": existing.get("name"),
+                        "incoming_name": body.name,
+                        "anchor": "email_hash",
+                    },
+                )
 
             if existing:
                 # Non-destructive merge: identity/merge-control fields always
-                # overwrite; profile fields use COALESCE so richer data is not
-                # clobbered by a sparser evidence stream.
+                # overwrite (except anchors owned by a conflicting row);
+                # profile fields use COALESCE so richer data is not clobbered
+                # by a sparser evidence stream. Suspect weak matches attach no
+                # profile data at all.
                 updates: list[str] = []
                 params: list[Any] = []
                 for field in _CANDIDATE_FIELDS:
                     val = getattr(body, field)
                     if val is not None:
+                        if field in conflicted_anchors:
+                            continue
+                        if weak_match_suspect:
+                            # Doubtful identity: record evidence timestamps only —
+                            # neither profile fills nor new anchors attach.
+                            continue
                         if field in _ALWAYS_OVERWRITE_FIELDS:
                             updates.append(f"{field} = %s")
                         else:
@@ -728,6 +863,12 @@ def sync_applicant_to_global_memory(
     if email_raw and isinstance(email_raw, str):
         email_hash = hashlib.sha256(email_raw.strip().lower().encode()).hexdigest()
 
+    # LinkedIn anchor from the resume links Flow already extracts. Without it,
+    # applicants (email-anchored) and Signal-sourced rows (linkedin-anchored)
+    # could never converge on one profile — guaranteed duplicates.
+    linkedin_url_raw = node_props.get("linkedin_url") or metadata.get("linkedin_url")
+    li_id = linkedin_id_from_url(linkedin_url_raw if isinstance(linkedin_url_raw, str) else None)
+
     name = node_props.get("applicant_name") or metadata.get("applicant_name")
 
     # Map extraction fields (normalize to Signal's canonical taxonomy)
@@ -750,76 +891,103 @@ def sync_applicant_to_global_memory(
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
-            # Upsert global_candidates by email_hash (primary anchor for applicants)
-            existing = None
-            if email_hash:
-                cur.execute(
-                    "SELECT id FROM global_candidates WHERE email_hash = %s LIMIT 1",
-                    (email_hash,),
+            # Multi-anchor lookup (linkedin > email). Cross-anchor hits queue a
+            # needs_merge item — the sourced-then-applied case must converge,
+            # not duplicate or crash on the unique anchor indexes.
+            existing_row, extras = _find_existing_all(cur, li_id, None, email_hash)
+            for extra in extras:
+                _enqueue_merge(
+                    cur,
+                    str(existing_row["id"]),
+                    str(extra["id"]),
+                    tenant_id,
+                    "needs_merge",
+                    {"source": "applicant_sync", "node_id": node_id},
                 )
-                row = cur.fetchone()
-                if row:
-                    existing = str(row[0])
 
-            if existing:
-                # Non-destructive merge: profile fields use COALESCE
+            if existing_row:
+                gc_id = str(existing_row["id"])
+                # Non-destructive merge: profile fields use COALESCE; skills
+                # are UNION-merged (a new resume adds evidence, COALESCE would
+                # freeze the first-ever list); missing anchors are filled.
                 sets = ["last_evidence_at = now()", "updated_at = now()"]
                 params: list[Any] = []
                 for col, val in [
                     ("name", name),
                     ("role_family", role_family),
                     ("seniority_band", seniority_band),
-                    ("skills_normalized", skills),
                     ("location_city", location_city),
                     ("location_country_code", location_country),
                 ]:
                     if val is not None:
                         sets.append(f"{col} = COALESCE({col}, %s)")
                         params.append(val)
+                if skills:
+                    sets.append(
+                        "skills_normalized = ARRAY(SELECT DISTINCT unnest(COALESCE(skills_normalized, ARRAY[]::text[]) || %s::text[]))"
+                    )
+                    params.append(skills)
+                if email_hash and not existing_row.get("email_hash"):
+                    sets.append("email_hash = %s")
+                    params.append(email_hash)
+                if li_id and not existing_row.get("linkedin_id"):
+                    sets.append("linkedin_id = %s")
+                    params.append(li_id)
+                    if isinstance(linkedin_url_raw, str):
+                        sets.append("linkedin_url = COALESCE(linkedin_url, %s)")
+                        params.append(linkedin_url_raw)
 
-                params.append(existing)
+                params.append(gc_id)
                 cur.execute(
                     f"UPDATE global_candidates SET {', '.join(sets)} WHERE id = %s",
                     params,
                 )
-                gc_id = existing
             else:
                 # Insert new
                 cur.execute(
                     """
                     INSERT INTO global_candidates
-                        (email_hash, name, role_family, seniority_band, skills_normalized,
+                        (email_hash, linkedin_id, linkedin_url, name, role_family,
+                         seniority_band, skills_normalized,
                          location_city, location_country_code, identity_confidence)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
                         email_hash,
+                        li_id,
+                        linkedin_url_raw if isinstance(linkedin_url_raw, str) else None,
                         name,
                         role_family,
                         seniority_band,
                         skills,
                         location_city,
                         location_country,
-                        0.5,  # Moderate confidence for email-only anchor
+                        0.7 if li_id else 0.5,  # linkedin anchor is stronger evidence
                     ),
                 )
                 gc_id = str(cur.fetchone()[0])
 
-            # Upsert provenance
+            # Upsert provenance. provenance_type passthrough: candidate-submitted
+            # applications are 'platform_applicant'; recruiter/bulk uploads should
+            # arrive as 'org_upload' so DI provenance stays honest.
             application_id = metadata.get("application_id")
             job_id = metadata.get("job_id")
             org_id = metadata.get("org_id")
+            source_type = metadata.get("provenance_type") or "platform_applicant"
+            if source_type not in ("platform_applicant", "org_upload"):
+                source_type = "platform_applicant"
             cur.execute(
                 """
                 INSERT INTO candidate_provenance
                     (global_candidate_id, source_type, tenant_id, source_detail)
-                VALUES (%s, 'platform_applicant', %s, %s::jsonb)
+                VALUES (%s, %s, %s, %s::jsonb)
                 ON CONFLICT (global_candidate_id, source_type, tenant_id)
                 DO UPDATE SET source_detail = EXCLUDED.source_detail
                 """,
                 (
                     gc_id,
+                    source_type,
                     tenant_id,
                     json.dumps(
                         {
@@ -861,5 +1029,223 @@ def sync_applicant_to_global_memory(
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Signal-sourced candidates → global memory (#29 slice 2)
+# ---------------------------------------------------------------------------
+
+
+def upsert_signal_candidate_to_global(
+    cur: psycopg.Cursor,
+    *,
+    tenant_id: str,
+    linkedin_url: str | None,
+    name: str | None,
+    headline: str | None,
+    location_city: str | None,
+    location_country: str | None,
+    seniority_band: str | None,
+    skills: list[str] | None,
+    signal_candidate_id: str,
+) -> str | None:
+    """Upsert a Crustdata/Signal-sourced candidate into global_candidates.
+
+    Called from the tenant resolve path (same transaction/cursor) so the
+    tenant row and the global row commit together. Provenance is PUBLIC
+    (tenant_id NULL): sourced profiles are public-web data per the product
+    scope rules. Returns the global_candidate_id for the tenant-side link,
+    or None when no usable identity anchor exists.
+    """
+    li_id = linkedin_id_from_url(linkedin_url)
+    if not li_id:
+        return None  # no anchor — a global row without identity is merge debt
+
+    existing, extras = _find_existing_all(cur, li_id, None, None)
+    for extra in extras:
+        _enqueue_merge(
+            cur,
+            str(existing["id"]),
+            str(extra["id"]),
+            None,
+            "needs_merge",
+            {"source": "signal_ingest", "signal_candidate_id": signal_candidate_id},
+        )
+
+    country_code = _normalize_country_code(location_country) if location_country else None
+
+    if existing:
+        gc_id = str(existing["id"])
+        sets = ["last_evidence_at = now()", "updated_at = now()"]
+        params: list[Any] = []
+        for col, val in [
+            ("name", name),
+            ("headline", headline),
+            ("seniority_band", seniority_band),
+            ("location_city", location_city),
+            ("location_country_code", country_code),
+            ("linkedin_url", linkedin_url),
+        ]:
+            if val is not None:
+                sets.append(f"{col} = COALESCE({col}, %s)")
+                params.append(val)
+        if skills:
+            sets.append(
+                "skills_normalized = ARRAY(SELECT DISTINCT unnest(COALESCE(skills_normalized, ARRAY[]::text[]) || %s::text[]))"
+            )
+            params.append([s.lower().strip() for s in skills if s and s.strip()])
+        params.append(gc_id)
+        cur.execute(
+            f"UPDATE global_candidates SET {', '.join(sets)} WHERE id = %s",
+            params,
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO global_candidates
+                (linkedin_id, linkedin_url, name, headline, seniority_band,
+                 skills_normalized, location_city, location_country_code,
+                 identity_confidence)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0.7)
+            RETURNING id
+            """,
+            (
+                li_id,
+                linkedin_url,
+                name,
+                headline,
+                seniority_band,
+                [s.lower().strip() for s in skills if s and s.strip()] if skills else None,
+                location_city,
+                country_code,
+            ),
+        )
+        gc_id = str(cur.fetchone()[0])
+
+    # Public provenance: sourced = public-web data (tenant_id NULL).
+    cur.execute(
+        """
+        INSERT INTO candidate_provenance
+            (global_candidate_id, source_type, tenant_id, source_detail)
+        VALUES (%s, 'signal_sourced', NULL, %s::jsonb)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            gc_id,
+            json.dumps({"signal_candidate_id": signal_candidate_id, "sourcing_tenant": tenant_id}),
+        ),
+    )
+    return gc_id
+
+
+# ---------------------------------------------------------------------------
+# Vector search over global candidates (#29 slice 5 — hybrid retrieval substrate)
+# ---------------------------------------------------------------------------
+
+_embedder = None
+
+
+def set_embedder(embedder: Any) -> None:
+    """Injected from API startup so search reuses the process-wide model."""
+    global _embedder
+    _embedder = embedder
+
+
+class GlobalCandidateSearchRequest(BaseModel):
+    query_text: str
+    limit: int = 50
+    location_city: str | None = None
+    role_family: str | None = None
+    seniority_band: str | None = None
+    skills_any: list[str] | None = None
+
+
+@router.post(
+    "/global-candidates/search",
+    dependencies=[Depends(require_scope("kg:read"))],
+)
+def search_global_candidates(
+    body: GlobalCandidateSearchRequest,
+    claims=Depends(get_jwt_claims),
+):
+    """Vector search over the platform pool.
+
+    Visibility rule (product scope tiers): a row is visible to the requesting
+    tenant iff it has PUBLIC provenance (tenant_id IS NULL) OR that tenant has
+    an access row for it (their own private uploads / consented applicants).
+    """
+    _require_enabled()
+    if _embedder is None:
+        raise HTTPException(status_code=503, detail="Embedder not initialized")
+
+    tenant_id = getattr(claims, "tenant_id", None) if claims else None
+    limit = max(1, min(body.limit, 200))
+
+    vec = _embedder.encode([body.query_text])[0]
+    vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec.tolist()) + "]"
+
+    filters: list[str] = ["gc.embedding_status = 'ready'", "gc.embedding IS NOT NULL"]
+    params: list[Any] = []
+    if body.location_city:
+        filters.append("gc.location_city ILIKE %s")
+        params.append(body.location_city)
+    if body.role_family:
+        filters.append("gc.role_family = %s")
+        params.append(body.role_family)
+    if body.seniority_band:
+        filters.append("gc.seniority_band = %s")
+        params.append(body.seniority_band)
+    if body.skills_any:
+        filters.append("gc.skills_normalized && %s::text[]")
+        params.append([s.lower().strip() for s in body.skills_any])
+
+    visibility = (
+        "(EXISTS (SELECT 1 FROM candidate_provenance cp"
+        " WHERE cp.global_candidate_id = gc.id AND cp.tenant_id IS NULL)"
+        " OR EXISTS (SELECT 1 FROM tenant_candidate_access tca"
+        " WHERE tca.global_candidate_id = gc.id AND tca.tenant_id = %s"
+        " AND tca.revoked_at IS NULL))"
+    )
+    filters.append(visibility)
+    params.append(tenant_id or "")
+
+    # Hydrate the tenant-side crustdata blob via the #29 link column so the
+    # caller's ranker gets full profiles. RLS on candidates limits the join to
+    # the requesting tenant's own rows (tenant conn sets the GUC); cross-tenant
+    # blob sharing for public rows is a follow-up (#12).
+    sql = f"""
+        SELECT gc.id, gc.name, gc.headline, gc.linkedin_url, gc.linkedin_id,
+               gc.role_family, gc.seniority_band, gc.skills_normalized,
+               gc.location_city, gc.location_country_code,
+               1 - (gc.embedding <=> %s::vector) AS similarity,
+               tc.profile AS crustdata_profile,
+               tc.candidate_id AS tenant_candidate_id,
+               tc.signal_candidate_id
+        FROM global_candidates gc
+        LEFT JOIN LATERAL (
+            SELECT c.profile, c.candidate_id,
+                   (SELECT ci.value_normalized FROM candidate_identifiers ci
+                    WHERE ci.candidate_id = c.candidate_id
+                      AND ci.tenant_id = c.tenant_id
+                      AND ci.identifier_type = 'signal_candidate_id'
+                    LIMIT 1) AS signal_candidate_id
+            FROM candidates c
+            WHERE c.global_candidate_id = gc.id
+            LIMIT 1
+        ) tc ON true
+        WHERE {" AND ".join(filters)}
+        ORDER BY gc.embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    conn = _get_tenant_conn(tenant_id)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, [vec_literal, *params, vec_literal, limit])
+            rows = [_row_to_dict(cur, r) for r in cur.fetchall()]
+        conn.commit()
+        return {"results": rows, "count": len(rows)}
     finally:
         conn.close()
