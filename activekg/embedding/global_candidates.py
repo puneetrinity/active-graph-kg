@@ -32,7 +32,7 @@ logger = get_enhanced_logger(__name__)
 
 # Bump on ANY change to build_candidate_embedding_text (or the underlying
 # model): the sweep re-embeds every ready/skipped row with a lower version.
-EMBED_VERSION = 2
+EMBED_VERSION = 3
 
 # The encoder truncates long inputs anyway (MiniLM ~256 wordpieces); this cap
 # just keeps pathological blobs from wasting tokenizer time. Order the parts
@@ -104,7 +104,7 @@ def build_candidate_embedding_text(row: dict[str, Any]) -> str:
     side: candidates and JD queries must live in the same vector space.
     ``row`` may carry ``crustdata_profile`` (freshest tenant-side blob)."""
     parts: list[str] = []
-    for key in ("name", "headline", "role_family", "seniority_band"):
+    for key in ("headline", "role_family", "seniority_band"):
         v = row.get(key)
         if v:
             parts.append(str(v))
@@ -121,7 +121,7 @@ def build_candidate_embedding_text(row: dict[str, Any]) -> str:
 
 
 _SELECT_COLS = (
-    "gc.id, gc.name, gc.headline, gc.role_family, gc.seniority_band, gc.skills_normalized, "
+    "gc.id, gc.headline, gc.role_family, gc.seniority_band, gc.skills_normalized, "
     "gc.location_city, gc.location_country_code, tc.profile AS crustdata_profile"
 )
 
@@ -214,7 +214,7 @@ class GlobalCandidateEmbedder:
                         empty_ids.append(str(d["id"]))
 
                 if empty_ids:
-                    # Nothing to embed (no name/headline/skills) — skip, don't loop forever.
+                    # Nothing embeddable — skip, don't loop forever.
                     cur.execute(
                         "UPDATE global_candidates"
                         " SET embedding_status = 'skipped_empty', embed_version = %s"
