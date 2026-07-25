@@ -28,6 +28,7 @@ exclude = [
     ".git",
     ".mypy_cache",
     ".ruff_cache",
+    "*.md",  # ruff 0.16 formats python-in-markdown; docs are not Python
     "build",
     "dist",
 ]
