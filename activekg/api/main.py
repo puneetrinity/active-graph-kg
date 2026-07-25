@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from dotenv import load_dotenv
 
@@ -41,7 +42,13 @@ from activekg.api.auth import (
     require_scope,
     verification_key_problems,
 )
-from activekg.api.global_memory import router as global_memory_router
+from activekg.api.global_memory import (
+    LEGACY_GLOBAL_SEARCH_ENABLED,
+    PUBLIC_PROFILE_SEARCH_ENABLED,
+)
+from activekg.api.global_memory import (
+    router as global_memory_router,
+)
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.common.env import env_str
@@ -58,6 +65,7 @@ from activekg.common.validation import (
 )
 from activekg.connectors.cache_subscriber import get_subscriber_health
 from activekg.connectors.webhooks import router as connectors_webhook_router
+from activekg.embedding.global_candidates import PUBLIC_EMBED_VERSION
 from activekg.embedding.queue import (
     enqueue_embedding_job,
     get_pending_count,
@@ -599,7 +607,92 @@ def health() -> HealthCheckResponse:
     )
 
 
-_READINESS_CANDIDATE_TABLES = ("candidates", "candidate_identifiers", "candidate_source_records")
+_READINESS_CANDIDATE_TABLES = (
+    "candidates",
+    "candidate_identifiers",
+    "candidate_source_records",
+    "candidate_contact_evidence",
+)
+_READINESS_SHARED_TABLES = (
+    "contact_suppression_tombstones",
+    "public_candidate_market_memberships",
+)
+_READINESS_PUBLIC_COLUMNS = (
+    "public_profile",
+    "public_profile_observed_at",
+    "public_crustdata_person_id",
+    "public_headline",
+    "public_location_city",
+    "public_location_country_code",
+    "public_role_family",
+    "public_seniority_band",
+    "public_skills_normalized",
+    "public_embedding",
+    "public_embedding_status",
+    "public_embed_version",
+)
+_READINESS_TABLE_COLUMNS = {
+    "candidate_contact_evidence": (
+        "global_candidate_id",
+        "tenant_id",
+        "email",
+        "email_hash",
+        "provider",
+        "provider_record_id",
+        "confidence",
+        "observed_at",
+        "validated_at",
+        "status",
+        "suppressed_at",
+        "bounce_reason",
+        "is_primary",
+    ),
+    "contact_suppression_tombstones": (
+        "email_hash",
+        "global_candidate_id",
+        "reason",
+        "source_evidence_id",
+        "provider_event_id",
+    ),
+    "public_candidate_market_memberships": (
+        "global_candidate_id",
+        "coarse_market_key",
+        "role_family",
+        "location_city",
+        "location_country_code",
+        "seniority_band",
+        "last_observed_at",
+    ),
+}
+_READINESS_REQUIRED_INDEXES = (
+    "idx_gc_public_crustdata_person_id",
+    "idx_gc_public_embedding_status",
+    "idx_cce_one_primary",
+    "idx_cce_email_hash",
+    "idx_contact_suppression_provider_event",
+    "idx_pcmm_market_last_observed",
+)
+_READINESS_REQUIRED_CONSTRAINTS = {
+    "global_candidates": (
+        "global_candidates_public_embedding_status_check",
+        "global_candidates_public_headline_from_profile",
+    ),
+    "candidate_contact_evidence": (
+        "candidate_contact_evidence_unique",
+        "candidate_contact_evidence_primary_usable",
+    ),
+    "contact_suppression_tombstones": ("contact_suppression_reason_check",),
+    "public_candidate_market_memberships": (
+        "public_candidate_market_country_code_check",
+        "public_candidate_market_memberships_pkey",
+    ),
+}
+_READINESS_PUBLIC_FUNCTIONS = (
+    "activekg_pick_public_fields",
+    "activekg_pick_public_rows",
+    "activekg_public_crustdata_projection",
+    "activekg_assert_public_crustdata_backfill_safe",
+)
 
 # Transitional escape hatch for single-DSN dev environments where the runtime
 # role still owns the tables (RLS nominal). Production must NOT set this.
@@ -607,6 +700,16 @@ _READYZ_ALLOW_OWNER = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() 
 
 # Development-only: lets /readyz pass with JWT authentication disabled.
 _READYZ_ALLOW_NO_JWT = os.getenv("ACTIVEKG_READYZ_ALLOW_NO_JWT", "false").lower() == "true"
+
+
+def _tenant_policy_expression_ok(expr: str) -> bool:
+    normalized = "".join(expr.lower().split()).replace("::text", "")
+    tenant_clause = "(tenant_id=current_setting('app.current_tenant_id',true))"
+    quarantine_clause = "(tenant_id<>'__quarantine__')"
+    return normalized in {
+        f"({tenant_clause}and{quarantine_clause})",
+        f"({quarantine_clause}and{tenant_clause})",
+    }
 
 
 @app.get("/readyz", response_model=None)
@@ -621,6 +724,8 @@ def readyz() -> JSONResponse:
     logged, never returned.
     """
     problems: list[str] = []
+    if PUBLIC_PROFILE_SEARCH_ENABLED and LEGACY_GLOBAL_SEARCH_ENABLED:
+        problems.append("unsafe search configuration: public_v1 requires legacy_v0 to be disabled")
     if candidate_repo is None:
         problems.append("candidate repository not initialized (TEST_MODE)")
     else:
@@ -671,19 +776,185 @@ def readyz() -> JSONResponse:
                     # 2. Candidate tables exist, RLS enabled, owner recorded
                     cur.execute(
                         """
-                        SELECT c.relname, c.relrowsecurity, pg_get_userbyid(c.relowner)
+                        SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+                               pg_get_userbyid(c.relowner)
                         FROM pg_class c
                         JOIN pg_namespace n ON n.oid = c.relnamespace
                         WHERE n.nspname = 'public' AND c.relname = ANY(%s)
                         """,
                         (list(_READINESS_CANDIDATE_TABLES),),
                     )
-                    found = {name: (bool(rls), owner) for name, rls, owner in cur.fetchall()}
+                    found = {
+                        name: (bool(rls), bool(force_rls), owner)
+                        for name, rls, force_rls, owner in cur.fetchall()
+                    }
                     for table in _READINESS_CANDIDATE_TABLES:
                         if table not in found:
                             problems.append(f"missing table: {table}")
                         elif not found[table][0]:
                             problems.append(f"rls disabled: {table}")
+                        elif table == "candidate_contact_evidence" and not found[table][1]:
+                            problems.append(f"force rls disabled: {table}")
+
+                    cur.execute(
+                        """
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public' AND table_name = ANY(%s)
+                        """,
+                        (list(_READINESS_SHARED_TABLES),),
+                    )
+                    shared_found = {row[0] for row in cur.fetchall()}
+                    for table in _READINESS_SHARED_TABLES:
+                        if table not in shared_found:
+                            problems.append(f"missing table: {table}")
+
+                    for table, required_columns in _READINESS_TABLE_COLUMNS.items():
+                        cur.execute(
+                            """
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = %s
+                              AND column_name = ANY(%s)
+                            """,
+                            (table, list(required_columns)),
+                        )
+                        table_columns = {row[0] for row in cur.fetchall()}
+                        for column in required_columns:
+                            if column not in table_columns:
+                                problems.append(f"missing {table} column: {column}")
+
+                    cur.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'global_candidates'
+                          AND column_name = ANY(%s)
+                        """,
+                        (list(_READINESS_PUBLIC_COLUMNS),),
+                    )
+                    public_columns = {row[0] for row in cur.fetchall()}
+                    for column in _READINESS_PUBLIC_COLUMNS:
+                        if column not in public_columns:
+                            problems.append(f"missing global_candidates column: {column}")
+
+                    cur.execute(
+                        """
+                        SELECT p.proname
+                        FROM pg_proc p
+                        JOIN pg_namespace n ON n.oid = p.pronamespace
+                        WHERE n.nspname = 'public' AND p.proname = ANY(%s)
+                        """,
+                        (list(_READINESS_PUBLIC_FUNCTIONS),),
+                    )
+                    public_functions = {row[0] for row in cur.fetchall()}
+                    for function in _READINESS_PUBLIC_FUNCTIONS:
+                        if function not in public_functions:
+                            problems.append(f"missing function: {function}")
+                    if not (set(_READINESS_PUBLIC_FUNCTIONS) - public_functions):
+                        # Exercise the deployed projection, not only its name:
+                        # a CREATE OR REPLACE that reintroduces type-confusion
+                        # passthrough must make the service unready.
+                        cur.execute(
+                            """
+                            SELECT activekg_public_crustdata_projection(
+                                %s::jsonb
+                            )
+                            """,
+                            (
+                                json.dumps(
+                                    {
+                                        "basic_profile": {
+                                            "name": "Readiness Person",
+                                            "summary": {"email": "READINESS_PRIVATE_SENTINEL"},
+                                            "languages": [
+                                                "English",
+                                                {"email": ("READINESS_LIST_PRIVATE_SENTINEL")},
+                                            ],
+                                        },
+                                        "skills": {
+                                            "professional_network_skills": [
+                                                "Python",
+                                                {"email": ("READINESS_SKILL_PRIVATE_SENTINEL")},
+                                            ]
+                                        },
+                                    }
+                                ),
+                            ),
+                        )
+                        projected = cur.fetchone()[0]
+                        rendered_projection = json.dumps(projected, sort_keys=True)
+                        if (
+                            "PRIVATE_SENTINEL" in rendered_projection
+                            or projected.get("basic_profile", {}).get("name") != "Readiness Person"
+                            or projected.get("basic_profile", {}).get("languages") != ["English"]
+                            or projected.get("skills", {}).get("professional_network_skills")
+                            != ["Python"]
+                        ):
+                            problems.append("public projection behavior unexpected")
+
+                    cur.execute(
+                        """
+                        SELECT indexname
+                        FROM pg_indexes
+                        WHERE schemaname = 'public' AND indexname = ANY(%s)
+                        """,
+                        (list(_READINESS_REQUIRED_INDEXES),),
+                    )
+                    found_indexes = {row[0] for row in cur.fetchall()}
+                    for index in _READINESS_REQUIRED_INDEXES:
+                        if index not in found_indexes:
+                            problems.append(f"missing index: {index}")
+
+                    expected_constraint_names = [
+                        constraint
+                        for constraints in _READINESS_REQUIRED_CONSTRAINTS.values()
+                        for constraint in constraints
+                    ]
+                    cur.execute(
+                        """
+                        SELECT c.relname, con.conname
+                        FROM pg_constraint con
+                        JOIN pg_class c ON c.oid = con.conrelid
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'public' AND con.conname = ANY(%s)
+                        """,
+                        (expected_constraint_names,),
+                    )
+                    found_constraints = {(row[0], row[1]) for row in cur.fetchall()}
+                    for table, constraints in _READINESS_REQUIRED_CONSTRAINTS.items():
+                        for constraint in constraints:
+                            if (table, constraint) not in found_constraints:
+                                problems.append(f"missing constraint: {table}.{constraint}")
+
+                    if PUBLIC_PROFILE_SEARCH_ENABLED and not (
+                        set(_READINESS_PUBLIC_COLUMNS) - public_columns
+                    ):
+                        # The public flag must never expose the pre-v1 vector
+                        # or an indefinitely stuck queue. A ten-minute grace
+                        # prevents normal incremental ingest from flapping
+                        # readiness while still detecting a dead embed worker.
+                        cur.execute(
+                            """
+                            SELECT count(*)
+                            FROM global_candidates
+                            WHERE public_profile <> '{}'::jsonb
+                              AND public_profile_observed_at < now() - interval '10 minutes'
+                              AND (
+                                  public_embed_version < %s
+                                  OR public_embedding_status NOT IN ('ready', 'skipped_empty')
+                              )
+                            """,
+                            (PUBLIC_EMBED_VERSION,),
+                        )
+                        stale_public_embeddings = int(cur.fetchone()[0])
+                        if stale_public_embeddings:
+                            problems.append(
+                                "public embedding drain incomplete: "
+                                f"{stale_public_embeddings} stale rows"
+                            )
 
                     # 3. Tenant policies verified across every dimension:
                     # identity, permissiveness, command, roles, and both the
@@ -698,9 +969,6 @@ def readyz() -> JSONResponse:
                     )
                     policies = {(r[1], r[2]): r for r in cur.fetchall()}
 
-                    def _tenant_expr_ok(expr: str) -> bool:
-                        return "app.current_tenant_id" in expr and "__quarantine__" in expr
-
                     for table in _READINESS_CANDIDATE_TABLES:
                         row = policies.get((table, f"tenant_isolation_{table}"))
                         if row is None:
@@ -709,7 +977,9 @@ def readyz() -> JSONResponse:
                             _s, _t, _p, permissive, roles, cmd, qual, with_check = row
                             if permissive != "PERMISSIVE" or cmd != "ALL" or "public" not in roles:
                                 problems.append(f"tenant policy attributes unexpected: {table}")
-                            if not _tenant_expr_ok(qual) or not _tenant_expr_ok(with_check):
+                            if not _tenant_policy_expression_ok(
+                                qual
+                            ) or not _tenant_policy_expression_ok(with_check):
                                 problems.append(f"tenant policy definition unexpected: {table}")
                         arow = policies.get((table, f"admin_all_{table}"))
                         if arow is None:
@@ -732,7 +1002,11 @@ def readyz() -> JSONResponse:
                         if bypasses:
                             problems.append("runtime role has BYPASSRLS")
                         if not _READYZ_ALLOW_OWNER:
-                            owned = [t for t, (_rls, owner) in found.items() if owner == role_name]
+                            owned = [
+                                t
+                                for t, (_rls, _force_rls, owner) in found.items()
+                                if owner == role_name
+                            ]
                             if owned:
                                 problems.append(
                                     "runtime role owns candidate tables (RLS not effective): "
@@ -4365,6 +4639,7 @@ class ResolveConflict(BaseModel):
 
 class CandidateResolveResponse(BaseModel):
     candidate_id: str | None
+    global_candidate_id: str | None = None
     resolution_status: str  # "created" | "matched" | "review_required"
     matched_identifier: MatchedIdentifier | None = None
     attached_identifiers: list[AttachedIdentifier] = Field(default_factory=list)
@@ -4392,6 +4667,10 @@ class CandidateTagSearchResult(BaseModel):
 # Clamped to the repository's hard ceiling (1000) so applied_limit can never
 # overstate what the storage layer will actually return.
 TAG_SEARCH_MAX_LIMIT = min(int(os.getenv("ACTIVEKG_TAG_SEARCH_MAX_LIMIT", "500")), 1000)
+PRIVATE_SEARCH_MAX_LIMIT = min(
+    int(os.getenv("ACTIVEKG_PRIVATE_SEARCH_MAX_LIMIT", "1000")),
+    1000,
+)
 
 
 class CandidateSearchByTagsRequest(BaseModel):
@@ -4409,6 +4688,52 @@ class CandidateSearchByTagsResponse(BaseModel):
     total_matched: int = 0
     truncated: bool = False
     applied_limit: int = 0
+
+
+class TenantPrivateCandidateSearchRequest(BaseModel):
+    query_text: str = Field(default="", max_length=10_000)
+    skills_any: list[str] = Field(default_factory=list, max_length=100)
+    tenant_id: str | None = None
+    limit: int = Field(default=100, ge=1)
+
+
+class TenantPrivateCandidateSearchResult(BaseModel):
+    candidate_id: str
+    global_candidate_id: str | None = None
+    display_name: str | None = None
+    linkedin_url: str | None = None
+    linkedin_id: str | None = None
+    headline: str | None = None
+    location_raw: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    seniority_level: str | None = None
+    keyword_score: float = 0.0
+    skill_overlap_count: int = 0
+    evidence_surface: Literal["tenant_private_v1"] = "tenant_private_v1"
+
+
+class TenantPrivateCandidateSearchResponse(BaseModel):
+    surface: Literal["tenant_private_v1"] = "tenant_private_v1"
+    results: list[TenantPrivateCandidateSearchResult]
+    total: int
+    total_available: int
+    truncated: bool
+    applied_limit: int
+
+
+_PRIVATE_SEARCH_TOKEN = re.compile(r"[a-z0-9][a-z0-9+#.-]{1,63}")
+
+
+def _private_search_terms(query_text: str, skills: list[str]) -> tuple[list[str], list[str]]:
+    query_terms = list(
+        dict.fromkeys(
+            match.group(0) for match in _PRIVATE_SEARCH_TOKEN.finditer(query_text.lower())
+        )
+    )[:64]
+    normalized_skills = list(
+        dict.fromkeys(value for value in (str(skill).strip().lower() for skill in skills) if value)
+    )[:100]
+    return query_terms, normalized_skills
 
 
 def _evaluate_strong_signal_mismatch(
@@ -5234,11 +5559,13 @@ def resolve_candidate_from_signal(
 
     linkedin_id = None
     if payload.linkedinUrl:
-        import re
-
-        match = re.search(r"/in/([^/]+)", payload.linkedinUrl)
-        if match:
-            linkedin_id = match.group(1).split("?")[0].split("#")[0].rstrip("/")
+        try:
+            canonical_linkedin = normalize_identifier("linkedin_url", payload.linkedinUrl)
+            linkedin_id = canonical_linkedin.rsplit("/", 1)[-1]
+        except IdentifierNormalizationError:
+            # The identifier collector records the malformed anchor under
+            # _skipped_identifiers; never write a second, looser profile ID.
+            linkedin_id = None
 
     profile_pic = None
     if bp := crustdata.get("basic_profile"):
@@ -5287,11 +5614,18 @@ def resolve_candidate_from_signal(
         resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
     )
 
-    # ── #29: mirror sourced candidates into the platform-global canonical ────
-    # Non-blocking: the tenant-side resolve is the durable record; a global
-    # mirror failure must never fail Signal's ingest.
+    # ── #29/#12: mirror sourced candidates into the platform-global canonical ─
+    # Legacy callers retain the old best-effort behavior. public_v1 callers
+    # require the returned global ID for cross-tenant hydration, so a mirror
+    # failure returns 503. The tenant resolve has already committed and is
+    # idempotent; Signal can retry without duplicating the candidate.
     from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
 
+    strict_public_mirror = (payload.source_metadata or {}).get(
+        "public_memory_surface"
+    ) == "public_v1"
+    if strict_public_mirror and not _GM_ENABLED:
+        raise HTTPException(status_code=503, detail="public memory is disabled")
     if _GM_ENABLED and result.resolution_status in ("created", "matched") and result.candidate_id:
         try:
             from activekg.api.global_memory import (
@@ -5317,8 +5651,14 @@ def resolve_candidate_from_signal(
                         seniority_band=seniority,
                         skills=skills_idx or None,
                         signal_candidate_id=payload.signal_candidate_id,
+                        public_profile=crustdata,
+                        public_role_family=(payload.source_metadata or {}).get(
+                            "public_candidate_role_family"
+                        ),
+                        public_market=(payload.source_metadata or {}).get("public_market"),
                     )
                     if gc_id:
+                        result.global_candidate_id = gc_id
                         gm_cur.execute(
                             "UPDATE candidates SET global_candidate_id = %s"
                             " WHERE tenant_id = %s AND candidate_id = %s"
@@ -5328,7 +5668,7 @@ def resolve_candidate_from_signal(
                 gm_conn.commit()
             finally:
                 gm_conn.close()
-        except Exception as gm_err:  # pragma: no cover — mirror is best-effort
+        except Exception as gm_err:  # pragma: no cover — external DB failure path
             logger.warning(
                 "Global-memory mirror failed for signal candidate",
                 extra_fields={
@@ -5336,6 +5676,17 @@ def resolve_candidate_from_signal(
                     "error": str(gm_err),
                 },
             )
+            if strict_public_mirror:
+                raise HTTPException(
+                    status_code=503,
+                    detail="public memory mirror unavailable; retry this idempotent ingest",
+                ) from gm_err
+
+    if strict_public_mirror and not result.global_candidate_id:
+        raise HTTPException(
+            status_code=503,
+            detail="public memory mirror returned no global candidate ID; retry after identity repair",
+        )
 
     return result
 
@@ -5396,5 +5747,64 @@ def search_candidates_by_tags(
         total=len(results),
         total_matched=total_matched,
         truncated=total_matched > len(results),
+        applied_limit=applied_limit,
+    )
+
+
+@app.post(
+    "/candidates/search/private",
+    response_model=TenantPrivateCandidateSearchResponse,
+    dependencies=[Depends(require_scope("kg:read"))],
+)
+def search_tenant_private_candidates(
+    payload: TenantPrivateCandidateSearchRequest,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
+    """Recall only the requesting tenant's applicant/upload candidates.
+
+    The response is an explicit typed projection. Raw candidate profiles,
+    source payloads, resumes, contact data, and recruiting activity never
+    cross this boundary. Signal remains the final ranking authority.
+    """
+    if candidate_repo is None:
+        raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
+
+    tenant_id = claims.tenant_id if JWT_ENABLED and claims else payload.tenant_id
+    if not tenant_id or not tenant_id.strip():
+        raise HTTPException(status_code=400, detail="tenant identity is required")
+
+    query_terms, normalized_skills = _private_search_terms(
+        payload.query_text,
+        payload.skills_any,
+    )
+    applied_limit = min(payload.limit, PRIVATE_SEARCH_MAX_LIMIT)
+    rows, total_available = candidate_repo.search_tenant_private_candidates(
+        tenant_id=tenant_id,
+        query_terms=query_terms,
+        skills_any=normalized_skills,
+        limit=applied_limit,
+    )
+    results = [
+        TenantPrivateCandidateSearchResult(
+            candidate_id=row.candidate_id,
+            global_candidate_id=row.global_candidate_id,
+            display_name=row.display_name,
+            linkedin_url=row.linkedin_url,
+            linkedin_id=row.linkedin_id,
+            headline=row.headline,
+            location_raw=row.location_raw,
+            skills=row.skills,
+            seniority_level=row.seniority_level,
+            keyword_score=row.keyword_score,
+            skill_overlap_count=row.skill_overlap_count,
+        )
+        for row in rows
+    ]
+    return TenantPrivateCandidateSearchResponse(
+        results=results,
+        total=len(results),
+        total_available=total_available,
+        truncated=total_available > len(results),
         applied_limit=applied_limit,
     )

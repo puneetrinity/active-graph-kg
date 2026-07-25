@@ -128,3 +128,25 @@ class SignalTagSearchRow:
     overlap_count: int
     overlap_ratio: float
     profile: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TenantPrivateSearchRow:
+    """Typed, tenant-owned candidate evidence safe for sourcing recall.
+
+    Raw profiles, source payloads, contact data, resumes, and recruiting
+    activity are intentionally absent from this contract.
+    """
+
+    candidate_id: str
+    global_candidate_id: str | None
+    display_name: str | None
+    linkedin_url: str | None
+    linkedin_id: str | None
+    headline: str | None
+    location_raw: str | None
+    skills: list[str]
+    seniority_level: str | None
+    keyword_score: float
+    skill_overlap_count: int
+    updated_at: datetime

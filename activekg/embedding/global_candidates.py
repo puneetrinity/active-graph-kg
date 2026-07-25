@@ -32,7 +32,14 @@ logger = get_enhanced_logger(__name__)
 
 # Bump on ANY change to build_candidate_embedding_text (or the underlying
 # model): the sweep re-embeds every ready/skipped row with a lower version.
+# Because the public builder delegates to it, such a change must also bump
+# PUBLIC_EMBED_VERSION below.
 EMBED_VERSION = 3
+
+# A distinct versioned vector for the cross-tenant surface. Never reuse the
+# historical ``embedding`` column there: it can have been enriched from a
+# private applicant or org-upload record after identity reconciliation.
+PUBLIC_EMBED_VERSION = 1
 
 # The encoder truncates long inputs anyway (MiniLM ~256 wordpieces); this cap
 # just keeps pathological blobs from wasting tokenizer time. Order the parts
@@ -120,9 +127,35 @@ def build_candidate_embedding_text(row: dict[str, Any]) -> str:
     return ". ".join(parts)[:_MAX_TEXT_CHARS]
 
 
+def build_public_candidate_embedding_text(row: dict[str, Any]) -> str:
+    """Build the vector text for the shareable Crustdata-only projection.
+
+    The projection deliberately has separate fields from ``global_candidates``
+    so an applicant resume, recruiter note, or tenant enrichment can never
+    enter a vector served to another tenant.
+    """
+    return build_candidate_embedding_text(
+        {
+            "headline": row.get("public_headline"),
+            "role_family": row.get("public_role_family"),
+            "seniority_band": row.get("public_seniority_band"),
+            "skills_normalized": row.get("public_skills_normalized"),
+            "location_city": row.get("public_location_city"),
+            "location_country_code": row.get("public_location_country_code"),
+            "crustdata_profile": row.get("public_profile"),
+        }
+    )
+
+
 _SELECT_COLS = (
     "gc.id, gc.headline, gc.role_family, gc.seniority_band, gc.skills_normalized, "
     "gc.location_city, gc.location_country_code, tc.profile AS crustdata_profile"
+)
+
+_PUBLIC_SELECT_COLS = (
+    "gc.id, gc.public_profile, gc.public_headline, gc.public_role_family, "
+    "gc.public_seniority_band, gc.public_skills_normalized, "
+    "gc.public_location_city, gc.public_location_country_code"
 )
 
 
@@ -154,7 +187,10 @@ class GlobalCandidateEmbedder:
             return 0
         self._last_sweep = now
         try:
-            return self._sweep_once()
+            # Drain the public projection first. It is feature-gated at the
+            # API boundary until this has caught up, and is the only vector
+            # cross-tenant search is permitted to use.
+            return self._sweep_public_once() + self._sweep_once()
         except Exception as e:  # never take down the node-embedding loop
             logger.error("global_candidates embedding sweep failed", extra={"error": str(e)})
             return 0
@@ -240,6 +276,79 @@ class GlobalCandidateEmbedder:
             if done or empty_ids:
                 logger.info(
                     "global_candidates embedding sweep",
+                    extra={"embedded": done, "skipped_empty": len(empty_ids)},
+                )
+            return done
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _sweep_public_once(self) -> int:
+        conn = psycopg.connect(self.dsn, autocommit=False)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_PUBLIC_SELECT_COLS}
+                    FROM global_candidates gc
+                    WHERE gc.public_profile <> '{{}}'::jsonb
+                      AND (
+                            gc.public_embedding_status = 'queued'
+                            OR (
+                                gc.public_embedding_status IN ('ready', 'skipped_empty')
+                                AND gc.public_embed_version < %s
+                            )
+                          )
+                    ORDER BY (gc.public_embedding_status = 'queued') DESC, gc.updated_at ASC
+                    LIMIT %s
+                    FOR UPDATE OF gc SKIP LOCKED
+                    """,
+                    (PUBLIC_EMBED_VERSION, self.batch_size),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    conn.commit()
+                    return 0
+                cols = [d.name for d in cur.description]
+                dicts = [dict(zip(cols, row, strict=False)) for row in rows]
+
+                texts: list[str] = []
+                embeddable: list[dict[str, Any]] = []
+                empty_ids: list[str] = []
+                for row in dicts:
+                    text = build_public_candidate_embedding_text(row)
+                    if text.strip():
+                        texts.append(text)
+                        embeddable.append(row)
+                    else:
+                        empty_ids.append(str(row["id"]))
+
+                if empty_ids:
+                    cur.execute(
+                        "UPDATE global_candidates "
+                        "SET public_embedding_status = 'skipped_empty', public_embed_version = %s "
+                        "WHERE id = ANY(%s::uuid[])",
+                        (PUBLIC_EMBED_VERSION, empty_ids),
+                    )
+
+                done = 0
+                if embeddable:
+                    vectors = self.embedder.encode(texts)
+                    for row, vector in zip(embeddable, vectors, strict=False):
+                        vec_literal = "[" + ",".join(f"{x:.6f}" for x in vector.tolist()) + "]"
+                        cur.execute(
+                            "UPDATE global_candidates "
+                            "SET public_embedding = %s::vector, public_embedding_status = 'ready', "
+                            "public_embed_version = %s, updated_at = now() WHERE id = %s",
+                            (vec_literal, PUBLIC_EMBED_VERSION, row["id"]),
+                        )
+                        done += 1
+            conn.commit()
+            if done or empty_ids:
+                logger.info(
+                    "public global-candidate embedding sweep",
                     extra={"embedded": done, "skipped_empty": len(empty_ids)},
                 )
             return done

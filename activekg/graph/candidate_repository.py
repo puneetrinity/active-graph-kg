@@ -34,6 +34,7 @@ from activekg.graph.models import (
     CandidateIdentifier,
     CandidateSourceRecord,
     SignalTagSearchRow,
+    TenantPrivateSearchRow,
 )
 
 
@@ -621,6 +622,264 @@ class CandidateRepository:
                 )
             )
         return results, total_matched
+
+    def search_tenant_private_candidates(
+        self,
+        *,
+        tenant_id: str | None,
+        query_terms: list[str],
+        skills_any: list[str],
+        limit: int = 100,
+    ) -> tuple[list[TenantPrivateSearchRow], int]:
+        """Return typed VantaHire-owned candidates for one tenant.
+
+        This surface never reads the shared/global embedding: that vector may
+        contain evidence from more than one tenant after identity resolution.
+        Recall is ordered with tenant-local typed fields only, and deliberately
+        has no hard relevance threshold so incomplete applicant profiles stay
+        eligible for Signal's final ranker.
+        """
+        if not tenant_id or not tenant_id.strip():
+            return [], 0
+        limit = max(1, min(limit, 1000))
+        normalized_terms = list(dict.fromkeys(value for value in query_terms if value))[:64]
+        normalized_skills = list(dict.fromkeys(value for value in skills_any if value))[:100]
+
+        with self._conn(tenant_id) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH candidate_rows AS (
+                        SELECT
+                            c.candidate_id::text AS candidate_id,
+                            c.global_candidate_id,
+                            c.display_name,
+                            COALESCE(
+                                c.linkedin_url,
+                                linkedin.value_raw,
+                                linkedin.value_normalized
+                            ) AS linkedin_url,
+                            COALESCE(
+                                c.linkedin_id,
+                                CASE
+                                    WHEN linkedin.value_normalized IS NOT NULL
+                                    THEN regexp_replace(
+                                        linkedin.value_normalized,
+                                        '^https?://([^/]+/)?in/',
+                                        ''
+                                    )
+                                    ELSE NULL
+                                END
+                            ) AS linkedin_id,
+                            c.headline,
+                            c.location_raw,
+                            ARRAY(
+                                SELECT DISTINCT lower(btrim(skill))
+                                FROM (
+                                    SELECT unnest(COALESCE(c.skills, ARRAY[]::text[])) AS skill
+                                    UNION ALL
+                                    SELECT item #>> '{}' AS skill
+                                    FROM jsonb_array_elements(
+                                        CASE
+                                            WHEN jsonb_typeof(c.props -> 'skills') = 'array'
+                                            THEN c.props -> 'skills'
+                                            ELSE '[]'::jsonb
+                                        END
+                                    ) item
+                                    WHERE jsonb_typeof(item) = 'string'
+                                ) typed_skills
+                                WHERE btrim(skill) <> ''
+                            ) AS typed_skills,
+                            c.seniority_level,
+                            c.updated_at
+                        FROM candidates c
+                        LEFT JOIN LATERAL (
+                            SELECT ci.value_raw, ci.value_normalized
+                            FROM candidate_identifiers ci
+                            WHERE ci.candidate_id = c.candidate_id
+                              AND ci.tenant_id = c.tenant_id
+                              AND ci.identifier_type = 'linkedin_url'
+                            ORDER BY ci.updated_at DESC
+                            LIMIT 1
+                        ) linkedin ON true
+                        WHERE c.tenant_id = %s
+                          AND EXISTS (
+                              SELECT 1
+                              FROM candidate_source_records csr
+                              WHERE csr.candidate_id = c.candidate_id
+                                AND csr.tenant_id = c.tenant_id
+                                AND csr.source = 'vantahire'
+                          )
+                    ),
+                    applicant_node_rows AS (
+                        SELECT DISTINCT ON (cp.global_candidate_id)
+                            ('node:' || n.id::text) AS candidate_id,
+                            cp.global_candidate_id,
+                            COALESCE(
+                                NULLIF(n.metadata ->> 'applicant_name', ''),
+                                NULLIF(n.props ->> 'applicant_name', '')
+                            ) AS display_name,
+                            COALESCE(
+                                NULLIF(n.props ->> 'linkedin_url', ''),
+                                NULLIF(n.metadata ->> 'linkedin_url', '')
+                            ) AS linkedin_url,
+                            NULL::text AS linkedin_id,
+                            COALESCE(
+                                NULLIF(n.props ->> 'current_title', ''),
+                                NULLIF(n.props #>> '{primary_titles,0}', ''),
+                                NULLIF(n.props #>> '{recent_job_titles,0}', '')
+                            ) AS headline,
+                            COALESCE(
+                                NULLIF(n.props #>> '{location,raw}', ''),
+                                NULLIF(n.props #>> '{location,city}', ''),
+                                NULLIF(n.props ->> 'location_raw', '')
+                            ) AS location_raw,
+                            ARRAY(
+                                SELECT DISTINCT lower(btrim(item #>> '{}'))
+                                FROM jsonb_array_elements(
+                                    (
+                                        CASE
+                                            WHEN jsonb_typeof(
+                                                n.props -> 'skills_normalized'
+                                            ) = 'array'
+                                            THEN n.props -> 'skills_normalized'
+                                            ELSE '[]'::jsonb
+                                        END
+                                    ) || (
+                                        CASE
+                                            WHEN jsonb_typeof(n.props -> 'skills_raw') = 'array'
+                                            THEN n.props -> 'skills_raw'
+                                            ELSE '[]'::jsonb
+                                        END
+                                    ) || (
+                                        CASE
+                                            WHEN jsonb_typeof(
+                                                n.props -> 'primary_skills'
+                                            ) = 'array'
+                                            THEN n.props -> 'primary_skills'
+                                            ELSE '[]'::jsonb
+                                        END
+                                    )
+                                ) item
+                                WHERE jsonb_typeof(item) = 'string'
+                                  AND btrim(item #>> '{}') <> ''
+                            ) AS typed_skills,
+                            NULLIF(n.props ->> 'seniority', '') AS seniority_level,
+                            n.updated_at
+                        FROM candidate_provenance cp
+                        JOIN nodes n
+                          ON n.id = CASE
+                              WHEN cp.source_detail ->> 'resume_node_id'
+                                   ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                              THEN (cp.source_detail ->> 'resume_node_id')::uuid
+                              ELSE NULL
+                          END
+                         AND n.tenant_id = cp.tenant_id
+                        WHERE cp.tenant_id = %s
+                          AND n.tenant_id = %s
+                          AND cp.source_type IN ('platform_applicant', 'org_upload')
+                        ORDER BY cp.global_candidate_id, n.updated_at DESC, n.id
+                    ),
+                    private_candidates AS (
+                        SELECT * FROM applicant_node_rows
+                        UNION ALL
+                        SELECT cr.*
+                        FROM candidate_rows cr
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM applicant_node_rows nr
+                            WHERE (
+                                cr.global_candidate_id IS NOT NULL
+                                AND nr.global_candidate_id = cr.global_candidate_id
+                            ) OR (
+                                cr.linkedin_url IS NOT NULL
+                                AND nr.linkedin_url IS NOT NULL
+                                AND lower(rtrim(cr.linkedin_url, '/'))
+                                    = lower(rtrim(nr.linkedin_url, '/'))
+                            )
+                        )
+                    ),
+                    scored AS (
+                        SELECT
+                            pc.*,
+                            cardinality(ARRAY(
+                                SELECT unnest(pc.typed_skills)
+                                INTERSECT
+                                SELECT unnest(%s::text[])
+                            )) AS skill_overlap_count,
+                            (
+                                SELECT count(*)
+                                FROM unnest(%s::text[]) term
+                                WHERE lower(concat_ws(
+                                    ' ',
+                                    pc.headline,
+                                    pc.location_raw,
+                                    pc.seniority_level,
+                                    array_to_string(pc.typed_skills, ' ')
+                                )) LIKE ('%%' || term || '%%')
+                            ) AS keyword_hits
+                        FROM private_candidates pc
+                    )
+                    SELECT
+                        candidate_id,
+                        global_candidate_id,
+                        display_name,
+                        linkedin_url,
+                        linkedin_id,
+                        headline,
+                        location_raw,
+                        typed_skills,
+                        seniority_level,
+                        CASE
+                            WHEN cardinality(%s::text[]) = 0 THEN 0.0
+                            ELSE keyword_hits::double precision
+                                 / cardinality(%s::text[])::double precision
+                        END AS keyword_score,
+                        skill_overlap_count,
+                        updated_at,
+                        count(*) OVER () AS total_available
+                    FROM scored
+                    ORDER BY
+                        keyword_hits DESC,
+                        skill_overlap_count DESC,
+                        updated_at DESC,
+                        candidate_id
+                    LIMIT %s
+                    """,
+                    (
+                        tenant_id,
+                        tenant_id,
+                        tenant_id,
+                        normalized_skills,
+                        normalized_terms,
+                        normalized_terms,
+                        normalized_terms,
+                        limit,
+                    ),
+                )
+                rows = cur.fetchall()
+
+        total_available = int(rows[0][12]) if rows else 0
+        return (
+            [
+                TenantPrivateSearchRow(
+                    candidate_id=str(row[0]),
+                    global_candidate_id=str(row[1]) if row[1] is not None else None,
+                    display_name=row[2],
+                    linkedin_url=row[3],
+                    linkedin_id=row[4],
+                    headline=row[5],
+                    location_raw=row[6],
+                    skills=list(row[7]) if row[7] else [],
+                    seniority_level=row[8],
+                    keyword_score=float(row[9] or 0.0),
+                    skill_overlap_count=int(row[10] or 0),
+                    updated_at=row[11],
+                )
+                for row in rows
+            ],
+            total_available,
+        )
 
     # ------------------------------------------------------------------
     # high-level merge helper
