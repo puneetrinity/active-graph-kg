@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
@@ -1059,6 +1060,7 @@ def upsert_signal_candidate_to_global(
     seniority_band: str | None,
     skills: list[str] | None,
     signal_candidate_id: str,
+    profile_observed_at: datetime | None = None,
 ) -> str | None:
     """Upsert a Crustdata/Signal-sourced candidate into global_candidates.
 
@@ -1072,6 +1074,10 @@ def upsert_signal_candidate_to_global(
     if not li_id:
         return None  # no anchor — a global row without identity is merge debt
 
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"global-signal:{li_id}",),
+    )
     existing, extras = _find_existing_all(cur, li_id, None, None)
     for extra in extras:
         _enqueue_merge(
@@ -1085,43 +1091,79 @@ def upsert_signal_candidate_to_global(
 
     country_code = _normalize_country_code(location_country) if location_country else None
 
+    observed_at = profile_observed_at
+    if observed_at is not None:
+        observed_at = (
+            observed_at.replace(tzinfo=timezone.utc)
+            if observed_at.tzinfo is None
+            else observed_at.astimezone(timezone.utc)
+        )
+
+    existing_signal_observed_at: datetime | None = None
+    if existing:
+        cur.execute(
+            """
+            SELECT source_detail ->> 'profile_observed_at'
+            FROM candidate_provenance
+            WHERE global_candidate_id = %s
+              AND source_type = 'signal_sourced'
+              AND tenant_id IS NULL
+            LIMIT 1
+            """,
+            (existing["id"],),
+        )
+        provenance_row = cur.fetchone()
+        if provenance_row and provenance_row[0]:
+            existing_signal_observed_at = datetime.fromisoformat(
+                str(provenance_row[0]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+
+    observation_is_newer = not (
+        existing_signal_observed_at is not None
+        and (observed_at is None or observed_at <= existing_signal_observed_at)
+    )
+
     if existing:
         gc_id = str(existing["id"])
-        sets = [
-            "last_evidence_at = now()",
-            "updated_at = now()",
-            "embedding_status = 'queued'",
-        ]  # re-embed: profile evidence changed
-        params: list[Any] = []
-        for col, val in [
-            ("name", name),
-            ("headline", headline),
-            ("seniority_band", seniority_band),
-            ("location_city", location_city),
-            ("location_country_code", country_code),
-            ("linkedin_url", linkedin_url),
-        ]:
-            if val is not None:
-                sets.append(f"{col} = COALESCE({col}, %s)")
-                params.append(val)
-        if skills:
-            sets.append(
-                "skills_normalized = ARRAY(SELECT DISTINCT unnest(COALESCE(skills_normalized, ARRAY[]::text[]) || %s::text[]))"
+        if observation_is_newer:
+            sets = [
+                (
+                    "last_evidence_at = "
+                    + ("now()" if observed_at is None else "GREATEST(last_evidence_at, %s)")
+                ),
+                "updated_at = now()",
+                "embedding_status = 'queued'",
+            ]  # re-embed: profile evidence changed
+            params: list[Any] = [observed_at] if observed_at is not None else []
+            for col, val in [
+                ("name", name),
+                ("headline", headline),
+                ("seniority_band", seniority_band),
+                ("location_city", location_city),
+                ("location_country_code", country_code),
+                ("linkedin_url", linkedin_url),
+            ]:
+                if val is not None:
+                    sets.append(f"{col} = COALESCE({col}, %s)")
+                    params.append(val)
+            if skills:
+                sets.append(
+                    "skills_normalized = ARRAY(SELECT DISTINCT unnest(COALESCE(skills_normalized, ARRAY[]::text[]) || %s::text[]))"
+                )
+                params.append([s.lower().strip() for s in skills if s and s.strip()])
+            params.append(gc_id)
+            cur.execute(
+                f"UPDATE global_candidates SET {', '.join(sets)} WHERE id = %s",
+                params,
             )
-            params.append([s.lower().strip() for s in skills if s and s.strip()])
-        params.append(gc_id)
-        cur.execute(
-            f"UPDATE global_candidates SET {', '.join(sets)} WHERE id = %s",
-            params,
-        )
     else:
         cur.execute(
             """
             INSERT INTO global_candidates
                 (linkedin_id, linkedin_url, name, headline, seniority_band,
                  skills_normalized, location_city, location_country_code,
-                 identity_confidence)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0.7)
+                 identity_confidence, last_evidence_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0.7, COALESCE(%s, now()))
             RETURNING id
             """,
             (
@@ -1133,23 +1175,30 @@ def upsert_signal_candidate_to_global(
                 [s.lower().strip() for s in skills if s and s.strip()] if skills else None,
                 location_city,
                 country_code,
+                observed_at,
             ),
         )
         gc_id = str(cur.fetchone()[0])
 
     # Public provenance: sourced = public-web data (tenant_id NULL).
-    cur.execute(
-        """
-        INSERT INTO candidate_provenance
-            (global_candidate_id, source_type, tenant_id, source_detail)
-        VALUES (%s, 'signal_sourced', NULL, %s::jsonb)
-        ON CONFLICT DO NOTHING
-        """,
-        (
-            gc_id,
-            json.dumps({"signal_candidate_id": signal_candidate_id, "sourcing_tenant": tenant_id}),
-        ),
-    )
+    if observation_is_newer:
+        source_detail = {
+            "signal_candidate_id": signal_candidate_id,
+            "sourcing_tenant": tenant_id,
+        }
+        if observed_at is not None:
+            source_detail["profile_observed_at"] = observed_at.isoformat()
+        cur.execute(
+            """
+            INSERT INTO candidate_provenance
+                (global_candidate_id, source_type, tenant_id, source_detail)
+            VALUES (%s, 'signal_sourced', NULL, %s::jsonb)
+            ON CONFLICT (global_candidate_id, source_type) WHERE tenant_id IS NULL
+            DO UPDATE SET source_detail =
+                candidate_provenance.source_detail || EXCLUDED.source_detail
+            """,
+            (gc_id, json.dumps(source_detail)),
+        )
     return gc_id
 
 

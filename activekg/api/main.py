@@ -4327,6 +4327,7 @@ class CandidateResolveRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_url: str | None = None
+    fetched_at: datetime | None = None
     tenant_id: str | None = None
     # Structured VantaHire provenance — forwarded to candidate_source_records structured
     # columns so downstream Talent Search can scope by org/recruiter without JSONB scans.
@@ -4786,6 +4787,7 @@ def _execute_candidate_resolve(
             source_record_id=payload.source_record_id,
             source_url=payload.source_url,
             payload=payload.payload or {},
+            fetched_at=payload.fetched_at,
             org_id=payload.org_id,
             job_id=payload.job_id,
             effective_recruiter_id=payload.effective_recruiter_id,
@@ -5050,6 +5052,10 @@ class SignalCandidateResolveRequest(BaseModel):
     request_id: str | None = None
     external_job_id: str | None = None
     crustdata: dict[str, Any] | None = Field(default=None, description="Raw Crustdata profile blob")
+    profile_observed_at: datetime | None = Field(
+        default=None,
+        description="When the upstream profile was observed, not when this ingest was retried",
+    )
 
     tags: list[str] = Field(default_factory=list)
     sourcing_context: dict[str, Any] = Field(default_factory=dict)
@@ -5082,6 +5088,95 @@ def _normalize_signal_tags(tags: list[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize observation timestamps before comparing provider evidence."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _signal_observation_is_not_newer(
+    incoming: datetime | None,
+    existing: CandidateSourceRecord | None,
+) -> bool:
+    """Return true when an ingest cannot improve the stored observation."""
+    if existing is None:
+        return False
+    if existing.fetched_at is None:
+        return False
+    if incoming is None:
+        # Once a record has trustworthy observation time, an undated replay
+        # must not be allowed to masquerade as newer evidence.
+        return True
+    return _as_utc(incoming) <= _as_utc(existing.fetched_at)
+
+
+def _mirror_signal_candidate_to_global(
+    *,
+    payload: SignalCandidateResolveRequest,
+    result: CandidateResolveResponse,
+    tenant_id: str | None,
+    crustdata: dict[str, Any],
+    headline_idx: str | None,
+    seniority: str | None,
+    skills_idx: list[str],
+) -> None:
+    """Best-effort global mirror; observation ordering is enforced downstream."""
+    from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
+
+    if (
+        not _GM_ENABLED
+        or result.resolution_status not in ("created", "matched")
+        or not result.candidate_id
+    ):
+        return
+
+    try:
+        from activekg.api.global_memory import (
+            _get_tenant_conn as _gm_tenant_conn,
+        )
+        from activekg.api.global_memory import (
+            upsert_signal_candidate_to_global,
+        )
+
+        bp = crustdata.get("basic_profile") or {}
+        loc = bp.get("location") or {}
+        gm_conn = _gm_tenant_conn(tenant_id)
+        try:
+            with gm_conn.cursor() as gm_cur:
+                gc_id = upsert_signal_candidate_to_global(
+                    gm_cur,
+                    tenant_id=tenant_id,
+                    linkedin_url=payload.linkedinUrl,
+                    name=bp.get("name") or payload.display_name,
+                    headline=bp.get("headline") or headline_idx,
+                    location_city=loc.get("city"),
+                    location_country=loc.get("country"),
+                    seniority_band=seniority,
+                    skills=skills_idx or None,
+                    signal_candidate_id=payload.signal_candidate_id,
+                    profile_observed_at=payload.profile_observed_at,
+                )
+                if gc_id:
+                    gm_cur.execute(
+                        "UPDATE candidates SET global_candidate_id = %s"
+                        " WHERE tenant_id = %s AND candidate_id = %s"
+                        " AND global_candidate_id IS DISTINCT FROM %s",
+                        (gc_id, tenant_id, result.candidate_id, gc_id),
+                    )
+            gm_conn.commit()
+        finally:
+            gm_conn.close()
+    except Exception as gm_err:  # pragma: no cover — mirror is best-effort
+        logger.warning(
+            "Global-memory mirror failed for signal candidate",
+            extra_fields={
+                "signal_candidate_id": payload.signal_candidate_id,
+                "error": str(gm_err),
+            },
+        )
 
 
 def _guess_itype_from_url(url: str) -> str:
@@ -5195,7 +5290,7 @@ def resolve_candidate_from_signal(
 
     identifiers, skipped = _collect_signal_identifiers(payload)
 
-    source_payload: dict[str, Any] = payload.model_dump(exclude_none=False)
+    source_payload: dict[str, Any] = payload.model_dump(mode="json", exclude_none=False)
     if skipped:
         source_payload["_skipped_identifiers"] = skipped
 
@@ -5266,6 +5361,7 @@ def resolve_candidate_from_signal(
         payload=source_payload,
         metadata=payload.source_metadata or {},
         source_url=payload.linkedinUrl,
+        fetched_at=payload.profile_observed_at,
         tenant_id=payload.tenant_id,
         job_tags=_normalize_signal_tags(payload.tags),
     )
@@ -5283,61 +5379,58 @@ def resolve_candidate_from_signal(
         )
         for s in skipped
     ]
-    result = _execute_candidate_resolve(
-        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
-    )
-
-    # ── #29: mirror sourced candidates into the platform-global canonical ────
-    # Non-blocking: the tenant-side resolve is the durable record; a global
-    # mirror failure must never fail Signal's ingest.
-    from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
-
-    if _GM_ENABLED and result.resolution_status in ("created", "matched") and result.candidate_id:
-        try:
-            from activekg.api.global_memory import (
-                _get_tenant_conn as _gm_tenant_conn,
+    assert candidate_repo is not None
+    with candidate_repo.serialized_source_record(
+        tenant_id=tenant_id,
+        source="signal",
+        source_record_id=payload.signal_candidate_id,
+    ):
+        existing_record = candidate_repo.get_source_record(
+            tenant_id=tenant_id,
+            source="signal",
+            source_record_id=payload.signal_candidate_id,
+        )
+        if _signal_observation_is_not_newer(payload.profile_observed_at, existing_record):
+            assert existing_record is not None
+            result = CandidateResolveResponse(
+                candidate_id=existing_record.candidate_id,
+                resolution_status="matched",
+                source_record_id=existing_record.source_record_id,
+                skipped_identifiers=pre_skipped,
+                warnings=[
+                    "profile_observed_at is not newer than stored evidence; "
+                    "canonical and source payloads were preserved"
+                ],
             )
-            from activekg.api.global_memory import (
-                upsert_signal_candidate_to_global,
+            _mirror_signal_candidate_to_global(
+                payload=payload,
+                result=result,
+                tenant_id=tenant_id,
+                crustdata=crustdata,
+                headline_idx=headline_idx,
+                seniority=seniority,
+                skills_idx=skills_idx,
             )
+            return result
 
-            bp = (crustdata or {}).get("basic_profile") or {}
-            loc = bp.get("location") or {}
-            gm_conn = _gm_tenant_conn(tenant_id)
-            try:
-                with gm_conn.cursor() as gm_cur:
-                    gc_id = upsert_signal_candidate_to_global(
-                        gm_cur,
-                        tenant_id=tenant_id,
-                        linkedin_url=payload.linkedinUrl,
-                        name=bp.get("name") or payload.display_name,
-                        headline=bp.get("headline") or headline_idx,
-                        location_city=loc.get("city"),
-                        location_country=loc.get("country"),
-                        seniority_band=seniority,
-                        skills=skills_idx or None,
-                        signal_candidate_id=payload.signal_candidate_id,
-                    )
-                    if gc_id:
-                        gm_cur.execute(
-                            "UPDATE candidates SET global_candidate_id = %s"
-                            " WHERE tenant_id = %s AND candidate_id = %s"
-                            " AND global_candidate_id IS DISTINCT FROM %s",
-                            (gc_id, tenant_id, result.candidate_id, gc_id),
-                        )
-                gm_conn.commit()
-            finally:
-                gm_conn.close()
-        except Exception as gm_err:  # pragma: no cover — mirror is best-effort
-            logger.warning(
-                "Global-memory mirror failed for signal candidate",
-                extra_fields={
-                    "signal_candidate_id": payload.signal_candidate_id,
-                    "error": str(gm_err),
-                },
-            )
+        result = _execute_candidate_resolve(
+            resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
+        )
 
-    return result
+        # ── #29: mirror sourced candidates into the platform-global canonical ────
+        # Non-blocking: the tenant-side resolve is the durable record; a global
+        # mirror failure must never fail Signal's ingest.
+        _mirror_signal_candidate_to_global(
+            payload=payload,
+            result=result,
+            tenant_id=tenant_id,
+            crustdata=crustdata,
+            headline_idx=headline_idx,
+            seniority=seniority,
+            skills_idx=skills_idx,
+        )
+
+        return result
 
 
 @app.post(

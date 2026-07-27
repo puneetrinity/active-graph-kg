@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 
 import psycopg
 import pytest
@@ -422,3 +425,92 @@ def test_partial_payload_updates_only_present_fields(client: TestClient, tenant:
         "missing skills block must preserve existing skills"
     )
     assert cand.headline == "Principal Engineer at NewerCo"
+
+
+@pytest.mark.parametrize("replay_delta", [timedelta(minutes=-5), timedelta(0)])
+def test_older_or_equal_replay_preserves_newer_signal_observation(
+    client: TestClient,
+    tenant: str,
+    replay_delta: timedelta,
+):
+    """A paid-batch replay must not make Memory older or extend its freshness."""
+    url = f"https://www.linkedin.com/in/ordered-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+    observed_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+
+    first = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V2),
+            "profile_observed_at": observed_at.isoformat(),
+            "tags": ["newer"],
+            "tenant_id": tenant,
+        },
+    )
+    replay = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V1),
+            "profile_observed_at": (observed_at + replay_delta).isoformat(),
+            "tags": ["older"],
+            "tenant_id": tenant,
+        },
+    )
+
+    assert replay["candidate_id"] == first["candidate_id"]
+    assert any("not newer" in warning for warning in replay["warnings"])
+
+    candidate = _get_candidate(first["candidate_id"], tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+    assert candidate.headline == "Senior Backend Engineer at NewCo"
+
+    records = _get_source_records(first["candidate_id"], tenant)
+    assert len(records) == 1
+    assert records[0].fetched_at == observed_at
+    assert records[0].payload["crustdata"] == _BLOB_V2
+    assert records[0].job_tags == ["newer"]
+
+
+def test_concurrent_signal_observations_serialize_and_keep_newest(
+    client: TestClient,
+    tenant: str,
+):
+    """Concurrent delivery order cannot decide which provider observation wins."""
+    url = f"https://www.linkedin.com/in/concurrent-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+    older_at = datetime(2026, 7, 27, 11, 0, tzinfo=timezone.utc)
+    newer_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    barrier = Barrier(2)
+
+    def post_observation(blob: dict, observed_at: datetime, tag: str):
+        barrier.wait(timeout=5)
+        return client.post(
+            "/candidates/resolve/signal/candidate",
+            json={
+                **_signal_body(sig_id, url, blob),
+                "profile_observed_at": observed_at.isoformat(),
+                "tags": [tag],
+                "tenant_id": tenant,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        older_future = executor.submit(post_observation, _BLOB_V1, older_at, "older")
+        newer_future = executor.submit(post_observation, _BLOB_V2, newer_at, "newer")
+        responses = [older_future.result(timeout=15), newer_future.result(timeout=15)]
+
+    assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
+    candidate_ids = {response.json()["candidate_id"] for response in responses}
+    assert len(candidate_ids) == 1
+    candidate_id = candidate_ids.pop()
+
+    candidate = _get_candidate(candidate_id, tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+
+    records = _get_source_records(candidate_id, tenant)
+    assert len(records) == 1
+    assert records[0].fetched_at == newer_at
+    assert records[0].payload["crustdata"] == _BLOB_V2
+    assert records[0].job_tags == ["newer"]

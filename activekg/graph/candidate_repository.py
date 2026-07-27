@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import psycopg
 from psycopg_pool import ConnectionPool
 
 from activekg.common.logger import get_enhanced_logger
@@ -69,6 +70,34 @@ class CandidateRepository:
                         ("" if tenant_id is None else tenant_id,),
                     )
                 yield conn
+
+    @contextmanager
+    def serialized_source_record(
+        self,
+        *,
+        tenant_id: str | None,
+        source: str,
+        source_record_id: str,
+    ) -> Iterator[None]:
+        """Serialize writes for one upstream record across processes.
+
+        This deliberately uses a dedicated connection instead of ``self.pool``.
+        The resolve path calls other repository methods while holding the lock;
+        consuming a pooled connection here could deadlock when enough concurrent
+        requests each hold one connection and wait for a second.
+        """
+        lock_key = json.dumps(
+            [tenant_id or "", source, source_record_id],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (lock_key,),
+                )
+            yield
 
     # ------------------------------------------------------------------
     # candidates
@@ -383,6 +412,34 @@ class CandidateRepository:
     # ------------------------------------------------------------------
     # source records
     # ------------------------------------------------------------------
+
+    def get_source_record(
+        self,
+        *,
+        tenant_id: str | None,
+        source: str,
+        source_record_id: str,
+    ) -> CandidateSourceRecord | None:
+        """Return the latest typed record for one upstream-stable source ID."""
+        with self._conn(tenant_id) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, candidate_id, tenant_id, source, source_record_type,
+                           source_record_id, source_url, payload, payload_ref, fetched_at,
+                           created_at, updated_at, org_id, job_id, effective_recruiter_id,
+                           created_by_user_id, resume_source, job_tags
+                    FROM candidate_source_records
+                    WHERE tenant_id IS NOT DISTINCT FROM %s
+                      AND source = %s
+                      AND source_record_id = %s
+                    ORDER BY fetched_at DESC NULLS LAST, updated_at DESC, id
+                    LIMIT 1
+                    """,
+                    (tenant_id, source, source_record_id),
+                )
+                row = cur.fetchone()
+                return self._row_to_source_record(row) if row else None
 
     def upsert_source_record(self, record: CandidateSourceRecord) -> CandidateSourceRecord:
         """Insert or update a source record. Idempotent on
