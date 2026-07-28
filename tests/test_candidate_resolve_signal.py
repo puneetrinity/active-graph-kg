@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 
 import psycopg
 import pytest
@@ -422,3 +426,381 @@ def test_partial_payload_updates_only_present_fields(client: TestClient, tenant:
         "missing skills block must preserve existing skills"
     )
     assert cand.headline == "Principal Engineer at NewerCo"
+
+
+@pytest.mark.parametrize("replay_delta", [timedelta(minutes=-5), timedelta(0)])
+def test_older_or_equal_replay_preserves_newer_signal_observation(
+    client: TestClient,
+    tenant: str,
+    replay_delta: timedelta,
+):
+    """A paid-batch replay must not make Memory older or extend its freshness."""
+    url = f"https://www.linkedin.com/in/ordered-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+    observed_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+
+    first = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V2),
+            "profile_observed_at": observed_at.isoformat(),
+            "tags": ["newer"],
+            "tenant_id": tenant,
+        },
+    )
+    replay = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V1),
+            "profile_observed_at": (observed_at + replay_delta).isoformat(),
+            "tags": ["older"],
+            "tenant_id": tenant,
+        },
+    )
+
+    assert replay["candidate_id"] == first["candidate_id"]
+    assert replay["resolution_status"] == "matched"
+    assert replay["source_record_id"] == sig_id
+    assert any("not newer" in warning for warning in replay["warnings"])
+
+    candidate = _get_candidate(first["candidate_id"], tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+    assert candidate.headline == "Senior Backend Engineer at NewCo"
+
+    records = _get_source_records(first["candidate_id"], tenant)
+    assert len(records) == 1
+    assert records[0].fetched_at == observed_at
+    assert records[0].payload["crustdata"] == _BLOB_V2
+    assert records[0].job_tags == ["newer"]
+
+
+def test_concurrent_signal_observations_serialize_and_keep_newest(
+    client: TestClient,
+    tenant: str,
+):
+    """Concurrent delivery order cannot decide which provider observation wins."""
+    url = f"https://www.linkedin.com/in/concurrent-{uuid.uuid4().hex[:10]}/"
+    sig_id = f"SIG-{uuid.uuid4()}"
+    older_at = datetime(2026, 7, 27, 11, 0, tzinfo=timezone.utc)
+    newer_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    barrier = Barrier(2)
+
+    def post_observation(blob: dict, observed_at: datetime, tag: str):
+        barrier.wait(timeout=5)
+        return client.post(
+            "/candidates/resolve/signal/candidate",
+            json={
+                **_signal_body(sig_id, url, blob),
+                "profile_observed_at": observed_at.isoformat(),
+                "tags": [tag],
+                "tenant_id": tenant,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        older_future = executor.submit(post_observation, _BLOB_V1, older_at, "older")
+        newer_future = executor.submit(post_observation, _BLOB_V2, newer_at, "newer")
+        responses = [older_future.result(timeout=15), newer_future.result(timeout=15)]
+
+    assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
+    candidate_ids = {response.json()["candidate_id"] for response in responses}
+    assert len(candidate_ids) == 1
+    candidate_id = candidate_ids.pop()
+
+    candidate = _get_candidate(candidate_id, tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+
+    records = _get_source_records(candidate_id, tenant)
+    assert len(records) == 1
+    assert records[0].fetched_at == newer_at
+    assert records[0].payload["crustdata"] == _BLOB_V2
+    assert records[0].job_tags == ["newer"]
+
+
+def test_public_v1_mirror_failure_is_retryable_after_tenant_commit(
+    client: TestClient,
+    tenant: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Strict mirror failure returns 503 without undoing or repeating tenant resolve."""
+    from activekg.api import global_memory, main
+    from activekg.graph.candidate_repository import CandidateRepository
+
+    sig_id = f"SIG-{uuid.uuid4()}"
+    observed_at = datetime(2026, 7, 27, 13, 0, tzinfo=timezone.utc)
+    global_id = str(uuid.uuid4())
+    events: list[str] = []
+    mirrored_payloads: list[dict] = []
+    mirror_should_fail = True
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, _sql: str, _params=None) -> None:
+            events.append("tenant_link")
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def commit(self) -> None:
+            events.append("mirror_commit")
+
+        def close(self) -> None:
+            events.append("mirror_close")
+
+    def mirror_upsert(*_args, **kwargs) -> str:
+        events.append("mirror")
+        mirrored_payloads.append(kwargs)
+        if mirror_should_fail:
+            raise RuntimeError("forced mirror failure")
+        return global_id
+
+    assert main.candidate_repo is not None
+    original_serialized = main.candidate_repo.serialized_source_record
+
+    @contextmanager
+    def tracked_serialized(**kwargs):
+        events.append("lock_enter")
+        try:
+            with original_serialized(**kwargs):
+                yield
+        finally:
+            events.append("lock_exit")
+
+    monkeypatch.setattr(global_memory, "GLOBAL_MEMORY_ENABLED", True)
+    monkeypatch.setattr(global_memory, "_get_tenant_conn", lambda _tenant_id: FakeConnection())
+    monkeypatch.setattr(global_memory, "upsert_signal_candidate_to_global", mirror_upsert)
+    monkeypatch.setattr(main.candidate_repo, "serialized_source_record", tracked_serialized)
+
+    accepted_url = f"https://www.linkedin.com/in/strict-accepted-{uuid.uuid4().hex[:10]}/"
+    body = {
+        **_signal_body(
+            sig_id,
+            accepted_url,
+            _BLOB_V2,
+        ),
+        "profile_observed_at": observed_at.isoformat(),
+        "source_metadata": {"public_memory_surface": "public_v1"},
+        "tenant_id": tenant,
+    }
+    first = client.post("/candidates/resolve/signal/candidate", json=body)
+
+    assert first.status_code == 503
+    assert events.index("lock_enter") < events.index("mirror") < events.index("lock_exit")
+
+    repo = CandidateRepository(DSN)
+    try:
+        durable_record = repo.get_source_record(
+            tenant_id=tenant,
+            source="signal",
+            source_record_type="sourced_candidate",
+            source_record_id=sig_id,
+        )
+        assert durable_record is not None
+        durable_candidate_id = durable_record.candidate_id
+        assert durable_record.fetched_at == observed_at
+        assert durable_record.payload["crustdata"] == _BLOB_V2
+    finally:
+        repo.close()
+
+    mirror_should_fail = False
+    events.clear()
+    retry = client.post(
+        "/candidates/resolve/signal/candidate",
+        json={
+            **_signal_body(
+                sig_id,
+                f"https://www.linkedin.com/in/rejected-stale-{uuid.uuid4().hex[:10]}/",
+                _BLOB_V1,
+            ),
+            "profile_observed_at": (observed_at - timedelta(minutes=5)).isoformat(),
+            "source_metadata": {"public_memory_surface": "public_v1"},
+            "tenant_id": tenant,
+        },
+    )
+
+    assert retry.status_code == 200, retry.text
+    retry_body = retry.json()
+    assert retry_body["resolution_status"] == "matched"
+    assert retry_body["candidate_id"] == durable_candidate_id
+    assert retry_body["source_record_id"] == sig_id
+    assert retry_body["global_candidate_id"] == global_id
+    assert any("not newer" in warning for warning in retry_body["warnings"])
+    assert events.index("lock_enter") < events.index("mirror") < events.index("lock_exit")
+    assert mirrored_payloads[-1]["linkedin_url"] == accepted_url
+    assert mirrored_payloads[-1]["public_profile"] == _BLOB_V2
+    assert mirrored_payloads[-1]["profile_observed_at"] == observed_at
+
+    records = _get_source_records(durable_candidate_id, tenant)
+    assert len(records) == 1
+    assert records[0].fetched_at == observed_at
+    assert records[0].payload["crustdata"] == _BLOB_V2
+
+
+@pytest.mark.parametrize("replay_delta", [timedelta(hours=-1), timedelta(0)])
+def test_signal_observation_order_is_scoped_to_source_record_type(
+    client: TestClient,
+    tenant: str,
+    replay_delta: timedelta,
+):
+    """Both Signal record types retain their own durable observation contract."""
+    sig_id = f"SIG-{uuid.uuid4()}"
+    url = f"https://www.linkedin.com/in/typed-source-{uuid.uuid4().hex[:10]}/"
+    newer_at = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
+    replay_at = newer_at + replay_delta
+
+    profile_response = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V2),
+            "source_record_type": "profile",
+            "profile_observed_at": newer_at.isoformat(),
+            "tenant_id": tenant,
+        },
+    )
+    sourced_response = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V1),
+            "source_record_type": "sourced_candidate",
+            "profile_observed_at": replay_at.isoformat(),
+            "tenant_id": tenant,
+        },
+    )
+
+    assert sourced_response["candidate_id"] == profile_response["candidate_id"]
+    assert sourced_response["resolution_status"] == "matched"
+
+    records = _get_source_records(profile_response["candidate_id"], tenant)
+    typed = {record.source_record_type: record for record in records}
+    assert set(typed) == {"profile", "sourced_candidate"}
+    assert typed["profile"].fetched_at == newer_at
+    assert typed["sourced_candidate"].fetched_at == replay_at
+    candidate = _get_candidate(profile_response["candidate_id"], tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+
+    retry = _post(
+        client,
+        {
+            **_signal_body(sig_id, url, _BLOB_V1),
+            "source_record_type": "sourced_candidate",
+            "profile_observed_at": replay_at.isoformat(),
+            "tenant_id": tenant,
+        },
+    )
+    assert retry["candidate_id"] == profile_response["candidate_id"]
+    candidate = _get_candidate(profile_response["candidate_id"], tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+
+
+def test_concurrent_cross_type_observations_keep_newest_canonical(
+    client: TestClient,
+    tenant: str,
+):
+    """Record-type concurrency cannot bypass the shared Signal freshness lock."""
+    sig_id = f"SIG-{uuid.uuid4()}"
+    url = f"https://www.linkedin.com/in/cross-type-{uuid.uuid4().hex[:10]}/"
+    older_at = datetime(2026, 7, 27, 17, 0, tzinfo=timezone.utc)
+    newer_at = older_at + timedelta(hours=1)
+    barrier = Barrier(2)
+
+    def post_observation(
+        source_record_type: str,
+        blob: dict,
+        observed_at: datetime,
+    ):
+        barrier.wait(timeout=5)
+        return client.post(
+            "/candidates/resolve/signal/candidate",
+            json={
+                **_signal_body(sig_id, url, blob),
+                "source_record_type": source_record_type,
+                "profile_observed_at": observed_at.isoformat(),
+                "tenant_id": tenant,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        older_future = executor.submit(
+            post_observation,
+            "sourced_candidate",
+            _BLOB_V1,
+            older_at,
+        )
+        newer_future = executor.submit(
+            post_observation,
+            "profile",
+            _BLOB_V2,
+            newer_at,
+        )
+        responses = [older_future.result(timeout=15), newer_future.result(timeout=15)]
+
+    assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
+    candidate_ids = {response.json()["candidate_id"] for response in responses}
+    assert len(candidate_ids) == 1
+    candidate_id = candidate_ids.pop()
+
+    candidate = _get_candidate(candidate_id, tenant)
+    assert candidate is not None
+    assert candidate.profile == _BLOB_V2
+    records = _get_source_records(candidate_id, tenant)
+    typed = {record.source_record_type: record for record in records}
+    assert set(typed) == {"profile", "sourced_candidate"}
+    assert typed["profile"].fetched_at == newer_at
+    assert typed["sourced_candidate"].fetched_at == older_at
+
+
+def test_legacy_mirror_failure_remains_best_effort(
+    client: TestClient,
+    tenant: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Legacy callers still succeed after the durable tenant write."""
+    from activekg.api import global_memory
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(global_memory, "GLOBAL_MEMORY_ENABLED", True)
+    monkeypatch.setattr(global_memory, "_get_tenant_conn", lambda _tenant_id: FakeConnection())
+    monkeypatch.setattr(
+        global_memory,
+        "upsert_signal_candidate_to_global",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced mirror failure")),
+    )
+
+    response = client.post(
+        "/candidates/resolve/signal/candidate",
+        json={
+            **_signal_body(
+                f"SIG-{uuid.uuid4()}",
+                f"https://www.linkedin.com/in/legacy-mirror-{uuid.uuid4().hex[:10]}/",
+                _BLOB_V2,
+            ),
+            "profile_observed_at": datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc).isoformat(),
+            "tenant_id": tenant,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["resolution_status"] == "created"

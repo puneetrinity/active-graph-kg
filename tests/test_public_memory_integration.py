@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -838,7 +839,134 @@ def test_same_linkedin_cannot_silently_switch_crustdata_person_id():
                 assert cur.fetchone()[0] == 0
 
 
-def test_concurrent_public_observations_choose_one_provider_identity(monkeypatch):
+def test_stale_public_observation_cannot_mutate_projection_or_market():
+    from activekg.api.global_memory import upsert_signal_candidate_to_global
+
+    slug = f"stale-public-{uuid.uuid4().hex[:8]}"
+    newer_at = datetime(2026, 7, 27, 15, 0, tzinfo=timezone.utc)
+    older_at = newer_at - timedelta(hours=1)
+    accepted_market = _public_market(role_family="backend")
+    stale_market = _public_market(role_family="data")
+    accepted_profile = {
+        "crustdata_person_id": 330011,
+        "basic_profile": {
+            "name": "Accepted Profile",
+            "headline": "Senior Backend Engineer",
+            "location": {"city": "Bengaluru", "country_code": "IN"},
+        },
+    }
+    stale_profile = {
+        "crustdata_person_id": 440022,
+        "basic_profile": {
+            "name": "Stale Conflict",
+            "headline": "Data Engineer",
+            "location": {"city": "Bengaluru", "country_code": "IN"},
+        },
+    }
+
+    with psycopg.connect(OWNER_DSN) as conn:
+        with conn.transaction(force_rollback=True):
+            with conn.cursor() as cur:
+                global_id = upsert_signal_candidate_to_global(
+                    cur,
+                    tenant_id=TENANT_A,
+                    linkedin_url=f"https://linkedin.com/in/{slug}",
+                    name="Accepted Profile",
+                    headline="Senior Backend Engineer",
+                    location_city="Bengaluru",
+                    location_country="IN",
+                    seniority_band="senior",
+                    skills=["Python"],
+                    signal_candidate_id=f"signal-{slug}",
+                    profile_observed_at=newer_at,
+                    public_profile=accepted_profile,
+                    public_role_family="backend",
+                    public_market=accepted_market,
+                )
+                replay_id = upsert_signal_candidate_to_global(
+                    cur,
+                    tenant_id=TENANT_A,
+                    linkedin_url=f"https://linkedin.com/in/{slug}",
+                    name="Stale Conflict",
+                    headline="Data Engineer",
+                    location_city="Bengaluru",
+                    location_country="IN",
+                    seniority_band="senior",
+                    skills=["Legacy"],
+                    signal_candidate_id=f"signal-{slug}",
+                    profile_observed_at=older_at,
+                    public_profile=stale_profile,
+                    public_role_family="data",
+                    public_market=stale_market,
+                )
+
+                assert replay_id == global_id
+                cur.execute(
+                    """
+                    SELECT public_profile, public_profile_observed_at,
+                           public_crustdata_person_id, public_role_family,
+                           merge_status, public_embedding_status, public_embed_version
+                    FROM global_candidates
+                    WHERE id = %s
+                    """,
+                    (global_id,),
+                )
+                (
+                    profile,
+                    observed_at,
+                    person_id,
+                    role_family,
+                    merge_status,
+                    embedding_status,
+                    embed_version,
+                ) = cur.fetchone()
+                assert profile == accepted_profile
+                assert observed_at == newer_at
+                assert person_id == 330011
+                assert role_family == "backend"
+                assert merge_status == "needs_merge"
+                assert embedding_status == "queued"
+                assert embed_version == 0
+
+                cur.execute(
+                    """
+                    SELECT coarse_market_key, last_observed_at
+                    FROM public_candidate_market_memberships
+                    WHERE global_candidate_id = %s
+                    """,
+                    (global_id,),
+                )
+                memberships = cur.fetchall()
+                assert memberships == [(accepted_market["coarse_market_key"], newer_at)]
+
+                cur.execute(
+                    """
+                    SELECT reason, details
+                    FROM candidate_merge_queue
+                    WHERE global_candidate_id_a = %s
+                      AND global_candidate_id_b IS NULL
+                    """,
+                    (global_id,),
+                )
+                reason, details = cur.fetchone()
+                assert reason == "review_required"
+                assert details["anchor"] == "crustdata_person_id_switch"
+                assert details["existing_crustdata_person_id"] == 330011
+                assert details["incoming_crustdata_person_id"] == 440022
+                cur.execute(
+                    """
+                    SELECT source_detail
+                    FROM candidate_provenance
+                    WHERE global_candidate_id = %s
+                      AND source_type = 'signal_sourced'
+                      AND tenant_id IS NULL
+                    """,
+                    (global_id,),
+                )
+                assert cur.fetchone()[0] == {}
+
+
+def test_concurrent_public_observations_choose_one_provider_identity():
     from activekg.api import global_memory
 
     global_id = str(uuid.uuid4())
@@ -855,14 +983,6 @@ def test_concurrent_public_observations_choose_one_provider_identity(monkeypatch
             )
 
     barrier = threading.Barrier(2)
-    original_find = global_memory._find_existing_all
-
-    def synchronized_find(cur, linkedin_id, github_id, email_hash):
-        result = original_find(cur, linkedin_id, github_id, email_hash)
-        barrier.wait(timeout=5)
-        return result
-
-    monkeypatch.setattr(global_memory, "_find_existing_all", synchronized_find)
     first_person_id = 1_000_000_000 + uuid.uuid4().int % 3_000_000_000
     second_person_id = 4_000_000_000 + uuid.uuid4().int % 3_000_000_000
     observations = [
@@ -873,6 +993,7 @@ def test_concurrent_public_observations_choose_one_provider_identity(monkeypatch
 
     def ingest(person_id: int, market: dict[str, object]) -> None:
         try:
+            barrier.wait(timeout=5)
             with psycopg.connect(OWNER_DSN) as conn:
                 with conn.cursor() as cur:
                     global_memory.upsert_signal_candidate_to_global(
