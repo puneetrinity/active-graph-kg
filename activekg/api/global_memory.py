@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -1602,6 +1602,7 @@ def upsert_signal_candidate_to_global(
     public_profile: dict[str, Any] | None = None,
     public_role_family: str | None = None,
     public_market: dict[str, Any] | None = None,
+    profile_observed_at: datetime | None = None,
 ) -> str | None:
     """Upsert a Crustdata/Signal-sourced candidate into global_candidates.
 
@@ -1615,6 +1616,10 @@ def upsert_signal_candidate_to_global(
     if not li_id:
         return None  # no anchor — a global row without identity is merge debt
 
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"global-signal:{li_id}",),
+    )
     existing, extras = _find_existing_all(cur, li_id, None, None)
     if existing:
         # Serialize all public observations for one canonical identity, then
@@ -1629,6 +1634,30 @@ def upsert_signal_candidate_to_global(
         if locked_row is None:
             raise RuntimeError("global candidate disappeared during Signal ingest")
         existing = dict(zip((column.name for column in cur.description), locked_row, strict=False))
+
+    observed_at = profile_observed_at
+    if observed_at is not None:
+        observed_at = (
+            observed_at.replace(tzinfo=timezone.utc)
+            if observed_at.tzinfo is None
+            else observed_at.astimezone(timezone.utc)
+        )
+
+    existing_observed_at = existing.get("public_profile_observed_at") if existing else None
+    if isinstance(existing_observed_at, str):
+        existing_observed_at = datetime.fromisoformat(existing_observed_at.replace("Z", "+00:00"))
+    if isinstance(existing_observed_at, datetime):
+        existing_observed_at = (
+            existing_observed_at.replace(tzinfo=timezone.utc)
+            if existing_observed_at.tzinfo is None
+            else existing_observed_at.astimezone(timezone.utc)
+        )
+    observation_is_stale = bool(
+        existing
+        and existing_observed_at is not None
+        and (observed_at is None or observed_at <= existing_observed_at)
+    )
+
     for extra in extras:
         _enqueue_merge(
             cur,
@@ -1695,6 +1724,11 @@ def upsert_signal_candidate_to_global(
             (str(existing["id"]),),
         )
         sanitized_observation = {}
+    if observation_is_stale:
+        # Identity disagreements remain durable #12 evidence, but an older or
+        # equal paid-batch replay cannot refresh profile, embedding, provenance,
+        # or market timestamps.
+        return str(existing["id"])
     shareable_profile = _merge_nonempty(existing_public or {}, sanitized_observation)
     crustdata_person_id_raw = shareable_profile.get("crustdata_person_id")
     try:
@@ -1770,11 +1804,14 @@ def upsert_signal_candidate_to_global(
     if existing:
         gc_id = str(existing["id"])
         sets = [
-            "last_evidence_at = now()",
+            (
+                "last_evidence_at = "
+                + ("now()" if observed_at is None else "GREATEST(last_evidence_at, %s)")
+            ),
             "updated_at = now()",
             "embedding_status = 'queued'",
         ]  # re-embed: profile evidence changed
-        params: list[Any] = []
+        params: list[Any] = [observed_at] if observed_at is not None else []
         for col, val in [
             ("name", name),
             ("headline", headline),
@@ -1798,7 +1835,7 @@ def upsert_signal_candidate_to_global(
             sets.extend(
                 [
                     "public_profile = %s::jsonb",
-                    "public_profile_observed_at = now()",
+                    "public_profile_observed_at = COALESCE(%s, now())",
                     "public_crustdata_person_id = COALESCE(%s, public_crustdata_person_id)",
                     "public_headline = %s",
                     "public_location_city = %s",
@@ -1814,6 +1851,7 @@ def upsert_signal_candidate_to_global(
             params.extend(
                 [
                     json.dumps(shareable_profile),
+                    observed_at,
                     crustdata_person_id,
                     public_headline,
                     public_city,
@@ -1838,10 +1876,11 @@ def upsert_signal_candidate_to_global(
                  public_crustdata_person_id, public_headline,
                  public_location_city, public_location_country_code,
                  public_role_family, public_seniority_band, public_skills_normalized,
-                 public_embedding_status, public_embed_version)
+                 public_embedding_status, public_embed_version, last_evidence_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0.7,
-                    %s::jsonb, CASE WHEN %s::jsonb <> '{}'::jsonb THEN now() ELSE NULL END,
-                    %s, %s, %s, %s, %s, %s, %s, 'queued', 0)
+                    %s::jsonb,
+                    CASE WHEN %s::jsonb <> '{}'::jsonb THEN COALESCE(%s, now()) ELSE NULL END,
+                    %s, %s, %s, %s, %s, %s, %s, 'queued', 0, COALESCE(%s, now()))
             RETURNING id
             """,
             (
@@ -1855,6 +1894,7 @@ def upsert_signal_candidate_to_global(
                 country_code,
                 json.dumps(shareable_profile),
                 json.dumps(shareable_profile),
+                observed_at,
                 crustdata_person_id if shareable_profile else None,
                 public_headline if shareable_profile else None,
                 public_city if shareable_profile else None,
@@ -1862,6 +1902,7 @@ def upsert_signal_candidate_to_global(
                 public_role_family if shareable_profile else None,
                 public_seniority if shareable_profile else None,
                 public_skills if shareable_profile else None,
+                observed_at,
             ),
         )
         gc_id = str(cur.fetchone()[0])
@@ -1916,15 +1957,19 @@ def upsert_signal_candidate_to_global(
             """
             INSERT INTO public_candidate_market_memberships
                 (global_candidate_id, coarse_market_key, role_family,
-                 location_city, location_country_code, seniority_band)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                 location_city, location_country_code, seniority_band,
+                 first_observed_at, last_observed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()))
             ON CONFLICT (global_candidate_id, coarse_market_key)
             DO UPDATE SET
                 role_family = EXCLUDED.role_family,
                 location_city = EXCLUDED.location_city,
                 location_country_code = EXCLUDED.location_country_code,
                 seniority_band = EXCLUDED.seniority_band,
-                last_observed_at = now()
+                last_observed_at = GREATEST(
+                    public_candidate_market_memberships.last_observed_at,
+                    EXCLUDED.last_observed_at
+                )
             """,
             (
                 gc_id,
@@ -1933,6 +1978,8 @@ def upsert_signal_candidate_to_global(
                 market["location_city"],
                 market["location_country_code"],
                 market["seniority_band"],
+                observed_at,
+                observed_at,
             ),
         )
     return gc_id

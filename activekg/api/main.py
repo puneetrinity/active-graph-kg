@@ -4601,6 +4601,7 @@ class CandidateResolveRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_url: str | None = None
+    fetched_at: datetime | None = None
     tenant_id: str | None = None
     # Structured VantaHire provenance — forwarded to candidate_source_records structured
     # columns so downstream Talent Search can scope by org/recruiter without JSONB scans.
@@ -4798,6 +4799,34 @@ def resolve_candidate(
     else:
         tenant_id = payload.tenant_id
     return _execute_candidate_resolve(payload, tenant_id=tenant_id)
+
+
+def _upsert_resolve_source_record(
+    payload: CandidateResolveRequest,
+    *,
+    candidate_id: str,
+    tenant_id: str | None,
+) -> CandidateSourceRecord:
+    """Persist upstream evidence without implying a canonical-profile refresh."""
+    assert candidate_repo is not None
+    return candidate_repo.upsert_source_record(
+        CandidateSourceRecord(
+            candidate_id=candidate_id,
+            tenant_id=tenant_id,
+            source=payload.source,
+            source_record_type=payload.source_record_type,
+            source_record_id=payload.source_record_id,
+            source_url=payload.source_url,
+            payload=payload.payload or {},
+            fetched_at=payload.fetched_at,
+            org_id=payload.org_id,
+            job_id=payload.job_id,
+            effective_recruiter_id=payload.effective_recruiter_id,
+            created_by_user_id=payload.created_by_user_id,
+            resume_source=payload.resume_source,
+            job_tags=list(payload.job_tags) if payload.job_tags else [],
+        )
+    )
 
 
 def _execute_candidate_resolve(
@@ -5102,22 +5131,10 @@ def _execute_candidate_resolve(
 
     # 5. Upsert the source record — idempotent on
     # (tenant_id, source, source_record_type, source_record_id).
-    record = candidate_repo.upsert_source_record(
-        CandidateSourceRecord(
-            candidate_id=candidate.candidate_id,
-            tenant_id=tenant_id,
-            source=payload.source,
-            source_record_type=payload.source_record_type,
-            source_record_id=payload.source_record_id,
-            source_url=payload.source_url,
-            payload=payload.payload or {},
-            org_id=payload.org_id,
-            job_id=payload.job_id,
-            effective_recruiter_id=payload.effective_recruiter_id,
-            created_by_user_id=payload.created_by_user_id,
-            resume_source=payload.resume_source,
-            job_tags=list(payload.job_tags) if payload.job_tags else [],
-        )
+    record = _upsert_resolve_source_record(
+        payload,
+        candidate_id=candidate.candidate_id,
+        tenant_id=tenant_id,
     )
 
     return CandidateResolveResponse(
@@ -5375,6 +5392,10 @@ class SignalCandidateResolveRequest(BaseModel):
     request_id: str | None = None
     external_job_id: str | None = None
     crustdata: dict[str, Any] | None = Field(default=None, description="Raw Crustdata profile blob")
+    profile_observed_at: datetime | None = Field(
+        default=None,
+        description="When the upstream profile was observed, not when this ingest was retried",
+    )
 
     tags: list[str] = Field(default_factory=list)
     sourcing_context: dict[str, Any] = Field(default_factory=dict)
@@ -5407,6 +5428,153 @@ def _normalize_signal_tags(tags: list[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize observation timestamps before comparing provider evidence."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _signal_observation_is_not_newer(
+    incoming: datetime | None,
+    existing: CandidateSourceRecord | None,
+) -> bool:
+    """Return true when an ingest cannot improve the stored observation."""
+    if existing is None or existing.fetched_at is None:
+        return False
+    if incoming is None:
+        # Once a record has trustworthy observation time, an undated replay
+        # must not be allowed to masquerade as newer evidence.
+        return True
+    return _as_utc(incoming) <= _as_utc(existing.fetched_at)
+
+
+def _signal_mirror_fields(
+    payload: SignalCandidateResolveRequest,
+) -> tuple[dict[str, Any], str | None, str | None, list[str]]:
+    """Derive mirror fields defensively from accepted Signal evidence."""
+    crustdata = payload.crustdata or {}
+    basic_profile = crustdata.get("basic_profile")
+    basic_profile = basic_profile if isinstance(basic_profile, dict) else {}
+    headline = payload.headline or basic_profile.get("headline")
+
+    skills_node = crustdata.get("skills")
+    skills_node = skills_node if isinstance(skills_node, dict) else {}
+    skills = skills_node.get("professional_network_skills")
+    skills = skills if isinstance(skills, list) else []
+
+    experience = crustdata.get("experience")
+    experience = experience if isinstance(experience, dict) else {}
+    employment = experience.get("employment_details")
+    employment = employment if isinstance(employment, dict) else {}
+    current = employment.get("current")
+    seniority = (
+        current[0].get("seniority_level")
+        if isinstance(current, list) and current and isinstance(current[0], dict)
+        else None
+    )
+    return crustdata, headline, seniority, skills
+
+
+def _mirror_signal_candidate_to_global(
+    *,
+    payload: SignalCandidateResolveRequest,
+    result: CandidateResolveResponse,
+    tenant_id: str | None,
+    crustdata: dict[str, Any],
+    headline_idx: str | None,
+    seniority: str | None,
+    skills_idx: list[str],
+    require_public_mirror: bool | None = None,
+) -> None:
+    """Mirror a durable tenant resolve into global memory.
+
+    Legacy callers keep best-effort behavior. ``public_v1`` callers require a
+    global ID and receive 503 on mirror failure so the same tenant-side resolve
+    can be retried idempotently.
+    """
+    from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
+
+    strict_public_mirror = (
+        (payload.source_metadata or {}).get("public_memory_surface") == "public_v1"
+        if require_public_mirror is None
+        else require_public_mirror
+    )
+    if not _GM_ENABLED:
+        if strict_public_mirror:
+            raise HTTPException(status_code=503, detail="public memory is disabled")
+        return
+    if result.resolution_status not in ("created", "matched") or not result.candidate_id:
+        if strict_public_mirror:
+            raise HTTPException(
+                status_code=503,
+                detail="public memory mirror requires a durable created or matched candidate",
+            )
+        return
+
+    try:
+        from activekg.api.global_memory import (
+            _get_tenant_conn as _gm_tenant_conn,
+        )
+        from activekg.api.global_memory import (
+            upsert_signal_candidate_to_global,
+        )
+
+        bp = crustdata.get("basic_profile") or {}
+        loc = bp.get("location") or {}
+        gm_conn = _gm_tenant_conn(tenant_id)
+        try:
+            with gm_conn.cursor() as gm_cur:
+                gc_id = upsert_signal_candidate_to_global(
+                    gm_cur,
+                    tenant_id=tenant_id,
+                    linkedin_url=payload.linkedinUrl,
+                    name=bp.get("name") or payload.display_name,
+                    headline=bp.get("headline") or headline_idx,
+                    location_city=loc.get("city"),
+                    location_country=loc.get("country"),
+                    seniority_band=seniority,
+                    skills=skills_idx or None,
+                    signal_candidate_id=payload.signal_candidate_id,
+                    profile_observed_at=payload.profile_observed_at,
+                    public_profile=crustdata,
+                    public_role_family=(payload.source_metadata or {}).get(
+                        "public_candidate_role_family"
+                    ),
+                    public_market=(payload.source_metadata or {}).get("public_market"),
+                )
+                if gc_id:
+                    result.global_candidate_id = gc_id
+                    gm_cur.execute(
+                        "UPDATE candidates SET global_candidate_id = %s"
+                        " WHERE tenant_id = %s AND candidate_id = %s"
+                        " AND global_candidate_id IS DISTINCT FROM %s",
+                        (gc_id, tenant_id, result.candidate_id, gc_id),
+                    )
+            gm_conn.commit()
+        finally:
+            gm_conn.close()
+    except Exception as gm_err:
+        logger.warning(
+            "Global-memory mirror failed for signal candidate",
+            extra_fields={
+                "signal_candidate_id": payload.signal_candidate_id,
+                "error": str(gm_err),
+            },
+        )
+        if strict_public_mirror:
+            raise HTTPException(
+                status_code=503,
+                detail="public memory mirror unavailable; retry this idempotent ingest",
+            ) from gm_err
+
+    if strict_public_mirror and not result.global_candidate_id:
+        raise HTTPException(
+            status_code=503,
+            detail="public memory mirror returned no global candidate ID; retry after identity repair",
+        )
 
 
 def _guess_itype_from_url(url: str) -> str:
@@ -5520,7 +5688,7 @@ def resolve_candidate_from_signal(
 
     identifiers, skipped = _collect_signal_identifiers(payload)
 
-    source_payload: dict[str, Any] = payload.model_dump(exclude_none=False)
+    source_payload: dict[str, Any] = payload.model_dump(mode="json", exclude_none=False)
     if skipped:
         source_payload["_skipped_identifiers"] = skipped
 
@@ -5593,6 +5761,7 @@ def resolve_candidate_from_signal(
         payload=source_payload,
         metadata=payload.source_metadata or {},
         source_url=payload.linkedinUrl,
+        fetched_at=payload.profile_observed_at,
         tenant_id=payload.tenant_id,
         job_tags=_normalize_signal_tags(payload.tags),
     )
@@ -5610,85 +5779,95 @@ def resolve_candidate_from_signal(
         )
         for s in skipped
     ]
-    result = _execute_candidate_resolve(
-        resolve_request, tenant_id=tenant_id, pre_skipped=pre_skipped
-    )
+    if candidate_repo is None:
+        raise HTTPException(status_code=503, detail="CandidateRepository not initialized")
 
-    # ── #29/#12: mirror sourced candidates into the platform-global canonical ─
-    # Legacy callers retain the old best-effort behavior. public_v1 callers
-    # require the returned global ID for cross-tenant hydration, so a mirror
-    # failure returns 503. The tenant resolve has already committed and is
-    # idempotent; Signal can retry without duplicating the candidate.
-    from activekg.api.global_memory import GLOBAL_MEMORY_ENABLED as _GM_ENABLED
-
-    strict_public_mirror = (payload.source_metadata or {}).get(
+    require_public_mirror = (payload.source_metadata or {}).get(
         "public_memory_surface"
     ) == "public_v1"
-    if strict_public_mirror and not _GM_ENABLED:
-        raise HTTPException(status_code=503, detail="public memory is disabled")
-    if _GM_ENABLED and result.resolution_status in ("created", "matched") and result.candidate_id:
-        try:
-            from activekg.api.global_memory import (
-                _get_tenant_conn as _gm_tenant_conn,
-            )
-            from activekg.api.global_memory import (
-                upsert_signal_candidate_to_global,
-            )
-
-            bp = (crustdata or {}).get("basic_profile") or {}
-            loc = bp.get("location") or {}
-            gm_conn = _gm_tenant_conn(tenant_id)
-            try:
-                with gm_conn.cursor() as gm_cur:
-                    gc_id = upsert_signal_candidate_to_global(
-                        gm_cur,
-                        tenant_id=tenant_id,
-                        linkedin_url=payload.linkedinUrl,
-                        name=bp.get("name") or payload.display_name,
-                        headline=bp.get("headline") or headline_idx,
-                        location_city=loc.get("city"),
-                        location_country=loc.get("country"),
-                        seniority_band=seniority,
-                        skills=skills_idx or None,
-                        signal_candidate_id=payload.signal_candidate_id,
-                        public_profile=crustdata,
-                        public_role_family=(payload.source_metadata or {}).get(
-                            "public_candidate_role_family"
-                        ),
-                        public_market=(payload.source_metadata or {}).get("public_market"),
-                    )
-                    if gc_id:
-                        result.global_candidate_id = gc_id
-                        gm_cur.execute(
-                            "UPDATE candidates SET global_candidate_id = %s"
-                            " WHERE tenant_id = %s AND candidate_id = %s"
-                            " AND global_candidate_id IS DISTINCT FROM %s",
-                            (gc_id, tenant_id, result.candidate_id, gc_id),
-                        )
-                gm_conn.commit()
-            finally:
-                gm_conn.close()
-        except Exception as gm_err:  # pragma: no cover — external DB failure path
-            logger.warning(
-                "Global-memory mirror failed for signal candidate",
-                extra_fields={
-                    "signal_candidate_id": payload.signal_candidate_id,
-                    "error": str(gm_err),
-                },
-            )
-            if strict_public_mirror:
-                raise HTTPException(
-                    status_code=503,
-                    detail="public memory mirror unavailable; retry this idempotent ingest",
-                ) from gm_err
-
-    if strict_public_mirror and not result.global_candidate_id:
-        raise HTTPException(
-            status_code=503,
-            detail="public memory mirror returned no global candidate ID; retry after identity repair",
+    with candidate_repo.serialized_source_record(
+        tenant_id=tenant_id,
+        source="signal",
+        source_record_id=payload.signal_candidate_id,
+    ):
+        typed_record = candidate_repo.get_source_record(
+            tenant_id=tenant_id,
+            source="signal",
+            source_record_type=payload.source_record_type,
+            source_record_id=payload.signal_candidate_id,
         )
+        latest_record = candidate_repo.get_latest_source_record(
+            tenant_id=tenant_id,
+            source="signal",
+            source_record_id=payload.signal_candidate_id,
+        )
+        mirror_payload = payload
+        if _signal_observation_is_not_newer(payload.profile_observed_at, latest_record):
+            assert latest_record is not None
+            if not _signal_observation_is_not_newer(payload.profile_observed_at, typed_record):
+                typed_record = _upsert_resolve_source_record(
+                    resolve_request,
+                    candidate_id=latest_record.candidate_id,
+                    tenant_id=tenant_id,
+                )
+            result = CandidateResolveResponse(
+                candidate_id=latest_record.candidate_id,
+                resolution_status="matched",
+                source_record_id=(
+                    typed_record.source_record_id
+                    if typed_record is not None
+                    else latest_record.source_record_id
+                ),
+                skipped_identifiers=pre_skipped,
+                warnings=[
+                    "profile_observed_at is not newer than stored evidence; "
+                    "canonical profile was preserved"
+                ],
+            )
+            try:
+                mirror_payload = SignalCandidateResolveRequest.model_validate(latest_record.payload)
+            except Exception as exc:
+                logger.error(
+                    "Durable Signal source record could not be reconstructed for global mirror",
+                    extra_fields={
+                        "signal_candidate_id": payload.signal_candidate_id,
+                        "source_record_type": payload.source_record_type,
+                        "error": str(exc),
+                    },
+                )
+                if require_public_mirror:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "public memory mirror cannot reconstruct durable source evidence; "
+                            "retry after source-record repair"
+                        ),
+                    ) from exc
+                return result
+        else:
+            result = _execute_candidate_resolve(
+                resolve_request,
+                tenant_id=tenant_id,
+                pre_skipped=pre_skipped,
+            )
 
-    return result
+        # The tenant resolve above commits before mirroring. Keep the source
+        # advisory lock through the mirror so concurrent retries cannot race the
+        # public projection, while strict failures remain safely retryable.
+        mirror_crustdata, mirror_headline, mirror_seniority, mirror_skills = _signal_mirror_fields(
+            mirror_payload
+        )
+        _mirror_signal_candidate_to_global(
+            payload=mirror_payload,
+            result=result,
+            tenant_id=tenant_id,
+            crustdata=mirror_crustdata,
+            headline_idx=mirror_headline,
+            seniority=mirror_seniority,
+            skills_idx=mirror_skills,
+            require_public_mirror=require_public_mirror,
+        )
+        return result
 
 
 @app.post(
