@@ -75,6 +75,8 @@ jobs:
           pytest \
             tests/test_security_limits.py \
             tests/test_embedding_provider.py \
+            tests/test_global_candidate_embedding_text.py \
+            tests/test_public_profile_boundary.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -202,22 +204,30 @@ jobs:
         env:
           PGPASSWORD: activekg
         run: |
-          for table in candidates candidate_identifiers candidate_source_records; do
+          for table in candidates candidate_identifiers candidate_source_records candidate_contact_evidence; do
             rls=$(psql -h localhost -U activekg -d activekg -tAc \
               "SELECT relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '$table';")
             if [ "$rls" != "t" ]; then
               echo "FAIL: table $table missing or RLS disabled (got: '$rls')"
               exit 1
             fi
+            if [ "$table" = "candidate_contact_evidence" ]; then
+              force_rls=$(psql -h localhost -U activekg -d activekg -tAc \
+                "SELECT relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '$table';")
+              if [ "$force_rls" != "t" ]; then
+                echo "FAIL: table $table does not force RLS (got: '$force_rls')"
+                exit 1
+              fi
+            fi
             echo "OK: $table exists with RLS enabled"
           done
           ledger=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "20|0" ]; then
-            echo "FAIL: ledger should have exactly 20 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "21|0" ]; then
+            echo "FAIL: ledger should have exactly 21 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 20 applied, 0 baselined"
+          echo "OK: migration ledger has 21 applied, 0 baselined"
           posture=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -231,7 +241,11 @@ jobs:
           ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
           ACTIVEKG_RLS_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
         run: |
-          pytest tests/test_candidate_rls_enforcement.py -v --tb=short --timeout=60
+          pytest \
+            tests/test_candidate_rls_enforcement.py \
+            tests/test_candidate_private_search.py \
+            tests/test_public_memory_integration.py \
+            -v --tb=short --timeout=60
 
       - name: Start API under the restricted runtime DSN
         env:
@@ -331,6 +345,43 @@ jobs:
           check_readyz() {
             curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/readyz
           }
+          # The two global #12 tables are readiness dependencies even though
+          # only tenant contact evidence itself is RLS-scoped.
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE public_candidate_market_memberships RENAME TO public_candidate_market_memberships_tampered;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code after public table rename (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE public_candidate_market_memberships_tampered RENAME TO public_candidate_market_memberships;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after public table restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE global_candidates RENAME COLUMN public_role_family TO public_role_family_tampered;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code after public column rename (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE global_candidates RENAME COLUMN public_role_family_tampered TO public_role_family;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after public column restore (want 200)"; exit 1; }
+          # A policy retaining the expected substrings but adding OR true is
+          # still cross-tenant permissive and must fail readiness.
+          psql -h localhost -U activekg -d activekg -c \
+            "DROP POLICY tenant_isolation_candidates ON candidates;
+             CREATE POLICY tenant_isolation_candidates ON candidates FOR ALL TO PUBLIC
+             USING (
+               (tenant_id <> '__quarantine__'
+                AND tenant_id = current_setting('app.current_tenant_id', true))
+               OR true
+             )
+             WITH CHECK (
+               tenant_id <> '__quarantine__'
+               AND tenant_id = current_setting('app.current_tenant_id', true)
+             );"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code after permissive policy tamper (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -f db/migrations/017_reserve_quarantine_tenant.sql
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after policy definition restore (want 200)"; exit 1; }
           # Malformed policy: dropping the tenant policy must flip readiness.
           psql -h localhost -U activekg -d activekg -c \
             "DROP POLICY tenant_isolation_candidates ON candidates;"
@@ -347,7 +398,7 @@ jobs:
           python scripts/init_railway_db.py  # backfills the NULL
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after checksum backfill (want 200)"; exit 1; }
-          echo "OK: readiness detects tampered policies and ledger"
+          echo "OK: readiness detects tampered public schema, policies and ledger"
         # the init re-run above needs the migrate DSN
         # (guards tests below run it the same way)
 

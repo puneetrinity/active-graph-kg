@@ -14,6 +14,7 @@ child references (composite FK). Skipped entirely when the two DSNs are not
 configured (e.g. the no-DB unit job).
 """
 
+import json
 import os
 import uuid
 
@@ -281,3 +282,296 @@ def test_blank_tenant_rejected_by_constraint(seeded_candidates):
                     "VALUES (%s, '   ', %s)",
                     (str(uuid.uuid4()), "Whitespace Tenant"),
                 )
+
+
+@pytest.fixture(scope="module")
+def seeded_contact_evidence():
+    global_id = str(uuid.uuid4())
+    evidence_a = str(uuid.uuid4())
+    evidence_b = str(uuid.uuid4())
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO global_candidates (id) VALUES (%s)", (global_id,))
+            cur.execute(
+                """
+                INSERT INTO candidate_contact_evidence
+                    (id, global_candidate_id, tenant_id, email, email_hash, provider)
+                VALUES (%s, %s, %s, %s, %s, 'fullenrich'),
+                       (%s, %s, %s, %s, %s, 'enrichlayer')
+                """,
+                (
+                    evidence_a,
+                    global_id,
+                    TENANT_A,
+                    f"a_{TENANT_A}@example.com",
+                    f"hash_a_{TENANT_A}",
+                    evidence_b,
+                    global_id,
+                    TENANT_B,
+                    f"b_{TENANT_B}@example.com",
+                    f"hash_b_{TENANT_B}",
+                ),
+            )
+    yield {"global_id": global_id, "a": evidence_a, "b": evidence_b}
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM global_candidates WHERE id = %s", (global_id,))
+
+
+def test_contact_evidence_is_tenant_isolated(runtime_conn, seeded_contact_evidence):
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_A)
+            cur.execute(
+                "SELECT id, tenant_id FROM candidate_contact_evidence "
+                "WHERE global_candidate_id = %s",
+                (seeded_contact_evidence["global_id"],),
+            )
+            rows = cur.fetchall()
+    assert [(str(row[0]), row[1]) for row in rows] == [(seeded_contact_evidence["a"], TENANT_A)]
+
+
+def test_contact_evidence_without_tenant_context_sees_nothing(
+    runtime_conn, seeded_contact_evidence
+):
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM candidate_contact_evidence WHERE global_candidate_id = %s",
+                (seeded_contact_evidence["global_id"],),
+            )
+            assert cur.fetchone()[0] == 0
+
+
+def test_contact_evidence_cross_tenant_write_rejected(runtime_conn, seeded_contact_evidence):
+    with pytest.raises(psycopg.errors.Error) as excinfo:
+        with runtime_conn.transaction():
+            with runtime_conn.cursor() as cur:
+                _set_tenant(cur, TENANT_A)
+                cur.execute(
+                    """
+                    INSERT INTO candidate_contact_evidence
+                        (global_candidate_id, tenant_id, email, email_hash, provider)
+                    VALUES (%s, %s, %s, %s, 'fullenrich')
+                    """,
+                    (
+                        seeded_contact_evidence["global_id"],
+                        TENANT_B,
+                        "smuggled@example.com",
+                        f"smuggled_{uuid.uuid4().hex}",
+                    ),
+                )
+    assert excinfo.value.sqlstate == "42501"
+
+
+def test_fullenrich_precedes_verified_enrichlayer(runtime_conn, seeded_contact_evidence):
+    from activekg.api.global_memory import _choose_primary_contact
+
+    enrichlayer_id = str(uuid.uuid4())
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_A)
+            cur.execute(
+                """
+                INSERT INTO candidate_contact_evidence
+                    (id, global_candidate_id, tenant_id, email, email_hash,
+                     provider, status, confidence)
+                VALUES (%s, %s, %s, %s, %s, 'enrichlayer', 'verified', 1.0)
+                """,
+                (
+                    enrichlayer_id,
+                    seeded_contact_evidence["global_id"],
+                    TENANT_A,
+                    "enrichlayer@example.com",
+                    f"enrichlayer_{uuid.uuid4().hex}",
+                ),
+            )
+            _choose_primary_contact(
+                cur,
+                tenant_id=TENANT_A,
+                candidate_id=seeded_contact_evidence["global_id"],
+            )
+            cur.execute(
+                """
+                SELECT provider FROM candidate_contact_evidence
+                WHERE tenant_id = %s AND global_candidate_id = %s AND is_primary
+                """,
+                (TENANT_A, seeded_contact_evidence["global_id"]),
+            )
+            assert cur.fetchone()[0] == "fullenrich"
+            cur.execute("DELETE FROM candidate_contact_evidence WHERE id = %s", (enrichlayer_id,))
+
+
+def test_schema_allows_only_one_primary(runtime_conn, seeded_contact_evidence):
+    second_id = str(uuid.uuid4())
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_A)
+            cur.execute(
+                """
+                INSERT INTO candidate_contact_evidence
+                    (id, global_candidate_id, tenant_id, email, email_hash,
+                     provider, is_primary)
+                VALUES (%s, %s, %s, %s, %s, 'enrichlayer', false)
+                """,
+                (
+                    second_id,
+                    seeded_contact_evidence["global_id"],
+                    TENANT_A,
+                    "second@example.com",
+                    f"second_{uuid.uuid4().hex}",
+                ),
+            )
+            cur.execute(
+                "UPDATE candidate_contact_evidence SET is_primary = true WHERE id = %s",
+                (seeded_contact_evidence["a"],),
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                with runtime_conn.transaction():
+                    cur.execute(
+                        "UPDATE candidate_contact_evidence SET is_primary = true WHERE id = %s",
+                        (second_id,),
+                    )
+
+
+def test_sql_public_projection_matches_runtime_sanitizer():
+    from activekg.api.global_memory import sanitize_public_profile
+
+    payload = {
+        "crustdata_person_id": 8181,
+        "metadata": {
+            "updated_at": "2026-07-25T00:00:00Z",
+            "recruiter_notes": "PRIVATE_SQL_NOTE",
+        },
+        "basic_profile": {
+            "name": "Public Person",
+            "headline": "Backend Engineer",
+            "location": {
+                "city": "Bengaluru",
+                "country": "India",
+                "email": "private-location@example.com",
+            },
+            "application": {"resume": "PRIVATE_SQL_RESUME"},
+        },
+        "professional_network": {
+            "connections": 500,
+            "metadata": {
+                "last_scraped_source": "linkedin",
+                "campaign_id": "PRIVATE_SQL_CAMPAIGN",
+            },
+        },
+        "experience": {
+            "employment_details": {
+                "current": [
+                    {
+                        "title": "Senior Engineer",
+                        "name": "Public Company",
+                        "business_email_verified": "private-work@example.com",
+                    }
+                ]
+            }
+        },
+        "skills": {"professional_network_skills": ["Python", "PostgreSQL"]},
+        "emails": ["private-root@example.com"],
+    }
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT activekg_public_crustdata_projection(%s::jsonb)",
+                (json.dumps(payload),),
+            )
+            sql_projection = cur.fetchone()[0]
+
+    assert sql_projection == sanitize_public_profile(payload)
+    rendered = repr(sql_projection)
+    for sentinel in (
+        "PRIVATE_SQL_NOTE",
+        "PRIVATE_SQL_RESUME",
+        "PRIVATE_SQL_CAMPAIGN",
+        "private-location@example.com",
+        "private-work@example.com",
+        "private-root@example.com",
+    ):
+        assert sentinel not in rendered
+
+
+@pytest.mark.parametrize(
+    ("status", "suppressed"),
+    [
+        ("soft_bounce", False),
+        ("invalid", False),
+        ("hard_bounce", True),
+        ("complaint", True),
+    ],
+)
+def test_unusable_primary_can_be_demoted_and_alternate_selected(
+    runtime_conn, seeded_contact_evidence, status, suppressed
+):
+    from activekg.api.global_memory import _choose_primary_contact
+
+    alternate_id = str(uuid.uuid4())
+    alternate_hash = f"alternate_{status}_{uuid.uuid4().hex}"
+    with runtime_conn.transaction():
+        with runtime_conn.cursor() as cur:
+            _set_tenant(cur, TENANT_A)
+            cur.execute(
+                """
+                INSERT INTO candidate_contact_evidence
+                    (id, global_candidate_id, tenant_id, email, email_hash,
+                     provider, status, confidence)
+                VALUES (%s, %s, %s, %s, %s, 'enrichlayer', 'found', 0.5)
+                """,
+                (
+                    alternate_id,
+                    seeded_contact_evidence["global_id"],
+                    TENANT_A,
+                    f"{status}@example.com",
+                    alternate_hash,
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE candidate_contact_evidence
+                SET is_primary = false
+                WHERE tenant_id = %s AND global_candidate_id = %s
+                """,
+                (TENANT_A, seeded_contact_evidence["global_id"]),
+            )
+            cur.execute(
+                """
+                UPDATE candidate_contact_evidence
+                SET status = %s,
+                    suppressed_at = CASE WHEN %s THEN now() ELSE NULL END,
+                    is_primary = false
+                WHERE id = %s
+                """,
+                (status, suppressed, seeded_contact_evidence["a"]),
+            )
+            _choose_primary_contact(
+                cur,
+                tenant_id=TENANT_A,
+                candidate_id=seeded_contact_evidence["global_id"],
+            )
+            cur.execute(
+                """
+                SELECT id, status
+                FROM candidate_contact_evidence
+                WHERE tenant_id = %s AND global_candidate_id = %s AND is_primary
+                """,
+                (TENANT_A, seeded_contact_evidence["global_id"]),
+            )
+            selected = cur.fetchone()
+            assert str(selected[0]) == alternate_id
+            assert selected[1] == "found"
+            cur.execute(
+                "DELETE FROM candidate_contact_evidence WHERE id = %s",
+                (alternate_id,),
+            )
+            cur.execute(
+                """
+                UPDATE candidate_contact_evidence
+                SET status = 'found', suppressed_at = NULL, is_primary = false
+                WHERE id = %s
+                """,
+                (seeded_contact_evidence["a"],),
+            )

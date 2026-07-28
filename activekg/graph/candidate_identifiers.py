@@ -92,7 +92,9 @@ def _normalize_url_host_path(value: str, *, expected_host_suffix: str | None = N
         host = host[4:]
     if not host:
         raise IdentifierNormalizationError(f"url missing host: {value!r}")
-    if expected_host_suffix and not host.endswith(expected_host_suffix):
+    if expected_host_suffix and not (
+        host == expected_host_suffix or host.endswith(f".{expected_host_suffix}")
+    ):
         raise IdentifierNormalizationError(
             f"url host {host!r} does not match expected {expected_host_suffix!r}"
         )
