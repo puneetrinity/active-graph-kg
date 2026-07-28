@@ -5808,3 +5808,7 @@ def search_tenant_private_candidates(
         truncated=total_available > len(results),
         applied_limit=applied_limit,
     )
+
+
+# deploy-trigger: 2026-07-28 — CI-skip recovery (docs workflow is Pages-only; excluded from this trigger).
+# deploy-trigger: 2026-07-28 CI-skip recovery.
