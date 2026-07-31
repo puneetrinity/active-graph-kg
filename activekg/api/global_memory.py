@@ -2183,10 +2183,52 @@ def suppress_contact_evidence(
             )
             owned_evidence = cur.fetchone()
             if owned_evidence is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="no tenant-owned contact evidence for this address",
+                # A hard bounce or complaint is PLATFORM-WIDE: every org mails
+                # under one sender identity, so the tombstone must land even when
+                # this tenant happens to own no evidence for the address.
+                # Refusing here (the old 404) silently downgraded a platform-wide
+                # obligation to nothing. The tombstone is keyed on email_hash
+                # alone and both reference columns are nullable, so a hash-only
+                # row is exactly what this table was designed to hold.
+                #
+                # This path can suppress an address the caller has no provable
+                # relationship to, so it requires a provider event id and is
+                # recorded with the calling tenant for audit.
+                if not (body.provider_event_id or "").strip():
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "provider_event_id is required to suppress an address "
+                            "with no tenant-owned contact evidence"
+                        ),
+                    )
+                logger.warning(
+                    "contact suppression without tenant-owned evidence; "
+                    "recording hash-only platform tombstone",
+                    extra={
+                        "tenant_id": getattr(claims, "tenant_id", None),
+                        "reason": reason,
+                        "provider_event_id": body.provider_event_id,
+                    },
                 )
+                cur.execute(
+                    """
+                    INSERT INTO contact_suppression_tombstones
+                        (email_hash, global_candidate_id, reason, source_evidence_id,
+                         provider_event_id)
+                    VALUES (%s, NULL, %s, NULL, %s)
+                    ON CONFLICT (email_hash) DO UPDATE SET
+                        reason = EXCLUDED.reason,
+                        last_observed_at = now(),
+                        provider_event_id = COALESCE(
+                            EXCLUDED.provider_event_id,
+                            contact_suppression_tombstones.provider_event_id
+                        )
+                    """,
+                    (email_hash, reason, body.provider_event_id),
+                )
+                conn.commit()
+                return {"suppressed": True, "reason": reason, "evidence": "absent"}
             evidence_id, candidate_id = owned_evidence
             cur.execute(
                 """

@@ -470,6 +470,98 @@ def test_cross_tenant_tombstone_reselects_the_callers_alternate(monkeypatch, pub
     assert after_bounce["results"][0]["contact"]["email"] == alternate
 
 
+def test_suppression_without_owning_evidence_still_blocks_every_other_org(
+    monkeypatch, public_memory_rows
+):
+    """A hard bounce or complaint is PLATFORM-WIDE, even when the reporting org
+    owns no evidence for the address.
+
+    Org A mails an address it holds outside Memory and gets a hard bounce. Memory
+    has no tenant-A evidence for it, so the suppress call takes the
+    evidence-absent path. Org B, which DOES hold that address, must still be
+    blocked from sending to it. Recording this only for Org A would leave Org B
+    free to mail a known-bad address under the same sender identity.
+    """
+    global_memory = _enable_public_api(monkeypatch)
+    candidate_id = public_memory_rows["public_id"]
+    bad_email = f"no-evidence-bad-{uuid.uuid4().hex}@example.com"
+    claims_a = SimpleNamespace(tenant_id=TENANT_A)
+    claims_b = SimpleNamespace(tenant_id=TENANT_B)
+
+    # Only tenant B holds this address; tenant A owns no evidence for it.
+    selected = global_memory.record_contact_evidence(
+        global_memory.ContactEvidenceRecord(
+            global_candidate_id=candidate_id,
+            email=bad_email,
+            provider="fullenrich",
+            confidence=0.9,
+            status="verified",
+        ),
+        claims=claims_b,
+    )
+    assert selected["contact"]["email"] == bad_email
+
+    try:
+        # The evidence-absent path requires a provider event id.
+        with pytest.raises(HTTPException) as unproven:
+            global_memory.suppress_contact_evidence(
+                global_memory.ContactSuppressionRecord(
+                    email=bad_email,
+                    reason="hard_bounce",
+                    provider_event_id=None,
+                ),
+                claims=claims_a,
+            )
+        assert unproven.value.status_code == 422
+
+        # Tenant A suppresses despite owning no evidence — must NOT 404.
+        result = global_memory.suppress_contact_evidence(
+            global_memory.ContactSuppressionRecord(
+                email=bad_email,
+                reason="hard_bounce",
+                provider_event_id=f"brevo-{uuid.uuid4().hex}",
+            ),
+            claims=claims_a,
+        )
+        assert result["suppressed"] is True
+        assert result["evidence"] == "absent"
+
+        # A hash-only tombstone exists and is not bound to any candidate.
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT reason, global_candidate_id, source_evidence_id
+                    FROM contact_suppression_tombstones
+                    WHERE email_hash = %s
+                    """,
+                    (sha256(bad_email.lower().encode()).hexdigest(),),
+                )
+                row = cur.fetchone()
+        assert row is not None, "platform tombstone was not recorded"
+        assert row[0] == "hard_bounce"
+        assert row[1] is None and row[2] is None
+
+        # THE REGRESSION: tenant B must now be blocked from that address.
+        after = global_memory.lookup_contact_evidence(
+            global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_id]),
+            claims=claims_b,
+        )
+        assert after["results"][0]["state"] == "suppressed"
+        assert after["results"][0]["contact"] is None
+    finally:
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM contact_suppression_tombstones WHERE email_hash = %s",
+                    (sha256(bad_email.lower().encode()).hexdigest(),),
+                )
+                cur.execute(
+                    "DELETE FROM candidate_contact_evidence WHERE email_hash = %s",
+                    (sha256(bad_email.lower().encode()).hexdigest(),),
+                )
+
+
 def test_one_address_tombstone_reselects_alternates_for_every_candidate(
     monkeypatch, public_memory_rows
 ):
