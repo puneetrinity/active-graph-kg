@@ -58,12 +58,17 @@ class JWTClaims:
         actor_type: str = "user",
         scopes: list[str] | None = None,
         exp: int | None = None,
+        issuer: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.actor_id = actor_id
         self.actor_type = actor_type
         self.scopes = scopes or []
         self.exp = exp
+        # The VERIFIED issuer this token was validated against, not the peeked
+        # value. Endpoints that grant authority beyond a tenant's own data must
+        # be able to require a specific trusted service issuer.
+        self.issuer = issuer
 
 
 def verify_jwt(token: str) -> JWTClaims:
@@ -166,7 +171,15 @@ def verify_jwt(token: str) -> JWTClaims:
         )
 
         return JWTClaims(
-            tenant_id=tenant_id, actor_id=actor_id, actor_type=actor_type, scopes=scopes, exp=exp
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            scopes=scopes,
+            exp=exp,
+            # payload["iss"] is safe here: the token's signature has already been
+            # verified against this issuer's key, and `issuer=expected_issuer`
+            # was enforced during decode.
+            issuer=payload.get("iss"),
         )
 
     except jwt.ExpiredSignatureError:

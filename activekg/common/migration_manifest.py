@@ -28,4 +28,5 @@ MIGRATIONS: tuple[str, ...] = (
     "019_global_reconciliation.sql",
     "020_embed_version.sql",
     "021_public_memory_contact_evidence.sql",
+    "022_contact_suppression_person_and_audit.sql",
 )

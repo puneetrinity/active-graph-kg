@@ -529,6 +529,51 @@ _PUBLIC_JOB_SCALAR_FIELDS = {
 _PUBLIC_JOB_LIST_FIELDS = {"company_industries"}
 
 
+UNOWNED_SUPPRESSION_SCOPE: str = "contact:suppress_unowned"
+
+# Issuers trusted to suppress an address they hold no evidence for. This is a
+# Flow-only capability: Flow owns the provider webhook that observes bounces and
+# complaints. Kept as an allowlist so no future issuer inherits it silently.
+UNOWNED_SUPPRESSION_ISSUERS: frozenset[str] = frozenset(
+    issuer for issuer in (os.getenv("FLOW_JWT_ISSUER", "vantahire"),) if issuer and issuer.strip()
+)
+
+
+def _require_unowned_suppression_authority(claims: Any) -> None:
+    """Gate the evidence-absent suppression path.
+
+    Suppressing an address the caller owns no evidence for can tombstone ANY
+    address platform-wide, so `contact:write` (which every enrichment caller
+    holds) is not sufficient. Require a dedicated scope AND a verified service
+    issuer. The provider event id is audit data and is deliberately NOT treated
+    as authorization: it is attacker-suppliable.
+    """
+    from activekg.api.auth import JWT_ENABLED
+
+    if not JWT_ENABLED:
+        return
+    scopes = set(getattr(claims, "scopes", []) or [])
+    if UNOWNED_SUPPRESSION_SCOPE not in scopes:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Insufficient permissions. Suppressing an address without "
+                f"tenant-owned evidence requires scope: {UNOWNED_SUPPRESSION_SCOPE}"
+            ),
+        )
+    if getattr(claims, "actor_type", None) != "service":
+        raise HTTPException(
+            status_code=403,
+            detail="Only service identities may suppress without tenant-owned evidence",
+        )
+    issuer = getattr(claims, "issuer", None)
+    if issuer not in UNOWNED_SUPPRESSION_ISSUERS:
+        raise HTTPException(
+            status_code=403,
+            detail="Issuer is not trusted to suppress without tenant-owned evidence",
+        )
+
+
 def _tenant_from_claims(claims: Any) -> str:
     tenant_id = getattr(claims, "tenant_id", None) if claims else None
     if not tenant_id or not str(tenant_id).strip():
@@ -826,11 +871,15 @@ def _choose_primary_contact(cur: psycopg.Cursor, *, tenant_id: str, candidate_id
             FROM candidate_contact_evidence cce
             LEFT JOIN contact_suppression_tombstones cst
               ON cst.email_hash = cce.email_hash
+            LEFT JOIN contact_person_suppressions cps
+              ON cps.global_candidate_id = cce.global_candidate_id
             WHERE cce.tenant_id = %s
               AND cce.global_candidate_id = %s
               AND cce.status IN ('found', 'verified')
               AND cce.suppressed_at IS NULL
               AND cst.email_hash IS NULL
+              -- A person-terminal complaint blocks every address of this person.
+              AND cps.global_candidate_id IS NULL
             ORDER BY
               CASE cce.provider WHEN 'fullenrich' THEN 2 WHEN 'enrichlayer' THEN 1 ELSE 0 END DESC,
               (cce.status = 'verified') DESC,
@@ -852,6 +901,18 @@ def _choose_primary_contact(cur: psycopg.Cursor, *, tenant_id: str, candidate_id
 def _selected_contact_state(
     cur: psycopg.Cursor, *, tenant_id: str, candidate_id: str
 ) -> dict[str, Any]:
+    # A complaint is person-terminal platform-wide: no address of this person is
+    # selectable by ANY tenant, so there is no alternate to re-elect. Checked
+    # before re-election so a different org's complaint cannot be worked around
+    # by promoting another validated address.
+    cur.execute(
+        "SELECT reason FROM contact_person_suppressions WHERE global_candidate_id = %s",
+        (candidate_id,),
+    )
+    person_suppressed = cur.fetchone()
+    if person_suppressed:
+        return {"state": "suppressed", "contact": None, "reason": person_suppressed[0]}
+
     # A platform tombstone may have been created by a different tenant since
     # this tenant last selected its primary. Re-elect on read so a usable
     # alternate is promoted without exposing or mutating the other tenant's
@@ -2161,14 +2222,24 @@ def suppress_contact_evidence(
     body: ContactSuppressionRecord,
     claims=Depends(get_jwt_claims),
 ):
-    """Record a platform-wide hard-bounce/complaint tombstone by normalized hash."""
+    """Record a platform-wide hard-bounce/complaint suppression.
+
+    Scope differs by reason, per locked policy:
+      * hard_bounce - tombstones the ADDRESS. The person stays reachable at any
+        other validated address.
+      * complaint   - person-terminal AND platform-wide, because every org mails
+        under one sender identity. Suppressing only the address would leave the
+        same person reachable at a different address, including by another org.
+    """
     _require_enabled()
     _tenant_from_claims(claims)
     reason = body.reason.strip().lower()
     if reason not in {"hard_bounce", "complaint"}:
         raise HTTPException(status_code=400, detail="unsupported suppression reason")
+    provider_event_id = (body.provider_event_id or "").strip() or None
     _email, email_hash = _normalize_email(body.email)
-    conn = _get_tenant_conn(getattr(claims, "tenant_id", None))
+    tenant_id = getattr(claims, "tenant_id", None)
+    conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -2179,22 +2250,21 @@ def suppress_contact_evidence(
                 ORDER BY observed_at DESC
                 LIMIT 1
                 """,
-                (getattr(claims, "tenant_id", None), email_hash),
+                (tenant_id, email_hash),
             )
             owned_evidence = cur.fetchone()
-            if owned_evidence is None:
-                # A hard bounce or complaint is PLATFORM-WIDE: every org mails
-                # under one sender identity, so the tombstone must land even when
-                # this tenant happens to own no evidence for the address.
-                # Refusing here (the old 404) silently downgraded a platform-wide
-                # obligation to nothing. The tombstone is keyed on email_hash
-                # alone and both reference columns are nullable, so a hash-only
-                # row is exactly what this table was designed to hold.
-                #
-                # This path can suppress an address the caller has no provable
-                # relationship to, so it requires a provider event id and is
-                # recorded with the calling tenant for audit.
-                if not (body.provider_event_id or "").strip():
+            evidence_present = owned_evidence is not None
+
+            if evidence_present:
+                evidence_id, candidate_id = owned_evidence
+            else:
+                # Suppressing an address this tenant owns no evidence for is a
+                # PRIVILEGED action: it can tombstone any address platform-wide
+                # with no provable relationship to the caller. It therefore needs
+                # a dedicated Flow-only scope from a verified service issuer.
+                # provider_event_id is audit data, never authorization.
+                _require_unowned_suppression_authority(claims)
+                if provider_event_id is None:
                     raise HTTPException(
                         status_code=422,
                         detail=(
@@ -2202,34 +2272,22 @@ def suppress_contact_evidence(
                             "with no tenant-owned contact evidence"
                         ),
                     )
+                evidence_id, candidate_id = None, None
                 logger.warning(
-                    "contact suppression without tenant-owned evidence; "
-                    "recording hash-only platform tombstone",
+                    "contact suppression without tenant-owned evidence",
                     extra={
-                        "tenant_id": getattr(claims, "tenant_id", None),
+                        "tenant_id": tenant_id,
+                        "issuer": getattr(claims, "issuer", None),
+                        "actor_id": getattr(claims, "actor_id", None),
                         "reason": reason,
-                        "provider_event_id": body.provider_event_id,
+                        "provider_event_id": provider_event_id,
                     },
                 )
-                cur.execute(
-                    """
-                    INSERT INTO contact_suppression_tombstones
-                        (email_hash, global_candidate_id, reason, source_evidence_id,
-                         provider_event_id)
-                    VALUES (%s, NULL, %s, NULL, %s)
-                    ON CONFLICT (email_hash) DO UPDATE SET
-                        reason = EXCLUDED.reason,
-                        last_observed_at = now(),
-                        provider_event_id = COALESCE(
-                            EXCLUDED.provider_event_id,
-                            contact_suppression_tombstones.provider_event_id
-                        )
-                    """,
-                    (email_hash, reason, body.provider_event_id),
-                )
-                conn.commit()
-                return {"suppressed": True, "reason": reason, "evidence": "absent"}
-            evidence_id, candidate_id = owned_evidence
+
+            # Address tombstone. `reason` never DOWNGRADES: a later hard bounce
+            # must not overwrite a recorded complaint, in either direction of
+            # arrival, and the existing candidate/evidence references survive a
+            # hash-only write.
             cur.execute(
                 """
                 INSERT INTO contact_suppression_tombstones
@@ -2241,7 +2299,12 @@ def suppress_contact_evidence(
                         contact_suppression_tombstones.global_candidate_id,
                         EXCLUDED.global_candidate_id
                     ),
-                    reason = EXCLUDED.reason,
+                    reason = CASE
+                        WHEN contact_suppression_tombstones.reason = 'complaint'
+                          OR EXCLUDED.reason = 'complaint'
+                        THEN 'complaint'
+                        ELSE EXCLUDED.reason
+                    END,
                     last_observed_at = now(),
                     source_evidence_id = COALESCE(
                         EXCLUDED.source_evidence_id,
@@ -2255,28 +2318,90 @@ def suppress_contact_evidence(
                     candidate_id,
                     reason,
                     evidence_id,
-                    body.provider_event_id,
+                    provider_event_id,
                 ),
             )
-            # RLS intentionally limits this maintenance update to the caller's
-            # raw evidence; every tenant is nevertheless blocked by the shared
-            # hash tombstone during lookup.
+
+            # A complaint is person-terminal platform-wide. Only possible when
+            # the person is resolvable; see the receipt for the unresolved case.
+            person_suppressed = False
+            if reason == "complaint":
+                if candidate_id is None:
+                    cur.execute(
+                        """
+                        SELECT global_candidate_id
+                        FROM contact_suppression_tombstones
+                        WHERE email_hash = %s
+                        """,
+                        (email_hash,),
+                    )
+                    known = cur.fetchone()
+                    candidate_id = known[0] if known else None
+                if candidate_id is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO contact_person_suppressions
+                            (global_candidate_id, reason, provider_event_id)
+                        VALUES (%s, 'complaint', %s)
+                        ON CONFLICT (global_candidate_id) DO UPDATE SET
+                            last_observed_at = now(),
+                            provider_event_id = COALESCE(
+                                EXCLUDED.provider_event_id,
+                                contact_person_suppressions.provider_event_id
+                            )
+                        """,
+                        (candidate_id, provider_event_id),
+                    )
+                    person_suppressed = True
+
+            # Append-only receipt: who suppressed what, under which issuer.
             cur.execute(
                 """
-                UPDATE candidate_contact_evidence
-                SET status = %s, suppressed_at = now(), is_primary = false,
-                    bounce_reason = COALESCE(%s, bounce_reason), updated_at = now()
-                WHERE tenant_id = %s AND email_hash = %s
+                INSERT INTO contact_suppression_receipts
+                    (email_hash, global_candidate_id, reason, scope, evidence_present,
+                     tenant_id, issuer, actor_id, actor_type, provider_event_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (reason, reason, getattr(claims, "tenant_id", None), email_hash),
+                (
+                    email_hash,
+                    candidate_id,
+                    reason,
+                    "person" if person_suppressed else "address",
+                    evidence_present,
+                    tenant_id,
+                    getattr(claims, "issuer", None),
+                    getattr(claims, "actor_id", None),
+                    getattr(claims, "actor_type", None),
+                    provider_event_id,
+                ),
             )
-            _choose_primary_contact(
-                cur,
-                tenant_id=getattr(claims, "tenant_id", None),
-                candidate_id=str(candidate_id),
-            )
+
+            if evidence_present:
+                # RLS intentionally limits this maintenance update to the caller's
+                # raw evidence; every tenant is nevertheless blocked by the shared
+                # hash tombstone (and, for a complaint, the person suppression).
+                cur.execute(
+                    """
+                    UPDATE candidate_contact_evidence
+                    SET status = %s, suppressed_at = now(), is_primary = false,
+                        bounce_reason = COALESCE(%s, bounce_reason), updated_at = now()
+                    WHERE tenant_id = %s AND email_hash = %s
+                    """,
+                    (reason, reason, tenant_id, email_hash),
+                )
+                if candidate_id is not None:
+                    _choose_primary_contact(
+                        cur,
+                        tenant_id=tenant_id,
+                        candidate_id=str(candidate_id),
+                    )
         conn.commit()
-        return {"suppressed": True, "reason": reason}
+        return {
+            "suppressed": True,
+            "reason": reason,
+            "evidence": "present" if evidence_present else "absent",
+            "scope": "person" if person_suppressed else "address",
+        }
     except Exception:
         conn.rollback()
         raise
