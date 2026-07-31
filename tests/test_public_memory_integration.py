@@ -483,10 +483,40 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
     free to mail a known-bad address under the same sender identity.
     """
     global_memory = _enable_public_api(monkeypatch)
-    candidate_id = public_memory_rows["public_id"]
-    bad_email = f"no-evidence-bad-{uuid.uuid4().hex}@example.com"
     claims_a = SimpleNamespace(tenant_id=TENANT_A)
     claims_b = SimpleNamespace(tenant_id=TENANT_B)
+    bad_email = f"no-evidence-bad-{uuid.uuid4().hex}@example.com"
+
+    # A candidate of its own, whose ONLY address is the bad one. Reusing the
+    # module fixture's candidate would leave tenant B holding an alternate from
+    # an earlier test, and "found" would then be the correct answer (a hard
+    # bounce is address-terminal), which would hide whether the block worked.
+    candidate_id = str(uuid.uuid4())
+    slug = f"contact-noevidence-{uuid.uuid4().hex[:10]}"
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO global_candidates
+                    (id, linkedin_id, linkedin_url, public_profile,
+                     public_profile_observed_at)
+                VALUES (%s, %s, %s, %s::jsonb, now())
+                """,
+                (
+                    candidate_id,
+                    slug,
+                    f"https://linkedin.com/in/{slug}",
+                    json.dumps({"basic_profile": {"name": "No Evidence Public"}}),
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO candidate_provenance
+                    (global_candidate_id, source_type, tenant_id, source_detail)
+                VALUES (%s, 'signal_sourced', NULL, '{}'::jsonb)
+                """,
+                (candidate_id,),
+            )
 
     # Only tenant B holds this address; tenant A owns no evidence for it.
     selected = global_memory.record_contact_evidence(
@@ -542,13 +572,15 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
         assert row[0] == "hard_bounce"
         assert row[1] is None and row[2] is None
 
-        # THE REGRESSION: tenant B must now be blocked from that address.
+        # THE REGRESSION: tenant B, which holds this address and was never told
+        # about the bounce, must now be blocked from sending to it.
         after = global_memory.lookup_contact_evidence(
             global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_id]),
             claims=claims_b,
         )
         assert after["results"][0]["state"] == "suppressed"
         assert after["results"][0]["contact"] is None
+        assert after["results"][0]["reason"] == "hard_bounce"
     finally:
         with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
             with conn.cursor() as cur:
@@ -557,9 +589,14 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
                     (sha256(bad_email.lower().encode()).hexdigest(),),
                 )
                 cur.execute(
-                    "DELETE FROM candidate_contact_evidence WHERE email_hash = %s",
-                    (sha256(bad_email.lower().encode()).hexdigest(),),
+                    "DELETE FROM candidate_contact_evidence WHERE global_candidate_id = %s",
+                    (candidate_id,),
                 )
+                cur.execute(
+                    "DELETE FROM candidate_provenance WHERE global_candidate_id = %s",
+                    (candidate_id,),
+                )
+                cur.execute("DELETE FROM global_candidates WHERE id = %s", (candidate_id,))
 
 
 def test_one_address_tombstone_reselects_alternates_for_every_candidate(
