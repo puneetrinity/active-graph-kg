@@ -45,6 +45,14 @@ JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "30"))  # Clock skew to
 SIGNAL_JWT_PUBLIC_KEY = _decode_pem(os.getenv("SIGNAL_JWT_PUBLIC_KEY"))
 SIGNAL_JWT_ISSUER = os.getenv("SIGNAL_JWT_ISSUER", "signal")
 
+# The service identity trusted to suppress an address it owns no evidence for.
+# Configurable on purpose: rotating or renaming this identity must be a config
+# change, not a schema migration — the case where you most need to change it is
+# a credential compromise, when there is no time to ship a migration. Migration
+# 022 enforces only that SOME service identity is recorded on every receipt.
+CONTACT_SUPPRESSION_ISSUER = os.getenv("CONTACT_SUPPRESSION_ISSUER", "vantahire")
+CONTACT_SUPPRESSION_ACTOR_ID = os.getenv("CONTACT_SUPPRESSION_ACTOR_ID", "vantahire-backend")
+
 security = HTTPBearer(auto_error=False)
 
 
@@ -58,12 +66,17 @@ class JWTClaims:
         actor_type: str = "user",
         scopes: list[str] | None = None,
         exp: int | None = None,
+        issuer: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.actor_id = actor_id
         self.actor_type = actor_type
         self.scopes = scopes or []
         self.exp = exp
+        # The VERIFIED issuer this token was validated against, not the peeked
+        # value. Endpoints that grant authority beyond a tenant's own data must
+        # be able to require a specific trusted service issuer.
+        self.issuer = issuer
 
 
 def verify_jwt(token: str) -> JWTClaims:
@@ -83,7 +96,9 @@ def verify_jwt(token: str) -> JWTClaims:
     # RS256 public key.
     issuer_keys: dict[str, str] = {}
     if JWT_ISSUER and (JWT_PUBLIC_KEY or JWT_SECRET_KEY):
-        issuer_keys[JWT_ISSUER] = JWT_PUBLIC_KEY or JWT_SECRET_KEY
+        verification_key = JWT_PUBLIC_KEY or JWT_SECRET_KEY
+        assert verification_key is not None
+        issuer_keys[JWT_ISSUER] = verification_key
     if SIGNAL_JWT_ISSUER and SIGNAL_JWT_PUBLIC_KEY:
         issuer_keys[SIGNAL_JWT_ISSUER] = SIGNAL_JWT_PUBLIC_KEY
 
@@ -95,18 +110,16 @@ def verify_jwt(token: str) -> JWTClaims:
     except PyJWTError:
         pass
 
-    if token_issuer and token_issuer in issuer_keys:
-        key = issuer_keys[token_issuer]
-        expected_issuer: str | None = token_issuer
-    else:
-        # Fall back to the original single-issuer behavior.
-        key = JWT_PUBLIC_KEY or JWT_SECRET_KEY
-        expected_issuer = JWT_ISSUER
-
-    if not key:
+    if not issuer_keys:
         raise HTTPException(
-            status_code=500, detail="JWT_SECRET_KEY or JWT_PUBLIC_KEY not configured"
+            status_code=500,
+            detail="No JWT issuer and verification key pair is configured",
         )
+    if not isinstance(token_issuer, str) or not token_issuer or token_issuer not in issuer_keys:
+        raise HTTPException(status_code=401, detail="JWT token has missing or untrusted issuer")
+
+    key = issuer_keys[token_issuer]
+    expected_issuer = token_issuer
 
     try:
         # Decode and verify token with leeway for clock skew
@@ -123,7 +136,7 @@ def verify_jwt(token: str) -> JWTClaims:
                 "verify_nbf": True,
                 "verify_iat": True,
                 "verify_aud": True,
-                "verify_iss": bool(expected_issuer),
+                "verify_iss": True,
             },
         )
 
@@ -166,7 +179,12 @@ def verify_jwt(token: str) -> JWTClaims:
         )
 
         return JWTClaims(
-            tenant_id=tenant_id, actor_id=actor_id, actor_type=actor_type, scopes=scopes, exp=exp
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            scopes=scopes,
+            exp=exp,
+            issuer=expected_issuer,
         )
 
     except jwt.ExpiredSignatureError:
@@ -249,6 +267,17 @@ def verification_key_problems() -> list[str]:
     if not JWT_ENABLED:
         return problems
 
+    if not JWT_ISSUER or not JWT_ISSUER.strip():
+        problems.append("JWT_ISSUER is not set")
+    elif JWT_ISSUER != CONTACT_SUPPRESSION_ISSUER:
+        problems.append(
+            "JWT_ISSUER does not match the trusted contact-suppression issuer "
+            f"({CONTACT_SUPPRESSION_ISSUER})"
+        )
+
+    if SIGNAL_JWT_PUBLIC_KEY and SIGNAL_JWT_ISSUER == JWT_ISSUER:
+        problems.append("SIGNAL_JWT_ISSUER must be distinct from JWT_ISSUER")
+
     def _pem_parses(pem: str) -> bool:
         try:
             from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -271,7 +300,9 @@ def verification_key_problems() -> list[str]:
     else:
         problems.append(f"unsupported JWT_ALGORITHM: {JWT_ALGORITHM}")
 
-    if SIGNAL_JWT_PUBLIC_KEY and not _pem_parses(SIGNAL_JWT_PUBLIC_KEY):
+    if SIGNAL_JWT_PUBLIC_KEY and not JWT_ALGORITHM.startswith("RS"):
+        problems.append("SIGNAL_JWT_PUBLIC_KEY is configured but JWT_ALGORITHM is not RS*")
+    elif SIGNAL_JWT_PUBLIC_KEY and not _pem_parses(SIGNAL_JWT_PUBLIC_KEY):
         problems.append("SIGNAL_JWT_PUBLIC_KEY is not a parseable PEM public key")
     elif not SIGNAL_JWT_PUBLIC_KEY and (
         os.getenv("ACTIVEKG_REQUIRE_SIGNAL_ISSUER", "false").lower() == "true"

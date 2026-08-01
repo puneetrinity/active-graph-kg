@@ -79,6 +79,65 @@ def test_runtime_role_posture(runtime_conn):
             "AND tableowner = current_user"
         )
         assert cur.fetchone()[0] == 0, "runtime role owns candidate tables — RLS is nominal"
+        cur.execute(
+            "SELECT count(*) FROM pg_tables "
+            "WHERE schemaname = 'public' "
+            "AND tablename = ANY(%s) AND tableowner = current_user",
+            (
+                [
+                    "contact_suppression_tombstones",
+                    "contact_person_suppressions",
+                    "contact_suppression_receipts",
+                ],
+            ),
+        )
+        assert cur.fetchone()[0] == 0, "runtime role owns shared suppression tables"
+        cur.execute(
+            """
+            SELECT
+                has_table_privilege(current_user,
+                    'public.contact_suppression_receipts', 'SELECT'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_receipts', 'INSERT'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_receipts', 'UPDATE'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_receipts', 'DELETE'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_receipts', 'TRUNCATE'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_tombstones', 'DELETE'),
+                has_table_privilege(current_user,
+                    'public.contact_suppression_tombstones', 'TRUNCATE'),
+                has_table_privilege(current_user,
+                    'public.contact_person_suppressions', 'DELETE'),
+                has_table_privilege(current_user,
+                    'public.contact_person_suppressions', 'TRUNCATE')
+            """
+        )
+        (
+            can_select,
+            can_insert,
+            can_update,
+            can_delete,
+            can_truncate,
+            can_delete_tombstones,
+            can_truncate_tombstones,
+            can_delete_people,
+            can_truncate_people,
+        ) = cur.fetchone()
+        assert can_select and can_insert, "runtime role cannot append suppression receipts"
+        assert not any(
+            (
+                can_update,
+                can_delete,
+                can_truncate,
+                can_delete_tombstones,
+                can_truncate_tombstones,
+                can_delete_people,
+                can_truncate_people,
+            )
+        ), "runtime role can erase or rewrite suppression history"
 
 
 def test_tenant_a_sees_only_tenant_a(runtime_conn, seeded_candidates):

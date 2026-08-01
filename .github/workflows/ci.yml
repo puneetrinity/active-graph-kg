@@ -78,6 +78,8 @@ jobs:
             tests/test_global_candidate_embedding_text.py \
             tests/test_public_profile_boundary.py \
             tests/test_signal_global_observation_order.py \
+            tests/test_jwt_scopes.py \
+            tests/test_contact_suppression_authority.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -224,11 +226,11 @@ jobs:
           done
           ledger=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "21|0" ]; then
-            echo "FAIL: ledger should have exactly 21 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "22|0" ]; then
+            echo "FAIL: ledger should have exactly 22 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 21 applied, 0 baselined"
+          echo "OK: migration ledger has 22 applied, 0 baselined"
           posture=$(psql -h localhost -U activekg -d activekg -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -357,6 +359,75 @@ jobs:
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after public table restore (want 200)"; exit 1; }
           psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts ENABLE REPLICA TRIGGER contact_suppression_receipts_no_mutation;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with replica-only audit trigger (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts ENABLE TRIGGER contact_suppression_receipts_no_mutation;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after audit trigger restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER SEQUENCE contact_suppression_receipts_id_seq RENAME TO contact_suppression_receipts_id_seq_tampered;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code after receipt sequence rename (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER SEQUENCE contact_suppression_receipts_id_seq_tampered RENAME TO contact_suppression_receipts_id_seq;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt sequence restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipts_provider_event_unique;
+             ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipts_provider_event_unique UNIQUE (provider_event_id, issuer);"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with wrong receipt idempotency key (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipts_provider_event_unique;
+             ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipts_provider_event_unique UNIQUE (issuer, provider_event_id);"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt idempotency restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipt_authority_check;
+             ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipt_authority_check CHECK (true);"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with permissive suppression authority (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipt_authority_check;
+             ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipt_authority_check
+             CHECK (btrim(issuer) <> '' AND btrim(actor_id) <> '' AND actor_type = 'service');"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after suppression authority restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "CREATE OR REPLACE FUNCTION contact_suppression_receipts_append_only()
+             RETURNS trigger LANGUAGE plpgsql AS \$\$
+             BEGIN RETURN OLD; END;
+             \$\$;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with no-op append-only function (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "CREATE OR REPLACE FUNCTION contact_suppression_receipts_append_only()
+             RETURNS trigger LANGUAGE plpgsql AS \$\$
+             BEGIN
+               RAISE EXCEPTION 'contact_suppression_receipts is append-only (attempted %)', TG_OP;
+             END;
+             \$\$;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after append-only function restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "GRANT UPDATE ON contact_suppression_receipts TO activekg_app;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with mutable receipts (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "REVOKE UPDATE ON contact_suppression_receipts FROM activekg_app;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt privilege restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "GRANT TRUNCATE ON contact_suppression_tombstones TO activekg_app;"
+          code=$(check_readyz)
+          [ "$code" = "503" ] || { echo "FAIL: readyz=$code with erasable tombstones (want 503)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
+            "REVOKE TRUNCATE ON contact_suppression_tombstones FROM activekg_app;"
+          code=$(check_readyz)
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after tombstone privilege restore (want 200)"; exit 1; }
+          psql -h localhost -U activekg -d activekg -c \
             "ALTER TABLE global_candidates RENAME COLUMN public_role_family TO public_role_family_tampered;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after public column rename (want 503)"; exit 1; }
@@ -411,6 +482,8 @@ jobs:
       - name: Run deploy-path guard regression tests
         env:
           ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
           pytest tests/test_deploy_path_guards.py -v --tb=short --timeout=180
 
