@@ -491,7 +491,7 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
             "constraint_definition",
             "contact_suppression_receipts",
             "contact_suppression_receipt_authority_check",
-            "check((((btrim(issuer)<>''::text)and(btrim(actor_id)<>''::text))and(actor_type='service'::text)))",
+            "check(((btrim(issuer)<>''::text)and(btrim(actor_id)<>''::text)and(actor_type='service'::text)))",
         ),
         (
             "constraint_definition",
