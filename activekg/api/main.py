@@ -770,7 +770,7 @@ _READINESS_EXPECTED_CHECK_DEFINITIONS = {
         "contact_suppression_receipts",
         "contact_suppression_receipt_authority_check",
     ): (
-        "check(((btrim(issuer)<>''::text)and(btrim(actor_id)<>''::text)and(actor_type='service'::text)))"
+        "check(((btrim(issuer)<>'')and(btrim(actor_id)<>'')and(actor_type='service')))"
     ),
     (
         "contact_suppression_receipts",
