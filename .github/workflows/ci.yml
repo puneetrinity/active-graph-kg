@@ -392,7 +392,7 @@ jobs:
           psql -h localhost -U activekg -d activekg -c \
             "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipt_authority_check;
              ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipt_authority_check
-             CHECK (issuer = 'vantahire' AND actor_id = 'vantahire-backend' AND actor_type = 'service');"
+             CHECK (btrim(issuer) <> '' AND btrim(actor_id) <> '' AND actor_type = 'service');"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after suppression authority restore (want 200)"; exit 1; }
           psql -h localhost -U activekg -d activekg -c \
