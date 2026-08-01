@@ -265,6 +265,58 @@ class TestIssuerAudienceValidation:
         token = _make_token(iss="vantahire", aud="activekg")
         claims = verify_jwt(token)
         assert claims.tenant_id == "t_test"
+        assert claims.issuer == "vantahire"
+
+    def test_missing_issuer_rejected(self):
+        from activekg.api.auth import verify_jwt
+
+        now = datetime.now(timezone.utc)
+        token = pyjwt.encode(
+            {
+                "sub": "vantahire-backend",
+                "tenant_id": "t_test",
+                "actor_type": "service",
+                "aud": TEST_AUDIENCE,
+                "iat": now,
+                "nbf": now,
+                "exp": now + timedelta(hours=1),
+            },
+            TEST_SECRET,
+            algorithm=TEST_ALGORITHM,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            verify_jwt(token)
+        assert exc_info.value.status_code == 401
+        assert "issuer" in exc_info.value.detail.lower()
+
+    def test_missing_primary_issuer_configuration_rejects_and_fails_readiness(self, monkeypatch):
+        from activekg.api import auth
+
+        monkeypatch.setattr(auth, "JWT_ISSUER", None)
+        monkeypatch.setattr(auth, "SIGNAL_JWT_PUBLIC_KEY", None)
+        with pytest.raises(HTTPException) as exc_info:
+            auth.verify_jwt(_make_token(iss="vantahire"))
+        assert exc_info.value.status_code == 500
+        assert "issuer" in exc_info.value.detail.lower()
+        assert "JWT_ISSUER is not set" in auth.verification_key_problems()
+
+    def test_readiness_rejects_primary_issuer_that_cannot_suppress(self, monkeypatch):
+        from activekg.api import auth
+
+        monkeypatch.setattr(auth, "JWT_ISSUER", "flow")
+        assert any(
+            "trusted contact-suppression issuer" in problem
+            for problem in auth.verification_key_problems()
+        )
+
+    def test_readiness_rejects_issuer_key_collision(self, monkeypatch):
+        from activekg.api import auth
+
+        monkeypatch.setattr(auth, "SIGNAL_JWT_ISSUER", auth.JWT_ISSUER)
+        monkeypatch.setattr(auth, "SIGNAL_JWT_PUBLIC_KEY", "configured-signal-key")
+        assert "SIGNAL_JWT_ISSUER must be distinct from JWT_ISSUER" in (
+            auth.verification_key_problems()
+        )
 
     def test_wrong_issuer_rejected(self):
         from activekg.api.auth import verify_jwt
@@ -274,6 +326,24 @@ class TestIssuerAudienceValidation:
             verify_jwt(token)
         assert exc_info.value.status_code == 401
         assert "issuer" in exc_info.value.detail.lower()
+
+    def test_non_string_issuer_is_controlled_unauthorized(self, monkeypatch):
+        from activekg.api import auth
+
+        monkeypatch.setattr(auth.jwt, "decode", lambda *_args, **_kwargs: {"iss": []})
+        with pytest.raises(HTTPException) as exc_info:
+            auth.verify_jwt("attacker-controlled-token")
+        assert exc_info.value.status_code == 401
+        assert "issuer" in exc_info.value.detail.lower()
+
+    def test_readiness_rejects_signal_key_with_hs_algorithm(self, monkeypatch):
+        from activekg.api import auth
+
+        monkeypatch.setattr(auth, "JWT_ALGORITHM", "HS256")
+        monkeypatch.setattr(auth, "SIGNAL_JWT_PUBLIC_KEY", "configured-signal-key")
+        assert "SIGNAL_JWT_PUBLIC_KEY is configured but JWT_ALGORITHM is not RS*" in (
+            auth.verification_key_problems()
+        )
 
     def test_wrong_audience_rejected(self):
         from activekg.api.auth import verify_jwt

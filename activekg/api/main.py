@@ -615,6 +615,8 @@ _READINESS_CANDIDATE_TABLES = (
 )
 _READINESS_SHARED_TABLES = (
     "contact_suppression_tombstones",
+    "contact_person_suppressions",
+    "contact_suppression_receipts",
     "public_candidate_market_memberships",
 )
 _READINESS_PUBLIC_COLUMNS = (
@@ -654,6 +656,28 @@ _READINESS_TABLE_COLUMNS = {
         "source_evidence_id",
         "provider_event_id",
     ),
+    "contact_person_suppressions": (
+        "global_candidate_id",
+        "reason",
+        "first_observed_at",
+        "last_observed_at",
+        "provider_event_id",
+    ),
+    "contact_suppression_receipts": (
+        "id",
+        "email_hash",
+        "global_candidate_id",
+        "signal_candidate_id",
+        "reason",
+        "scope",
+        "evidence_present",
+        "tenant_id",
+        "issuer",
+        "actor_id",
+        "actor_type",
+        "provider_event_id",
+        "created_at",
+    ),
     "public_candidate_market_memberships": (
         "global_candidate_id",
         "coarse_market_key",
@@ -670,6 +694,9 @@ _READINESS_REQUIRED_INDEXES = (
     "idx_cce_one_primary",
     "idx_cce_email_hash",
     "idx_contact_suppression_provider_event",
+    "idx_contact_suppression_receipts_email_hash",
+    "idx_contact_suppression_receipts_candidate",
+    "idx_contact_suppression_receipts_tenant_created",
     "idx_pcmm_market_last_observed",
 )
 _READINESS_REQUIRED_CONSTRAINTS = {
@@ -681,11 +708,95 @@ _READINESS_REQUIRED_CONSTRAINTS = {
         "candidate_contact_evidence_unique",
         "candidate_contact_evidence_primary_usable",
     ),
-    "contact_suppression_tombstones": ("contact_suppression_reason_check",),
+    "contact_suppression_tombstones": (
+        "contact_suppression_reason_check",
+        "contact_suppression_provider_event_hash",
+    ),
+    "contact_person_suppressions": (
+        "contact_person_suppressions_pkey",
+        "contact_person_suppressions_global_candidate_fkey",
+        "contact_person_suppression_reason_check",
+        "contact_person_suppression_provider_event_hash",
+    ),
+    "contact_suppression_receipts": (
+        "contact_suppression_receipts_pkey",
+        "contact_suppression_receipt_email_hash_check",
+        "contact_suppression_receipt_signal_candidate_nonblank",
+        "contact_suppression_receipt_tenant_nonblank",
+        "contact_suppression_receipt_provider_event_hash",
+        "contact_suppression_receipt_authority_check",
+        "contact_suppression_receipt_scope_reason_check",
+        "contact_suppression_receipts_provider_event_unique",
+    ),
     "public_candidate_market_memberships": (
         "public_candidate_market_country_code_check",
         "public_candidate_market_memberships_pkey",
     ),
+}
+_READINESS_EXPECTED_CHECK_DEFINITIONS = {
+    (
+        "contact_suppression_tombstones",
+        "contact_suppression_reason_check",
+    ): "check((reason=any(array['hard_bounce','complaint'])))",
+    (
+        "contact_suppression_tombstones",
+        "contact_suppression_provider_event_hash",
+    ): "check(((provider_event_idisnull)or(provider_event_id~'^[0-9a-f]{64}$')))",
+    (
+        "contact_person_suppressions",
+        "contact_person_suppression_reason_check",
+    ): "check((reason='complaint'))",
+    (
+        "contact_person_suppressions",
+        "contact_person_suppression_provider_event_hash",
+    ): "check((provider_event_id~'^[0-9a-f]{64}$'))",
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_email_hash_check",
+    ): "check((email_hash~'^[0-9a-f]{64}$'))",
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_signal_candidate_nonblank",
+    ): "check(((signal_candidate_idisnull)or(btrim(signal_candidate_id)<>'')))",
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_tenant_nonblank",
+    ): "check(((btrim(tenant_id)<>'')and(tenant_id<>'__quarantine__')))",
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_provider_event_hash",
+    ): "check((provider_event_id~'^[0-9a-f]{64}$'))",
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_authority_check",
+    ): (
+        "check((((btrim(issuer)<>''::text)and(btrim(actor_id)<>''::text))and(actor_type='service'::text)))"
+    ),
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipt_scope_reason_check",
+    ): (
+        "check((((reason='hard_bounce')and(scope='address'))or"
+        "((reason='complaint')and(scope='person')and(global_candidate_idisnotnull)"
+        "and(signal_candidate_idisnotnull))))"
+    ),
+}
+_READINESS_EXPECTED_STRUCTURAL_DEFINITIONS = {
+    (
+        "contact_person_suppressions",
+        "contact_person_suppressions_pkey",
+    ): ("p", "primarykey(global_candidate_id)"),
+    (
+        "contact_person_suppressions",
+        "contact_person_suppressions_global_candidate_fkey",
+    ): (
+        "f",
+        "foreignkey(global_candidate_id)referencesglobal_candidates(id)ondeleterestrict",
+    ),
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipts_pkey",
+    ): ("p", "primarykey(id)"),
 }
 _READINESS_PUBLIC_FUNCTIONS = (
     "activekg_pick_public_fields",
@@ -694,12 +805,92 @@ _READINESS_PUBLIC_FUNCTIONS = (
     "activekg_assert_public_crustdata_backfill_safe",
 )
 
+_READINESS_REQUIRED_NOT_NULL = {
+    "contact_person_suppressions": (
+        "global_candidate_id",
+        "reason",
+        "first_observed_at",
+        "last_observed_at",
+        "provider_event_id",
+    ),
+    "contact_suppression_receipts": (
+        "id",
+        "email_hash",
+        "reason",
+        "scope",
+        "evidence_present",
+        "tenant_id",
+        "issuer",
+        "actor_id",
+        "actor_type",
+        "provider_event_id",
+        "created_at",
+    ),
+}
+_READINESS_REQUIRED_COLUMN_TYPES = {
+    "contact_person_suppressions": {
+        "global_candidate_id": "uuid",
+        "reason": "text",
+        "first_observed_at": "timestamp with time zone",
+        "last_observed_at": "timestamp with time zone",
+        "provider_event_id": "text",
+    },
+    "contact_suppression_receipts": {
+        "id": "bigint",
+        "email_hash": "text",
+        "global_candidate_id": "uuid",
+        "signal_candidate_id": "text",
+        "reason": "text",
+        "scope": "text",
+        "evidence_present": "boolean",
+        "tenant_id": "text",
+        "issuer": "text",
+        "actor_id": "text",
+        "actor_type": "text",
+        "provider_event_id": "text",
+        "created_at": "timestamp with time zone",
+    },
+}
+_READINESS_REQUIRED_DEFAULTS = {
+    ("contact_person_suppressions", "first_observed_at"): "now()",
+    ("contact_person_suppressions", "last_observed_at"): "now()",
+    ("contact_suppression_receipts", "created_at"): "now()",
+}
+_READINESS_SUPPRESSION_FUNCTION = "contact_suppression_receipts_append_only"
+_READINESS_SUPPRESSION_FUNCTION_BODY = (
+    "beginraiseexception'contact_suppression_receiptsisappend-only(attempted%)',tg_op;end;"
+)
+_READINESS_SUPPRESSION_TRIGGERS = (
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipts_no_mutation",
+        _READINESS_SUPPRESSION_FUNCTION,
+        27,
+    ),
+    (
+        "contact_suppression_receipts",
+        "contact_suppression_receipts_no_truncate",
+        _READINESS_SUPPRESSION_FUNCTION,
+        34,
+    ),
+)
+_READINESS_SUPPRESSION_SEQUENCE = "contact_suppression_receipts_id_seq"
+_READINESS_SUPPRESSION_TABLES = (
+    "contact_suppression_tombstones",
+    "contact_person_suppressions",
+    "contact_suppression_receipts",
+)
+
 # Transitional escape hatch for single-DSN dev environments where the runtime
 # role still owns the tables (RLS nominal). Production must NOT set this.
 _READYZ_ALLOW_OWNER = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
 
 # Development-only: lets /readyz pass with JWT authentication disabled.
 _READYZ_ALLOW_NO_JWT = os.getenv("ACTIVEKG_READYZ_ALLOW_NO_JWT", "false").lower() == "true"
+
+
+def _normalize_sql_definition(value: str) -> str:
+    return re.sub(r"\s+", "", value.lower()).replace("::text", "")
 
 
 def _tenant_policy_expression_ok(expr: str) -> bool:
@@ -812,7 +1003,7 @@ def readyz() -> JSONResponse:
                     for table, required_columns in _READINESS_TABLE_COLUMNS.items():
                         cur.execute(
                             """
-                            SELECT column_name
+                            SELECT column_name, is_nullable, data_type, column_default
                             FROM information_schema.columns
                             WHERE table_schema = 'public'
                               AND table_name = %s
@@ -820,10 +1011,48 @@ def readyz() -> JSONResponse:
                             """,
                             (table, list(required_columns)),
                         )
-                        table_columns = {row[0] for row in cur.fetchall()}
+                        table_columns = {
+                            row[0]: {
+                                "nullable": row[1],
+                                "type": row[2],
+                                "default": row[3],
+                            }
+                            for row in cur.fetchall()
+                        }
                         for column in required_columns:
                             if column not in table_columns:
                                 problems.append(f"missing {table} column: {column}")
+                                continue
+                            if (
+                                column in _READINESS_REQUIRED_NOT_NULL.get(table, ())
+                                and table_columns[column]["nullable"] != "NO"
+                            ):
+                                problems.append(f"nullable required column: {table}.{column}")
+                            expected_type = _READINESS_REQUIRED_COLUMN_TYPES.get(table, {}).get(
+                                column
+                            )
+                            if expected_type and table_columns[column]["type"] != expected_type:
+                                problems.append(f"unexpected column type: {table}.{column}")
+                            expected_default = _READINESS_REQUIRED_DEFAULTS.get((table, column))
+                            if expected_default:
+                                actual_default = (table_columns[column]["default"] or "").replace(
+                                    " ", ""
+                                )
+                                if actual_default.lower() != expected_default.replace(" ", ""):
+                                    problems.append(f"unexpected column default: {table}.{column}")
+                        if table == "contact_suppression_receipts":
+                            receipt_id_default = table_columns.get("id", {}).get("default")
+                            if not (
+                                receipt_id_default
+                                and receipt_id_default.lower().startswith("nextval(")
+                                and (
+                                    f"'{_READINESS_SUPPRESSION_SEQUENCE}'::regclass"
+                                    in receipt_id_default
+                                )
+                            ):
+                                problems.append(
+                                    "unexpected column default: contact_suppression_receipts.id"
+                                )
 
                     cur.execute(
                         """
@@ -897,9 +1126,125 @@ def readyz() -> JSONResponse:
 
                     cur.execute(
                         """
-                        SELECT indexname
-                        FROM pg_indexes
-                        WHERE schemaname = 'public' AND indexname = ANY(%s)
+                        SELECT p.pronargs, p.prorettype = 'trigger'::regtype,
+                               l.lanname, p.prosecdef, p.prosrc,
+                               pg_get_userbyid(p.proowner)
+                        FROM pg_proc p
+                        JOIN pg_namespace n ON n.oid = p.pronamespace
+                        JOIN pg_language l ON l.oid = p.prolang
+                        WHERE n.nspname = 'public' AND p.proname = %s
+                        """,
+                        (_READINESS_SUPPRESSION_FUNCTION,),
+                    )
+                    suppression_function = cur.fetchone()
+                    if not suppression_function:
+                        problems.append(f"missing function: {_READINESS_SUPPRESSION_FUNCTION}")
+                    elif (
+                        suppression_function[0] != 0
+                        or not suppression_function[1]
+                        or suppression_function[2] != "plpgsql"
+                        or suppression_function[3]
+                        or _normalize_sql_definition(suppression_function[4])
+                        != _READINESS_SUPPRESSION_FUNCTION_BODY
+                    ):
+                        problems.append("append-only receipt function definition unexpected")
+
+                    cur.execute(
+                        """
+                        SELECT c.relname, t.tgname, p.proname, t.tgtype, t.tgenabled
+                        FROM pg_trigger t
+                        JOIN pg_class c ON c.oid = t.tgrelid
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_proc p ON p.oid = t.tgfoid
+                        WHERE n.nspname = 'public' AND NOT t.tgisinternal
+                          AND t.tgname = ANY(%s)
+                        """,
+                        ([trigger[1] for trigger in _READINESS_SUPPRESSION_TRIGGERS],),
+                    )
+                    found_triggers = {
+                        (row[0], row[1]): (row[2], int(row[3]), row[4]) for row in cur.fetchall()
+                    }
+                    for table, trigger, function, trigger_type in _READINESS_SUPPRESSION_TRIGGERS:
+                        actual = found_triggers.get((table, trigger))
+                        if actual is None:
+                            problems.append(f"missing trigger: {table}.{trigger}")
+                        elif actual not in {
+                            (function, trigger_type, "O"),
+                            (function, trigger_type, "A"),
+                        }:
+                            problems.append(f"trigger definition unexpected: {table}.{trigger}")
+
+                    cur.execute(
+                        """
+                        SELECT c.relkind,
+                               has_sequence_privilege(
+                                   current_user,
+                                   quote_ident(n.nspname) || '.' || quote_ident(c.relname),
+                                   'USAGE'
+                               ),
+                               pg_get_userbyid(c.relowner)
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'public' AND c.relname = %s
+                        """,
+                        (_READINESS_SUPPRESSION_SEQUENCE,),
+                    )
+                    sequence_row = cur.fetchone()
+                    if sequence_row is None or sequence_row[0] != "S":
+                        problems.append(f"missing sequence: {_READINESS_SUPPRESSION_SEQUENCE}")
+                    elif not sequence_row[1]:
+                        problems.append(f"sequence usage denied: {_READINESS_SUPPRESSION_SEQUENCE}")
+
+                    cur.execute(
+                        """
+                        SELECT c.relname, pg_get_userbyid(c.relowner)
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'public' AND c.relname = ANY(%s)
+                        """,
+                        (list(_READINESS_SUPPRESSION_TABLES),),
+                    )
+                    suppression_owners: dict[str, str] = dict(cur.fetchall())
+
+                    cur.execute(
+                        """
+                        SELECT
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_receipts', 'SELECT'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_receipts', 'INSERT'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_receipts', 'UPDATE'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_receipts', 'DELETE'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_receipts', 'TRUNCATE'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_tombstones', 'DELETE'),
+                            has_table_privilege(current_user,
+                                'public.contact_suppression_tombstones', 'TRUNCATE'),
+                            has_table_privilege(current_user,
+                                'public.contact_person_suppressions', 'DELETE'),
+                            has_table_privilege(current_user,
+                                'public.contact_person_suppressions', 'TRUNCATE')
+                        """
+                    )
+                    receipt_privileges = cur.fetchone()
+                    if receipt_privileges and (
+                        not receipt_privileges[0]
+                        or not receipt_privileges[1]
+                        or any(receipt_privileges[2:])
+                    ):
+                        problems.append("runtime suppression-table privileges are unsafe")
+
+                    cur.execute(
+                        """
+                        SELECT i.relname
+                        FROM pg_class i
+                        JOIN pg_namespace n ON n.oid = i.relnamespace
+                        JOIN pg_index ix ON ix.indexrelid = i.oid
+                        WHERE n.nspname = 'public' AND i.relname = ANY(%s)
+                          AND ix.indisvalid AND ix.indisready
                         """,
                         (list(_READINESS_REQUIRED_INDEXES),),
                     )
@@ -915,7 +1260,9 @@ def readyz() -> JSONResponse:
                     ]
                     cur.execute(
                         """
-                        SELECT c.relname, con.conname
+                        SELECT c.relname, con.conname, con.contype,
+                               con.confdeltype, con.convalidated,
+                               pg_get_constraintdef(con.oid)
                         FROM pg_constraint con
                         JOIN pg_class c ON c.oid = con.conrelid
                         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -923,11 +1270,65 @@ def readyz() -> JSONResponse:
                         """,
                         (expected_constraint_names,),
                     )
-                    found_constraints = {(row[0], row[1]) for row in cur.fetchall()}
+                    found_constraints = {
+                        (row[0], row[1]): {
+                            "type": row[2],
+                            "delete": row[3],
+                            "validated": row[4],
+                            "definition": _normalize_sql_definition(row[5]),
+                        }
+                        for row in cur.fetchall()
+                    }
                     for table, constraints in _READINESS_REQUIRED_CONSTRAINTS.items():
                         for constraint in constraints:
-                            if (table, constraint) not in found_constraints:
+                            found_constraint = found_constraints.get((table, constraint))
+                            if not found_constraint or not found_constraint["validated"]:
                                 problems.append(f"missing constraint: {table}.{constraint}")
+
+                    for key, expected_definition in _READINESS_EXPECTED_CHECK_DEFINITIONS.items():
+                        found_constraint = found_constraints.get(key)
+                        if found_constraint and (
+                            found_constraint["type"] != "c"
+                            or found_constraint["definition"] != expected_definition
+                        ):
+                            problems.append("constraint definition unexpected: " + ".".join(key))
+
+                    for key, expected in _READINESS_EXPECTED_STRUCTURAL_DEFINITIONS.items():
+                        expected_type, expected_definition = expected
+                        found_constraint = found_constraints.get(key)
+                        if found_constraint and (
+                            found_constraint["type"] != expected_type
+                            or found_constraint["definition"] != expected_definition
+                        ):
+                            problems.append("constraint definition unexpected: " + ".".join(key))
+
+                    person_fk = found_constraints.get(
+                        (
+                            "contact_person_suppressions",
+                            "contact_person_suppressions_global_candidate_fkey",
+                        )
+                    )
+                    if person_fk and (person_fk["type"] != "f" or person_fk["delete"] != "r"):
+                        problems.append(
+                            "constraint definition unexpected: "
+                            "contact_person_suppressions."
+                            "contact_person_suppressions_global_candidate_fkey"
+                        )
+                    receipt_event_unique = found_constraints.get(
+                        (
+                            "contact_suppression_receipts",
+                            "contact_suppression_receipts_provider_event_unique",
+                        )
+                    )
+                    if receipt_event_unique and (
+                        receipt_event_unique["type"] != "u"
+                        or receipt_event_unique["definition"] != "unique(issuer,provider_event_id)"
+                    ):
+                        problems.append(
+                            "constraint definition unexpected: "
+                            "contact_suppression_receipts."
+                            "contact_suppression_receipts_provider_event_unique"
+                        )
 
                     if PUBLIC_PROFILE_SEARCH_ENABLED and not (
                         set(_READINESS_PUBLIC_COLUMNS) - public_columns
@@ -1012,6 +1413,20 @@ def readyz() -> JSONResponse:
                                     "runtime role owns candidate tables (RLS not effective): "
                                     + ", ".join(sorted(owned))
                                 )
+                            owned_suppression = sorted(
+                                table
+                                for table, owner in suppression_owners.items()
+                                if owner == role_name
+                            )
+                            if owned_suppression:
+                                problems.append(
+                                    "runtime role owns suppression tables: "
+                                    + ", ".join(owned_suppression)
+                                )
+                            if sequence_row and sequence_row[2] == role_name:
+                                problems.append("runtime role owns suppression receipt sequence")
+                            if suppression_function and suppression_function[5] == role_name:
+                                problems.append("runtime role owns append-only receipt function")
 
                         # 5. The runtime role must not hold admin_role, even
                         # through inherited (indirect) membership

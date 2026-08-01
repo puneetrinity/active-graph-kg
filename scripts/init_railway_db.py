@@ -70,9 +70,18 @@ CHECKSUM_TRANSITIONS: dict[str, dict[str, str]] = {
 # stray duplicate must not vouch for a partially migrated legacy database.
 # Previously-baselined ledger rows are re-verified on every boot.
 # Forms: ("table", name) | ("column", table, column) | ("index", name)
-#        | ("constraint", name) | ("policy", table, name)
-#        | ("function", name) | ("trigger", table, name)
+#        | ("constraint", name)
+#        | ("constraint_definition", table, name, definition)
+#        | ("constraint_definition", table, name, type, definition)
+#        | ("policy", table, name) | ("function", name)
+#        | ("trigger_function", name) | ("trigger_function_body", name, body)
+#        | ("trigger", table, name[, function, tgtype])
 #        | ("notnull", table, column) | ("forcerls", table)
+#        | ("sequence", name) | ("serial", table, column, sequence)
+#        | ("fk_delete", table, constraint, action)
+#        | ("unique", table, constraint, comma-separated-columns)
+#        | ("column_type", table, column, format_type)
+#        | ("default", table, column, normalized-expression)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
     "004_add_external_id_index.sql": [
@@ -330,7 +339,224 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
         ("notnull", "public_candidate_market_memberships", "last_observed_at"),
         ("index", "idx_pcmm_market_last_observed"),
     ],
+    "022_contact_suppression_person_and_audit.sql": [
+        ("table", "contact_person_suppressions"),
+        ("column", "contact_person_suppressions", "global_candidate_id"),
+        ("column", "contact_person_suppressions", "reason"),
+        ("column", "contact_person_suppressions", "first_observed_at"),
+        ("column", "contact_person_suppressions", "last_observed_at"),
+        ("column", "contact_person_suppressions", "provider_event_id"),
+        ("column_type", "contact_person_suppressions", "global_candidate_id", "uuid"),
+        ("column_type", "contact_person_suppressions", "reason", "text"),
+        (
+            "column_type",
+            "contact_person_suppressions",
+            "first_observed_at",
+            "timestamp with time zone",
+        ),
+        (
+            "column_type",
+            "contact_person_suppressions",
+            "last_observed_at",
+            "timestamp with time zone",
+        ),
+        ("column_type", "contact_person_suppressions", "provider_event_id", "text"),
+        ("default", "contact_person_suppressions", "first_observed_at", "now()"),
+        ("default", "contact_person_suppressions", "last_observed_at", "now()"),
+        ("notnull", "contact_person_suppressions", "global_candidate_id"),
+        ("notnull", "contact_person_suppressions", "reason"),
+        ("notnull", "contact_person_suppressions", "first_observed_at"),
+        ("notnull", "contact_person_suppressions", "last_observed_at"),
+        ("notnull", "contact_person_suppressions", "provider_event_id"),
+        ("constraint", "contact_person_suppressions_pkey"),
+        ("constraint", "contact_person_suppressions_global_candidate_fkey"),
+        ("constraint", "contact_person_suppression_reason_check"),
+        ("constraint", "contact_person_suppression_provider_event_hash"),
+        (
+            "constraint_definition",
+            "contact_person_suppressions",
+            "contact_person_suppressions_pkey",
+            "p",
+            "primarykey(global_candidate_id)",
+        ),
+        (
+            "constraint_definition",
+            "contact_person_suppressions",
+            "contact_person_suppressions_global_candidate_fkey",
+            "f",
+            "foreignkey(global_candidate_id)referencesglobal_candidates(id)ondeleterestrict",
+        ),
+        (
+            "constraint_definition",
+            "contact_person_suppressions",
+            "contact_person_suppression_reason_check",
+            "check((reason='complaint'))",
+        ),
+        (
+            "constraint_definition",
+            "contact_person_suppressions",
+            "contact_person_suppression_provider_event_hash",
+            "check((provider_event_id~'^[0-9a-f]{64}$'))",
+        ),
+        (
+            "fk_delete",
+            "contact_person_suppressions",
+            "contact_person_suppressions_global_candidate_fkey",
+            "r",
+        ),
+        ("table", "contact_suppression_receipts"),
+        ("column", "contact_suppression_receipts", "id"),
+        ("column", "contact_suppression_receipts", "email_hash"),
+        ("column", "contact_suppression_receipts", "global_candidate_id"),
+        ("column", "contact_suppression_receipts", "signal_candidate_id"),
+        ("column", "contact_suppression_receipts", "reason"),
+        ("column", "contact_suppression_receipts", "scope"),
+        ("column", "contact_suppression_receipts", "evidence_present"),
+        ("column", "contact_suppression_receipts", "tenant_id"),
+        ("column", "contact_suppression_receipts", "issuer"),
+        ("column", "contact_suppression_receipts", "actor_id"),
+        ("column", "contact_suppression_receipts", "actor_type"),
+        ("column", "contact_suppression_receipts", "provider_event_id"),
+        ("column", "contact_suppression_receipts", "created_at"),
+        ("column_type", "contact_suppression_receipts", "id", "bigint"),
+        ("column_type", "contact_suppression_receipts", "email_hash", "text"),
+        ("column_type", "contact_suppression_receipts", "global_candidate_id", "uuid"),
+        ("column_type", "contact_suppression_receipts", "signal_candidate_id", "text"),
+        ("column_type", "contact_suppression_receipts", "reason", "text"),
+        ("column_type", "contact_suppression_receipts", "scope", "text"),
+        ("column_type", "contact_suppression_receipts", "evidence_present", "boolean"),
+        ("column_type", "contact_suppression_receipts", "tenant_id", "text"),
+        ("column_type", "contact_suppression_receipts", "issuer", "text"),
+        ("column_type", "contact_suppression_receipts", "actor_id", "text"),
+        ("column_type", "contact_suppression_receipts", "actor_type", "text"),
+        ("column_type", "contact_suppression_receipts", "provider_event_id", "text"),
+        (
+            "column_type",
+            "contact_suppression_receipts",
+            "created_at",
+            "timestamp with time zone",
+        ),
+        ("default", "contact_suppression_receipts", "created_at", "now()"),
+        ("notnull", "contact_suppression_receipts", "id"),
+        ("notnull", "contact_suppression_receipts", "email_hash"),
+        ("notnull", "contact_suppression_receipts", "reason"),
+        ("notnull", "contact_suppression_receipts", "scope"),
+        ("notnull", "contact_suppression_receipts", "evidence_present"),
+        ("notnull", "contact_suppression_receipts", "tenant_id"),
+        ("notnull", "contact_suppression_receipts", "issuer"),
+        ("notnull", "contact_suppression_receipts", "actor_id"),
+        ("notnull", "contact_suppression_receipts", "actor_type"),
+        ("notnull", "contact_suppression_receipts", "provider_event_id"),
+        ("notnull", "contact_suppression_receipts", "created_at"),
+        ("constraint", "contact_suppression_receipts_pkey"),
+        ("constraint", "contact_suppression_receipt_email_hash_check"),
+        ("constraint", "contact_suppression_receipt_signal_candidate_nonblank"),
+        ("constraint", "contact_suppression_receipt_tenant_nonblank"),
+        ("constraint", "contact_suppression_receipt_provider_event_hash"),
+        ("constraint", "contact_suppression_receipt_authority_check"),
+        ("constraint", "contact_suppression_receipt_scope_reason_check"),
+        ("constraint", "contact_suppression_receipts_provider_event_unique"),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipts_pkey",
+            "p",
+            "primarykey(id)",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_email_hash_check",
+            "check((email_hash~'^[0-9a-f]{64}$'))",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_signal_candidate_nonblank",
+            "check(((signal_candidate_idisnull)or(btrim(signal_candidate_id)<>'')))",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_tenant_nonblank",
+            "check(((btrim(tenant_id)<>'')and(tenant_id<>'__quarantine__')))",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_provider_event_hash",
+            "check((provider_event_id~'^[0-9a-f]{64}$'))",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_authority_check",
+            "check((((btrim(issuer)<>''::text)and(btrim(actor_id)<>''::text))and(actor_type='service'::text)))",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_receipts",
+            "contact_suppression_receipt_scope_reason_check",
+            "check((((reason='hard_bounce')and(scope='address'))or"
+            "((reason='complaint')and(scope='person')and(global_candidate_idisnotnull)"
+            "and(signal_candidate_idisnotnull))))",
+        ),
+        (
+            "unique",
+            "contact_suppression_receipts",
+            "contact_suppression_receipts_provider_event_unique",
+            "issuer,provider_event_id",
+        ),
+        ("index", "idx_contact_suppression_receipts_email_hash"),
+        ("index", "idx_contact_suppression_receipts_candidate"),
+        ("index", "idx_contact_suppression_receipts_tenant_created"),
+        ("sequence", "contact_suppression_receipts_id_seq"),
+        (
+            "serial",
+            "contact_suppression_receipts",
+            "id",
+            "contact_suppression_receipts_id_seq",
+        ),
+        ("trigger_function", "contact_suppression_receipts_append_only"),
+        (
+            "trigger_function_body",
+            "contact_suppression_receipts_append_only",
+            "beginraiseexception'contact_suppression_receiptsisappend-only(attempted%)',tg_op;end;",
+        ),
+        (
+            "trigger",
+            "contact_suppression_receipts",
+            "contact_suppression_receipts_no_mutation",
+            "contact_suppression_receipts_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "contact_suppression_receipts",
+            "contact_suppression_receipts_no_truncate",
+            "contact_suppression_receipts_append_only",
+            "34",
+        ),
+        (
+            "constraint_definition",
+            "contact_suppression_tombstones",
+            "contact_suppression_reason_check",
+            "check((reason=any(array['hard_bounce','complaint'])))",
+        ),
+        ("constraint", "contact_suppression_provider_event_hash"),
+        (
+            "constraint_definition",
+            "contact_suppression_tombstones",
+            "contact_suppression_provider_event_hash",
+            "check(((provider_event_idisnull)or(provider_event_id~'^[0-9a-f]{64}$')))",
+        ),
+        ("forcerls", "candidate_contact_evidence"),
+    ],
 }
+
+
+def _normalize_sql_definition(value: str) -> str:
+    return re.sub(r"\s+", "", value.lower()).replace("::text", "")
 
 
 def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
@@ -349,24 +575,89 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         )
     elif kind == "index":
         cur.execute(
-            "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = %s",
+            "SELECT 1 FROM pg_class i "
+            "JOIN pg_namespace n ON n.oid = i.relnamespace "
+            "JOIN pg_index ix ON ix.indexrelid = i.oid "
+            "WHERE n.nspname = 'public' AND i.relname = %s "
+            "AND ix.indisvalid AND ix.indisready",
             (check[1],),
         )
     elif kind == "constraint":
-        cur.execute("SELECT 1 FROM pg_constraint WHERE conname = %s", (check[1],))
+        cur.execute(
+            "SELECT 1 FROM pg_constraint con "
+            "JOIN pg_namespace n ON n.oid = con.connamespace "
+            "WHERE n.nspname = 'public' AND con.conname = %s AND con.convalidated",
+            (check[1],),
+        )
+    elif kind == "constraint_definition":
+        cur.execute(
+            "SELECT con.contype, con.convalidated, pg_get_constraintdef(con.oid) "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND con.conname = %s",
+            (check[1], check[2]),
+        )
+        row = cur.fetchone()
+        expected_type = check[3] if len(check) == 5 else "c"
+        expected_definition = check[4] if len(check) == 5 else check[3]
+        return bool(
+            row
+            and row[0] == expected_type
+            and row[1]
+            and _normalize_sql_definition(row[2]) == expected_definition
+        )
     elif kind == "policy":
         cur.execute(
             "SELECT 1 FROM pg_policies WHERE tablename = %s AND policyname = %s",
             (check[1], check[2]),
         )
     elif kind == "function":
-        cur.execute("SELECT 1 FROM pg_proc WHERE proname = %s", (check[1],))
-    elif kind == "trigger":
         cur.execute(
-            "SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
-            "WHERE c.relname = %s AND t.tgname = %s",
-            (check[1], check[2]),
+            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = %s",
+            (check[1],),
         )
+    elif kind == "trigger_function":
+        cur.execute(
+            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = %s "
+            "AND p.pronargs = 0 AND p.prorettype = 'trigger'::regtype",
+            (check[1],),
+        )
+    elif kind == "trigger_function_body":
+        cur.execute(
+            "SELECT p.pronargs, p.prorettype = 'trigger'::regtype, l.lanname, "
+            "p.prosecdef, p.prosrc "
+            "FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "JOIN pg_language l ON l.oid = p.prolang "
+            "WHERE n.nspname = 'public' AND p.proname = %s",
+            (check[1],),
+        )
+        row = cur.fetchone()
+        return bool(
+            row
+            and row[0] == 0
+            and row[1]
+            and row[2] == "plpgsql"
+            and not row[3]
+            and _normalize_sql_definition(row[4]) == check[2]
+        )
+    elif kind == "trigger":
+        sql_text = (
+            "SELECT 1 FROM pg_trigger t "
+            "JOIN pg_class c ON c.oid = t.tgrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_proc p ON p.oid = t.tgfoid "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND t.tgname = %s "
+            "AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A')"
+        )
+        params: tuple[str, ...] = (check[1], check[2])
+        if len(check) == 5:
+            sql_text += " AND p.proname = %s AND t.tgtype = %s"
+            params += (check[3], check[4])
+        cur.execute(sql_text, params)
     elif kind == "notnull":
         cur.execute(
             "SELECT 1 FROM information_schema.columns "
@@ -380,6 +671,68 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
             "WHERE n.nspname = 'public' AND c.relname = %s "
             "AND c.relrowsecurity AND c.relforcerowsecurity",
             (check[1],),
+        )
+    elif kind == "sequence":
+        cur.execute(
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND c.relkind = 'S'",
+            (check[1],),
+        )
+    elif kind == "serial":
+        cur.execute(
+            "SELECT 1 FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND a.attname = %s "
+            "AND pg_get_serial_sequence(%s, %s) = %s "
+            "AND lower(pg_get_expr(d.adbin, d.adrelid)) LIKE 'nextval(%%'",
+            (
+                check[1],
+                check[2],
+                f"public.{check[1]}",
+                check[2],
+                f"public.{check[3]}",
+            ),
+        )
+    elif kind == "fk_delete":
+        cur.execute(
+            "SELECT 1 FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s "
+            "AND con.conname = %s AND con.contype = 'f' "
+            "AND con.confdeltype = %s AND con.convalidated",
+            (check[1], check[2], check[3]),
+        )
+    elif kind == "unique":
+        cur.execute(
+            "SELECT 1 FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s "
+            "AND con.conname = %s AND con.contype = 'u' AND con.convalidated "
+            "AND replace(lower(pg_get_constraintdef(con.oid)), ' ', '') = %s",
+            (check[1], check[2], f"unique({check[3].lower()})"),
+        )
+    elif kind == "column_type":
+        cur.execute(
+            "SELECT 1 FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND a.attname = %s "
+            "AND NOT a.attisdropped AND format_type(a.atttypid, a.atttypmod) = %s",
+            (check[1], check[2], check[3]),
+        )
+    elif kind == "default":
+        cur.execute(
+            "SELECT 1 FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND a.attname = %s "
+            "AND replace(lower(pg_get_expr(d.adbin, d.adrelid)), ' ', '') = %s",
+            (check[1], check[2], check[3].lower().replace(" ", "")),
         )
     else:
         return False
@@ -600,6 +953,18 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
             print(f"ERROR: migration {migration_file} failed: {e}")
             sys.exit(1)
 
+        # IF NOT EXISTS can make a partially pre-existing table look like a
+        # successful migration. Re-prove migrations with an object manifest
+        # before writing their ledger row, not only after duplicate errors.
+        if migration_file in BASELINE_VERIFIERS:
+            ok, detail = _verify_baseline(cur, migration_file)
+            if not ok:
+                print(
+                    f"ERROR: migration {migration_file} completed but failed "
+                    f"post-apply verification: {detail}. The database is partially migrated."
+                )
+                sys.exit(1)
+
         cur.execute(
             "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
             (migration_file, checksum),
@@ -680,6 +1045,18 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
         ).format(role_ident)
     )
 
+    # Compliance state is intentionally non-destructive. The API may upsert
+    # tombstones/person suppressions, and may select+insert audit receipts, but
+    # it must never erase suppression history or rewrite append-only receipts.
+    cur.execute(
+        sql.SQL(
+            "REVOKE DELETE, TRUNCATE ON "
+            "contact_suppression_tombstones, contact_person_suppressions, "
+            "contact_suppression_receipts FROM {}"
+        ).format(role_ident)
+    )
+    cur.execute(sql.SQL("REVOKE UPDATE ON contact_suppression_receipts FROM {}").format(role_ident))
+
     # The runtime role must never hold the admin_role RLS bypass — including
     # through inherited (indirect) membership.
     cur.execute("SELECT pg_has_role(%s, 'admin_role', 'MEMBER')", (role,))
@@ -700,7 +1077,7 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
             role_ident
         )
     )
-    print(f"✓ Runtime role {role} granted table access (no ownership; ledger read-only)")
+    print(f"✓ Runtime role {role} granted table access (no ownership; ledger/receipts hardened)")
 
 
 def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:

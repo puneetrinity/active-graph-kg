@@ -16,9 +16,14 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from activekg.api.auth import get_jwt_claims, require_scope
+from activekg.api.auth import (
+    CONTACT_SUPPRESSION_ACTOR_ID,
+    CONTACT_SUPPRESSION_ISSUER,
+    get_jwt_claims,
+    require_scope,
+)
 from activekg.common.logger import get_enhanced_logger
 from activekg.embedding.global_candidates import (  # noqa: F401 — shared with the embedding producer
     PUBLIC_EMBED_VERSION,
@@ -339,8 +344,6 @@ class ContactEvidenceRecord(BaseModel):
         "found",
         "verified",
         "soft_bounce",
-        "hard_bounce",
-        "complaint",
         "invalid",
     ] = "found"
     bounce_reason: str | None = None
@@ -351,9 +354,15 @@ class ContactEvidenceLookup(BaseModel):
 
 
 class ContactSuppressionRecord(BaseModel):
-    email: str
+    model_config = ConfigDict(extra="forbid")
+
+    # Flow normalizes and hashes the provider address before durable storage.
+    # Memory needs only that hash to fence matching evidence, so the privileged
+    # suppression path never receives or persists the raw address.
+    email_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     reason: Literal["hard_bounce", "complaint"]
-    provider_event_id: str | None = None
+    provider_event_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    signal_candidate_id: str | None = Field(default=None, max_length=512)
 
 
 class PublicMarketExclusionRequest(BaseModel):
@@ -510,7 +519,7 @@ def _row_to_dict(cur: psycopg.Cursor, row: tuple) -> dict[str, Any]:
 
 
 _CONTACT_PROVIDERS = {"fullenrich", "enrichlayer"}
-_CONTACT_STATUSES = {"found", "verified", "soft_bounce", "hard_bounce", "complaint", "invalid"}
+_CONTACT_STATUSES = {"found", "verified", "soft_bounce", "invalid"}
 _PUBLIC_JOB_SCALAR_FIELDS = {
     "company_name",
     "title",
@@ -529,49 +538,23 @@ _PUBLIC_JOB_SCALAR_FIELDS = {
 _PUBLIC_JOB_LIST_FIELDS = {"company_industries"}
 
 
-UNOWNED_SUPPRESSION_SCOPE: str = "contact:suppress_unowned"
-
-# Issuers trusted to suppress an address they hold no evidence for. This is a
-# Flow-only capability: Flow owns the provider webhook that observes bounces and
-# complaints. Kept as an allowlist so no future issuer inherits it silently.
-UNOWNED_SUPPRESSION_ISSUERS: frozenset[str] = frozenset(
-    issuer for issuer in (os.getenv("FLOW_JWT_ISSUER", "vantahire"),) if issuer and issuer.strip()
-)
+CONTACT_SUPPRESSION_SCOPE: str = "contact:suppress"
 
 
-def _require_unowned_suppression_authority(claims: Any) -> None:
-    """Gate the evidence-absent suppression path.
-
-    Suppressing an address the caller owns no evidence for can tombstone ANY
-    address platform-wide, so `contact:write` (which every enrichment caller
-    holds) is not sufficient. Require a dedicated scope AND a verified service
-    issuer. The provider event id is audit data and is deliberately NOT treated
-    as authorization: it is attacker-suppliable.
-    """
-    from activekg.api.auth import JWT_ENABLED
-
-    if not JWT_ENABLED:
-        return
+def _require_contact_suppression_authority(claims: Any) -> None:
+    """Restrict global suppression to Flow's verified service identity."""
     scopes = set(getattr(claims, "scopes", []) or [])
-    if UNOWNED_SUPPRESSION_SCOPE not in scopes:
+    if CONTACT_SUPPRESSION_SCOPE not in scopes:
         raise HTTPException(
             status_code=403,
-            detail=(
-                "Insufficient permissions. Suppressing an address without "
-                f"tenant-owned evidence requires scope: {UNOWNED_SUPPRESSION_SCOPE}"
-            ),
+            detail=f"Insufficient permissions. Required scope: {CONTACT_SUPPRESSION_SCOPE}",
         )
     if getattr(claims, "actor_type", None) != "service":
-        raise HTTPException(
-            status_code=403,
-            detail="Only service identities may suppress without tenant-owned evidence",
-        )
-    issuer = getattr(claims, "issuer", None)
-    if issuer not in UNOWNED_SUPPRESSION_ISSUERS:
-        raise HTTPException(
-            status_code=403,
-            detail="Issuer is not trusted to suppress without tenant-owned evidence",
-        )
+        raise HTTPException(status_code=403, detail="Only service identities may suppress contact")
+    if getattr(claims, "issuer", None) != CONTACT_SUPPRESSION_ISSUER:
+        raise HTTPException(status_code=403, detail="Issuer is not trusted to suppress contact")
+    if getattr(claims, "actor_id", None) != CONTACT_SUPPRESSION_ACTOR_ID:
+        raise HTTPException(status_code=403, detail="Service subject may not suppress contact")
 
 
 def _tenant_from_claims(claims: Any) -> str:
@@ -594,6 +577,35 @@ def _signal_id_normalized(raw: str) -> str:
         return normalize_identifier("signal_candidate_id", raw)
     except IdentifierNormalizationError as exc:
         raise HTTPException(status_code=400, detail=f"invalid signal_candidate_id: {exc}") from exc
+
+
+def _resolve_suppression_candidate(
+    cur: psycopg.Cursor, *, tenant_id: str, signal_candidate_id: str
+) -> UUID:
+    """Resolve Flow's correlated Signal identity within the calling tenant."""
+    normalized = _signal_id_normalized(signal_candidate_id)
+    cur.execute(
+        """
+        SELECT c.global_candidate_id
+        FROM candidate_identifiers ci
+        JOIN candidates c
+          ON c.candidate_id = ci.candidate_id
+         AND c.tenant_id = ci.tenant_id
+        WHERE ci.tenant_id = %s
+          AND ci.identifier_type = 'signal_candidate_id'
+          AND ci.value_normalized = %s
+        """,
+        (tenant_id, normalized),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        # A complaint cannot be acknowledged as address-only. Flow retains its
+        # durable intent and retries while the Signal/global mirror is repaired.
+        raise HTTPException(
+            status_code=503,
+            detail="complaint identity is not linked to global memory; retry suppression",
+        )
+    return UUID(str(row[0]))
 
 
 _PUBLIC_EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
@@ -2087,11 +2099,7 @@ def record_contact_evidence(
                 (email_hash,),
             )
             existing_tombstone = cur.fetchone()
-            suppressed_at = (
-                datetime.now().astimezone()
-                if status in {"hard_bounce", "complaint"} or existing_tombstone
-                else None
-            )
+            suppressed_at = datetime.now().astimezone() if existing_tombstone else None
             cur.execute(
                 """
                 INSERT INTO candidate_contact_evidence
@@ -2146,23 +2154,6 @@ def record_contact_evidence(
                 ),
             )
             evidence_id = str(cur.fetchone()[0])
-            if status in {"hard_bounce", "complaint"}:
-                cur.execute(
-                    """
-                    INSERT INTO contact_suppression_tombstones
-                        (email_hash, global_candidate_id, reason, source_evidence_id)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (email_hash) DO UPDATE SET
-                        global_candidate_id = COALESCE(
-                            contact_suppression_tombstones.global_candidate_id,
-                            EXCLUDED.global_candidate_id
-                        ),
-                        reason = EXCLUDED.reason,
-                        last_observed_at = now(),
-                        source_evidence_id = EXCLUDED.source_evidence_id
-                    """,
-                    (email_hash, candidate_id, status, evidence_id),
-                )
             _choose_primary_contact(cur, tenant_id=tenant_id, candidate_id=candidate_id)
             selected = _selected_contact_state(cur, tenant_id=tenant_id, candidate_id=candidate_id)
         conn.commit()
@@ -2216,7 +2207,7 @@ def lookup_contact_evidence(
 
 @router.post(
     "/contact-evidence/suppress",
-    dependencies=[Depends(require_scope("contact:write"))],
+    dependencies=[Depends(require_scope(CONTACT_SUPPRESSION_SCOPE))],
 )
 def suppress_contact_evidence(
     body: ContactSuppressionRecord,
@@ -2232,16 +2223,82 @@ def suppress_contact_evidence(
         same person reachable at a different address, including by another org.
     """
     _require_enabled()
-    _tenant_from_claims(claims)
+    _require_contact_suppression_authority(claims)
+    tenant_id = _tenant_from_claims(claims)
     reason = body.reason.strip().lower()
     if reason not in {"hard_bounce", "complaint"}:
         raise HTTPException(status_code=400, detail="unsupported suppression reason")
-    provider_event_id = (body.provider_event_id or "").strip() or None
-    _email, email_hash = _normalize_email(body.email)
-    tenant_id = getattr(claims, "tenant_id", None)
+    provider_event_id = body.provider_event_id.strip()
+    if not provider_event_id:
+        raise HTTPException(status_code=422, detail="provider_event_id is required")
+    raw_signal_candidate_id = (body.signal_candidate_id or "").strip()
+    if reason == "complaint" and not raw_signal_candidate_id:
+        raise HTTPException(
+            status_code=422,
+            detail="signal_candidate_id is required for complaint suppression",
+        )
+    email_hash = body.email_hash
+    signal_candidate_id = (
+        _signal_id_normalized(raw_signal_candidate_id) if reason == "complaint" else None
+    )
+    scope = "person" if reason == "complaint" else "address"
+    issuer = getattr(claims, "issuer", None)
+    actor_id = getattr(claims, "actor_id", None)
+    actor_type = getattr(claims, "actor_type", None)
+    request_identity = (
+        email_hash,
+        signal_candidate_id,
+        reason,
+        scope,
+        tenant_id,
+        issuer,
+        actor_id,
+        actor_type,
+    )
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"contact-suppression:{issuer}:{provider_event_id}",),
+            )
+            cur.execute(
+                """
+                SELECT email_hash, signal_candidate_id, reason, scope, tenant_id,
+                       issuer, actor_id, actor_type, evidence_present,
+                       global_candidate_id
+                FROM contact_suppression_receipts
+                WHERE issuer = %s AND provider_event_id = %s
+                """,
+                (issuer, provider_event_id),
+            )
+            existing_receipt = cur.fetchone()
+            if existing_receipt is not None:
+                if existing_receipt[:8] != request_identity:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="provider_event_id was already used for a different suppression",
+                    )
+                conn.commit()
+                return {
+                    "suppressed": True,
+                    "reason": reason,
+                    "evidence": "present" if existing_receipt[8] else "absent",
+                    "scope": scope,
+                    "global_candidate_id": (
+                        str(existing_receipt[9]) if existing_receipt[9] is not None else None
+                    ),
+                    "idempotent": True,
+                }
+
+            complaint_candidate_id: UUID | None = None
+            if reason == "complaint":
+                complaint_candidate_id = _resolve_suppression_candidate(
+                    cur,
+                    tenant_id=tenant_id,
+                    signal_candidate_id=signal_candidate_id or "",
+                )
+
             cur.execute(
                 """
                 SELECT id, global_candidate_id
@@ -2254,25 +2311,10 @@ def suppress_contact_evidence(
             )
             owned_evidence = cur.fetchone()
             evidence_present = owned_evidence is not None
-
             if evidence_present:
-                evidence_id, candidate_id = owned_evidence
+                evidence_id, evidence_candidate_id = owned_evidence
             else:
-                # Suppressing an address this tenant owns no evidence for is a
-                # PRIVILEGED action: it can tombstone any address platform-wide
-                # with no provable relationship to the caller. It therefore needs
-                # a dedicated Flow-only scope from a verified service issuer.
-                # provider_event_id is audit data, never authorization.
-                _require_unowned_suppression_authority(claims)
-                if provider_event_id is None:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "provider_event_id is required to suppress an address "
-                            "with no tenant-owned contact evidence"
-                        ),
-                    )
-                evidence_id, candidate_id = None, None
+                evidence_id, evidence_candidate_id = None, None
                 logger.warning(
                     "contact suppression without tenant-owned evidence",
                     extra={
@@ -2283,6 +2325,34 @@ def suppress_contact_evidence(
                         "provider_event_id": provider_event_id,
                     },
                 )
+
+            candidate_id = (
+                complaint_candidate_id if reason == "complaint" else evidence_candidate_id
+            )
+            cur.execute(
+                """
+                INSERT INTO contact_suppression_receipts
+                    (email_hash, global_candidate_id, signal_candidate_id, reason,
+                     scope, evidence_present, tenant_id, issuer, actor_id,
+                     actor_type, provider_event_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    email_hash,
+                    candidate_id,
+                    signal_candidate_id,
+                    reason,
+                    scope,
+                    evidence_present,
+                    tenant_id,
+                    issuer,
+                    actor_id,
+                    actor_type,
+                    provider_event_id,
+                ),
+            )
+            cur.fetchone()
 
             # Address tombstone. `reason` never DOWNGRADES: a later hard bounce
             # must not overwrite a recorded complaint, in either direction of
@@ -2295,10 +2365,14 @@ def suppress_contact_evidence(
                      provider_event_id)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (email_hash) DO UPDATE SET
-                    global_candidate_id = COALESCE(
-                        contact_suppression_tombstones.global_candidate_id,
-                        EXCLUDED.global_candidate_id
-                    ),
+                    global_candidate_id = CASE
+                        WHEN EXCLUDED.reason = 'complaint'
+                        THEN EXCLUDED.global_candidate_id
+                        ELSE COALESCE(
+                            contact_suppression_tombstones.global_candidate_id,
+                            EXCLUDED.global_candidate_id
+                        )
+                    END,
                     reason = CASE
                         WHEN contact_suppression_tombstones.reason = 'complaint'
                           OR EXCLUDED.reason = 'complaint'
@@ -2322,59 +2396,18 @@ def suppress_contact_evidence(
                 ),
             )
 
-            # A complaint is person-terminal platform-wide. Only possible when
-            # the person is resolvable; see the receipt for the unresolved case.
-            person_suppressed = False
             if reason == "complaint":
-                if candidate_id is None:
-                    cur.execute(
-                        """
-                        SELECT global_candidate_id
-                        FROM contact_suppression_tombstones
-                        WHERE email_hash = %s
-                        """,
-                        (email_hash,),
-                    )
-                    known = cur.fetchone()
-                    candidate_id = known[0] if known else None
-                if candidate_id is not None:
-                    cur.execute(
-                        """
-                        INSERT INTO contact_person_suppressions
-                            (global_candidate_id, reason, provider_event_id)
-                        VALUES (%s, 'complaint', %s)
-                        ON CONFLICT (global_candidate_id) DO UPDATE SET
-                            last_observed_at = now(),
-                            provider_event_id = COALESCE(
-                                EXCLUDED.provider_event_id,
-                                contact_person_suppressions.provider_event_id
-                            )
-                        """,
-                        (candidate_id, provider_event_id),
-                    )
-                    person_suppressed = True
-
-            # Append-only receipt: who suppressed what, under which issuer.
-            cur.execute(
-                """
-                INSERT INTO contact_suppression_receipts
-                    (email_hash, global_candidate_id, reason, scope, evidence_present,
-                     tenant_id, issuer, actor_id, actor_type, provider_event_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    email_hash,
-                    candidate_id,
-                    reason,
-                    "person" if person_suppressed else "address",
-                    evidence_present,
-                    tenant_id,
-                    getattr(claims, "issuer", None),
-                    getattr(claims, "actor_id", None),
-                    getattr(claims, "actor_type", None),
-                    provider_event_id,
-                ),
-            )
+                cur.execute(
+                    """
+                    INSERT INTO contact_person_suppressions
+                        (global_candidate_id, reason, provider_event_id)
+                    VALUES (%s, 'complaint', %s)
+                    ON CONFLICT (global_candidate_id) DO UPDATE SET
+                        last_observed_at = now(),
+                        provider_event_id = EXCLUDED.provider_event_id
+                    """,
+                    (candidate_id, provider_event_id),
+                )
 
             if evidence_present:
                 # RLS intentionally limits this maintenance update to the caller's
@@ -2400,7 +2433,9 @@ def suppress_contact_evidence(
             "suppressed": True,
             "reason": reason,
             "evidence": "present" if evidence_present else "absent",
-            "scope": "person" if person_suppressed else "address",
+            "scope": scope,
+            "global_candidate_id": str(candidate_id) if candidate_id is not None else None,
+            "idempotent": False,
         }
     except Exception:
         conn.rollback()

@@ -28,6 +28,24 @@ TENANT_B = f"public_test_b_{uuid.uuid4().hex[:8]}"
 VECTOR = "[" + ",".join(["1"] + ["0"] * 383) + "]"
 
 
+def _suppression_claims(tenant_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        tenant_id=tenant_id,
+        actor_id="vantahire-backend",
+        actor_type="service",
+        scopes=["contact:suppress"],
+        issuer="vantahire",
+    )
+
+
+def _provider_event_id(label: str) -> str:
+    return sha256(f"{label}:{uuid.uuid4().hex}".encode()).hexdigest()
+
+
+def _email_hash(email: str) -> str:
+    return sha256(email.strip().lower().encode()).hexdigest()
+
+
 def _public_market(
     *,
     role_family: str = "backend",
@@ -366,7 +384,7 @@ def test_hard_bounce_suppresses_the_address_not_the_person(monkeypatch, public_m
     global_memory = _enable_public_api(monkeypatch)
     email = f"hard-bounce-{uuid.uuid4().hex}@example.com"
     candidate_id = public_memory_rows["public_id"]
-    claims_a = SimpleNamespace(tenant_id=TENANT_A)
+    claims_a = _suppression_claims(TENANT_A)
     claims_b = SimpleNamespace(tenant_id=TENANT_B)
 
     found = global_memory.record_contact_evidence(
@@ -382,20 +400,21 @@ def test_hard_bounce_suppresses_the_address_not_the_person(monkeypatch, public_m
     )
     assert found["state"] == "found"
 
-    bounced = global_memory.record_contact_evidence(
-        global_memory.ContactEvidenceRecord(
-            global_candidate_id=candidate_id,
-            email=email,
-            provider="fullenrich",
-            provider_record_id=f"fe-{uuid.uuid4().hex}",
-            confidence=0.9,
-            status="hard_bounce",
-            bounce_reason="provider_hard_bounce",
+    bounced = global_memory.suppress_contact_evidence(
+        global_memory.ContactSuppressionRecord(
+            email_hash=_email_hash(email),
+            reason="hard_bounce",
+            provider_event_id=_provider_event_id("hard-bounce"),
         ),
+        claims=_suppression_claims(TENANT_A),
+    )
+    assert bounced["scope"] == "address"
+    after_a = global_memory.lookup_contact_evidence(
+        global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_id]),
         claims=claims_a,
     )
-    assert bounced["state"] == "suppressed"
-    assert email not in repr(bounced)
+    assert after_a["results"][0]["state"] == "suppressed"
+    assert email not in repr(after_a)
 
     # Cross-org contact reuse is still release-gated: B may seek an alternate
     # address. One bad address must not suppress the entire person.
@@ -426,7 +445,6 @@ def test_cross_tenant_tombstone_reselects_the_callers_alternate(monkeypatch, pub
     candidate_id = public_memory_rows["public_id"]
     bad_email = f"shared-bad-{uuid.uuid4().hex}@example.com"
     alternate = f"tenant-b-alternate-{uuid.uuid4().hex}@example.com"
-    claims_a = SimpleNamespace(tenant_id=TENANT_A)
     claims_b = SimpleNamespace(tenant_id=TENANT_B)
 
     global_memory.record_contact_evidence(
@@ -451,15 +469,13 @@ def test_cross_tenant_tombstone_reselects_the_callers_alternate(monkeypatch, pub
     )
     assert selected_bad["contact"]["email"] == bad_email
 
-    global_memory.record_contact_evidence(
-        global_memory.ContactEvidenceRecord(
-            global_candidate_id=candidate_id,
-            email=bad_email,
-            provider="fullenrich",
-            confidence=0.9,
-            status="hard_bounce",
+    global_memory.suppress_contact_evidence(
+        global_memory.ContactSuppressionRecord(
+            email_hash=_email_hash(bad_email),
+            reason="hard_bounce",
+            provider_event_id=_provider_event_id("cross-tenant-hard-bounce"),
         ),
-        claims=claims_a,
+        claims=_suppression_claims(TENANT_A),
     )
 
     after_bounce = global_memory.lookup_contact_evidence(
@@ -483,7 +499,7 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
     free to mail a known-bad address under the same sender identity.
     """
     global_memory = _enable_public_api(monkeypatch)
-    claims_a = SimpleNamespace(tenant_id=TENANT_A)
+    claims_a = _suppression_claims(TENANT_A)
     claims_b = SimpleNamespace(tenant_id=TENANT_B)
     bad_email = f"no-evidence-bad-{uuid.uuid4().hex}@example.com"
 
@@ -532,24 +548,12 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
     assert selected["contact"]["email"] == bad_email
 
     try:
-        # The evidence-absent path requires a provider event id.
-        with pytest.raises(HTTPException) as unproven:
-            global_memory.suppress_contact_evidence(
-                global_memory.ContactSuppressionRecord(
-                    email=bad_email,
-                    reason="hard_bounce",
-                    provider_event_id=None,
-                ),
-                claims=claims_a,
-            )
-        assert unproven.value.status_code == 422
-
         # Tenant A suppresses despite owning no evidence — must NOT 404.
         result = global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=bad_email,
+                email_hash=_email_hash(bad_email),
                 reason="hard_bounce",
-                provider_event_id=f"brevo-{uuid.uuid4().hex}",
+                provider_event_id=_provider_event_id("no-evidence-hard-bounce"),
             ),
             claims=claims_a,
         )
@@ -582,6 +586,7 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
         assert after["results"][0]["contact"] is None
         assert after["results"][0]["reason"] == "hard_bounce"
     finally:
+        _delete_receipts(email_hash=sha256(bad_email.lower().encode()).hexdigest())
         with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -599,9 +604,11 @@ def test_suppression_without_owning_evidence_still_blocks_every_other_org(
                 cur.execute("DELETE FROM global_candidates WHERE id = %s", (candidate_id,))
 
 
-def _fresh_public_candidate(name: str) -> str:
+def _fresh_public_candidate(name: str, tenant_id: str = TENANT_A) -> tuple[str, str]:
     """Create an isolated public candidate so suppression scope is unambiguous."""
-    candidate_id = str(uuid.uuid4())
+    global_candidate_id = str(uuid.uuid4())
+    tenant_candidate_id = str(uuid.uuid4())
+    signal_candidate_id = f"signal-{name}-{uuid.uuid4().hex}"
     slug = f"{name}-{uuid.uuid4().hex[:10]}"
     with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
@@ -613,7 +620,7 @@ def _fresh_public_candidate(name: str) -> str:
                 VALUES (%s, %s, %s, %s::jsonb, now())
                 """,
                 (
-                    candidate_id,
+                    global_candidate_id,
                     slug,
                     f"https://linkedin.com/in/{slug}",
                     json.dumps({"basic_profile": {"name": "Suppression Subject"}}),
@@ -625,12 +632,62 @@ def _fresh_public_candidate(name: str) -> str:
                     (global_candidate_id, source_type, tenant_id, source_detail)
                 VALUES (%s, 'signal_sourced', NULL, '{}'::jsonb)
                 """,
-                (candidate_id,),
+                (global_candidate_id,),
             )
-    return candidate_id
+            cur.execute(
+                """
+                INSERT INTO candidates
+                    (candidate_id, tenant_id, display_name, global_candidate_id)
+                VALUES (%s, %s, 'Suppression Subject', %s)
+                """,
+                (tenant_candidate_id, tenant_id, global_candidate_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO candidate_identifiers
+                    (candidate_id, tenant_id, identifier_type, value_normalized,
+                     value_raw, source)
+                VALUES (%s, %s, 'signal_candidate_id', %s, %s, 'signal')
+                """,
+                (
+                    tenant_candidate_id,
+                    tenant_id,
+                    signal_candidate_id,
+                    signal_candidate_id,
+                ),
+            )
+    return global_candidate_id, signal_candidate_id
+
+
+def _delete_receipts(*, candidate_id: str | None = None, email_hash: str | None = None) -> None:
+    if not candidate_id and not email_hash:
+        return
+    with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE contact_suppression_receipts "
+                "DISABLE TRIGGER contact_suppression_receipts_no_mutation"
+            )
+            try:
+                if candidate_id:
+                    cur.execute(
+                        "DELETE FROM contact_suppression_receipts WHERE global_candidate_id = %s",
+                        (candidate_id,),
+                    )
+                if email_hash:
+                    cur.execute(
+                        "DELETE FROM contact_suppression_receipts WHERE email_hash = %s",
+                        (email_hash,),
+                    )
+            finally:
+                cur.execute(
+                    "ALTER TABLE contact_suppression_receipts "
+                    "ENABLE TRIGGER contact_suppression_receipts_no_mutation"
+                )
 
 
 def _purge_candidate(candidate_id: str) -> None:
+    _delete_receipts(candidate_id=candidate_id)
     with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -645,6 +702,7 @@ def _purge_candidate(candidate_id: str) -> None:
                 "DELETE FROM candidate_contact_evidence WHERE global_candidate_id = %s",
                 (candidate_id,),
             )
+            cur.execute("DELETE FROM candidates WHERE global_candidate_id = %s", (candidate_id,))
             cur.execute(
                 "DELETE FROM candidate_provenance WHERE global_candidate_id = %s",
                 (candidate_id,),
@@ -660,9 +718,9 @@ def test_complaint_is_person_terminal_across_orgs_even_with_another_address(monk
     validated address. Suppressing only the email hash would allow exactly that.
     """
     global_memory = _enable_public_api(monkeypatch)
-    claims_a = SimpleNamespace(tenant_id=TENANT_A)
+    claims_a = _suppression_claims(TENANT_A)
     claims_b = SimpleNamespace(tenant_id=TENANT_B)
-    candidate_id = _fresh_public_candidate("complaint-person")
+    candidate_id, signal_candidate_id = _fresh_public_candidate("complaint-person")
     complained = f"complained-{uuid.uuid4().hex}@example.com"
     other_address = f"other-valid-{uuid.uuid4().hex}@example.com"
 
@@ -693,9 +751,10 @@ def test_complaint_is_person_terminal_across_orgs_even_with_another_address(monk
 
         result = global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=complained,
+                email_hash=_email_hash(complained),
                 reason="complaint",
-                provider_event_id=f"brevo-{uuid.uuid4().hex}",
+                provider_event_id=_provider_event_id("person-complaint"),
+                signal_candidate_id=signal_candidate_id,
             ),
             claims=claims_a,
         )
@@ -714,6 +773,195 @@ def test_complaint_is_person_terminal_across_orgs_even_with_another_address(monk
         _purge_candidate(candidate_id)
 
 
+def test_evidence_absent_complaint_uses_explicit_signal_person_anchor(monkeypatch):
+    global_memory = _enable_public_api(monkeypatch)
+    claims_a = _suppression_claims(TENANT_A)
+    claims_b = SimpleNamespace(tenant_id=TENANT_B)
+    candidate_id, signal_candidate_id = _fresh_public_candidate("anchored-complaint")
+    complained = f"anchored-complaint-{uuid.uuid4().hex}@example.com"
+    other_address = f"anchored-alternate-{uuid.uuid4().hex}@example.com"
+
+    try:
+        selected_b = global_memory.record_contact_evidence(
+            global_memory.ContactEvidenceRecord(
+                global_candidate_id=candidate_id,
+                email=other_address,
+                provider="fullenrich",
+                confidence=0.9,
+                status="verified",
+            ),
+            claims=claims_b,
+        )
+        assert selected_b["contact"]["email"] == other_address
+
+        result = global_memory.suppress_contact_evidence(
+            global_memory.ContactSuppressionRecord(
+                email_hash=_email_hash(complained),
+                reason="complaint",
+                provider_event_id=_provider_event_id("anchored-complaint"),
+                signal_candidate_id=signal_candidate_id,
+            ),
+            claims=claims_a,
+        )
+        assert result["evidence"] == "absent"
+        assert result["scope"] == "person"
+        assert result["global_candidate_id"] == candidate_id
+
+        after_b = global_memory.lookup_contact_evidence(
+            global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_id]),
+            claims=claims_b,
+        )
+        assert after_b["results"][0]["state"] == "suppressed"
+        assert after_b["results"][0]["reason"] == "complaint"
+
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT global_candidate_id, signal_candidate_id, scope,
+                           evidence_present
+                    FROM contact_suppression_receipts
+                    WHERE global_candidate_id = %s
+                    """,
+                    (candidate_id,),
+                )
+                assert cur.fetchone() == (
+                    uuid.UUID(candidate_id),
+                    signal_candidate_id,
+                    "person",
+                    False,
+                )
+    finally:
+        _purge_candidate(candidate_id)
+
+
+def test_complaint_never_infers_person_from_shared_email(monkeypatch):
+    global_memory = _enable_public_api(monkeypatch)
+    claims = _suppression_claims(TENANT_A)
+    candidate_a, signal_a = _fresh_public_candidate("shared-email-a")
+    candidate_b, _signal_b = _fresh_public_candidate("shared-email-b")
+    shared_email = f"shared-person-{uuid.uuid4().hex}@example.com"
+    alternate_b = f"shared-person-alternate-{uuid.uuid4().hex}@example.com"
+    now = datetime.now(timezone.utc)
+
+    try:
+        global_memory.record_contact_evidence(
+            global_memory.ContactEvidenceRecord(
+                global_candidate_id=candidate_a,
+                email=shared_email,
+                provider="fullenrich",
+                confidence=0.9,
+                observed_at=now - timedelta(minutes=2),
+                status="verified",
+            ),
+            claims=claims,
+        )
+        global_memory.record_contact_evidence(
+            global_memory.ContactEvidenceRecord(
+                global_candidate_id=candidate_b,
+                email=alternate_b,
+                provider="enrichlayer",
+                confidence=0.5,
+                observed_at=now - timedelta(minutes=1),
+                status="found",
+            ),
+            claims=claims,
+        )
+        global_memory.record_contact_evidence(
+            global_memory.ContactEvidenceRecord(
+                global_candidate_id=candidate_b,
+                email=shared_email,
+                provider="fullenrich",
+                confidence=0.9,
+                observed_at=now,
+                status="verified",
+            ),
+            claims=claims,
+        )
+
+        result = global_memory.suppress_contact_evidence(
+            global_memory.ContactSuppressionRecord(
+                email_hash=_email_hash(shared_email),
+                reason="complaint",
+                provider_event_id=_provider_event_id("shared-email-complaint"),
+                signal_candidate_id=signal_a,
+            ),
+            claims=claims,
+        )
+        assert result["global_candidate_id"] == candidate_a
+
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT global_candidate_id FROM contact_person_suppressions "
+                    "WHERE global_candidate_id = ANY(%s::uuid[]) ORDER BY global_candidate_id",
+                    ([candidate_a, candidate_b],),
+                )
+                assert cur.fetchall() == [(uuid.UUID(candidate_a),)]
+
+        state_a = global_memory.lookup_contact_evidence(
+            global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_a]),
+            claims=claims,
+        )
+        state_b = global_memory.lookup_contact_evidence(
+            global_memory.ContactEvidenceLookup(global_candidate_ids=[candidate_b]),
+            claims=claims,
+        )
+        assert state_a["results"][0]["state"] == "suppressed"
+        assert state_b["results"][0]["state"] == "found"
+        assert state_b["results"][0]["contact"]["email"] == alternate_b
+    finally:
+        _purge_candidate(candidate_a)
+        _purge_candidate(candidate_b)
+
+
+def test_missing_or_cross_tenant_complaint_anchor_is_never_acknowledged(monkeypatch):
+    global_memory = _enable_public_api(monkeypatch)
+    claims_a = _suppression_claims(TENANT_A)
+    email = f"unresolved-complaint-{uuid.uuid4().hex}@example.com"
+
+    with pytest.raises(HTTPException) as missing:
+        global_memory.suppress_contact_evidence(
+            global_memory.ContactSuppressionRecord(
+                email_hash=_email_hash(email),
+                reason="complaint",
+                provider_event_id=_provider_event_id("missing-anchor"),
+            ),
+            claims=claims_a,
+        )
+    assert missing.value.status_code == 422
+
+    candidate_b, signal_b = _fresh_public_candidate("cross-tenant-anchor", TENANT_B)
+    try:
+        with pytest.raises(HTTPException) as unresolved:
+            global_memory.suppress_contact_evidence(
+                global_memory.ContactSuppressionRecord(
+                    email_hash=_email_hash(email),
+                    reason="complaint",
+                    provider_event_id=_provider_event_id("cross-tenant-anchor"),
+                    signal_candidate_id=signal_b,
+                ),
+                claims=claims_a,
+            )
+        assert unresolved.value.status_code == 503
+
+        email_hash = sha256(email.lower().encode()).hexdigest()
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM contact_suppression_tombstones WHERE email_hash = %s",
+                    (email_hash,),
+                )
+                assert cur.fetchone() is None
+                cur.execute(
+                    "SELECT 1 FROM contact_suppression_receipts WHERE email_hash = %s",
+                    (email_hash,),
+                )
+                assert cur.fetchone() is None
+    finally:
+        _purge_candidate(candidate_b)
+
+
 def test_hard_bounce_after_complaint_cannot_downgrade_the_suppression(monkeypatch):
     """Complaint outranks hard bounce regardless of arrival order.
 
@@ -722,8 +970,8 @@ def test_hard_bounce_after_complaint_cannot_downgrade_the_suppression(monkeypatc
     tombstone.
     """
     global_memory = _enable_public_api(monkeypatch)
-    claims = SimpleNamespace(tenant_id=TENANT_A)
-    candidate_id = _fresh_public_candidate("precedence")
+    claims = _suppression_claims(TENANT_A)
+    candidate_id, signal_candidate_id = _fresh_public_candidate("precedence")
     address = f"precedence-{uuid.uuid4().hex}@example.com"
     email_hash = sha256(address.lower().encode()).hexdigest()
 
@@ -740,14 +988,19 @@ def test_hard_bounce_after_complaint_cannot_downgrade_the_suppression(monkeypatc
         )
         global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=address, reason="complaint", provider_event_id=f"c-{uuid.uuid4().hex}"
+                email_hash=_email_hash(address),
+                reason="complaint",
+                provider_event_id=_provider_event_id("precedence-complaint"),
+                signal_candidate_id=signal_candidate_id,
             ),
             claims=claims,
         )
         # A hard bounce for the same address arrives afterwards.
         global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=address, reason="hard_bounce", provider_event_id=f"b-{uuid.uuid4().hex}"
+                email_hash=_email_hash(address),
+                reason="hard_bounce",
+                provider_event_id=_provider_event_id("precedence-hard-bounce"),
             ),
             claims=claims,
         )
@@ -771,10 +1024,11 @@ def test_hard_bounce_after_complaint_cannot_downgrade_the_suppression(monkeypatc
 def test_every_suppression_writes_an_append_only_receipt(monkeypatch):
     """Suppression provenance is durable and cannot be quietly rewritten."""
     global_memory = _enable_public_api(monkeypatch)
-    claims = SimpleNamespace(tenant_id=TENANT_A)
-    candidate_id = _fresh_public_candidate("receipt")
+    claims = _suppression_claims(TENANT_A)
+    candidate_id, _signal_candidate_id = _fresh_public_candidate("receipt")
     address = f"receipt-{uuid.uuid4().hex}@example.com"
     email_hash = sha256(address.lower().encode()).hexdigest()
+    event_id = _provider_event_id("receipt")
 
     try:
         global_memory.record_contact_evidence(
@@ -789,7 +1043,9 @@ def test_every_suppression_writes_an_append_only_receipt(monkeypatch):
         )
         global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=address, reason="hard_bounce", provider_event_id="evt-receipt-1"
+                email_hash=_email_hash(address),
+                reason="hard_bounce",
+                provider_event_id=event_id,
             ),
             claims=claims,
         )
@@ -798,13 +1054,28 @@ def test_every_suppression_writes_an_append_only_receipt(monkeypatch):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT reason, scope, evidence_present, tenant_id, provider_event_id
+                    SELECT id, global_candidate_id, signal_candidate_id, reason, scope,
+                           evidence_present, tenant_id, issuer, actor_id, actor_type,
+                           provider_event_id
                     FROM contact_suppression_receipts WHERE email_hash = %s
                     """,
                     (email_hash,),
                 )
                 receipt = cur.fetchone()
-                assert receipt == ("hard_bounce", "address", True, TENANT_A, "evt-receipt-1")
+                assert receipt == (
+                    receipt[0],
+                    uuid.UUID(candidate_id),
+                    None,
+                    "hard_bounce",
+                    "address",
+                    True,
+                    TENANT_A,
+                    "vantahire",
+                    "vantahire-backend",
+                    "service",
+                    event_id,
+                )
+                assert receipt[0] > 0
 
                 # Append-only: neither UPDATE nor DELETE may rewrite history.
                 for statement in (
@@ -814,17 +1085,75 @@ def test_every_suppression_writes_an_append_only_receipt(monkeypatch):
                     with pytest.raises(psycopg.errors.RaiseException):
                         cur.execute(statement, (email_hash,))
                     conn.rollback()
+                with pytest.raises(psycopg.errors.RaiseException):
+                    cur.execute("TRUNCATE contact_suppression_receipts")
+                conn.rollback()
     finally:
+        _purge_candidate(candidate_id)
+
+
+def test_exact_event_replay_ignores_later_evidence_changes(monkeypatch):
+    global_memory = _enable_public_api(monkeypatch)
+    claims = _suppression_claims(TENANT_A)
+    candidate_id, _signal_candidate_id = _fresh_public_candidate("replay")
+    address = f"replay-{uuid.uuid4().hex}@example.com"
+    email_hash = sha256(address.lower().encode()).hexdigest()
+    event_id = _provider_event_id("replay")
+    body = global_memory.ContactSuppressionRecord(
+        email_hash=email_hash,
+        reason="hard_bounce",
+        provider_event_id=event_id,
+    )
+
+    try:
+        first = global_memory.suppress_contact_evidence(body, claims=claims)
+        assert first["evidence"] == "absent"
+        assert first["global_candidate_id"] is None
+        assert first["idempotent"] is False
+
+        recorded = global_memory.record_contact_evidence(
+            global_memory.ContactEvidenceRecord(
+                global_candidate_id=candidate_id,
+                email=address,
+                provider="fullenrich",
+                confidence=0.9,
+                status="verified",
+            ),
+            claims=claims,
+        )
+        assert recorded["state"] == "suppressed"
+
+        replay = global_memory.suppress_contact_evidence(body, claims=claims)
+        assert replay["evidence"] == "absent"
+        assert replay["global_candidate_id"] is None
+        assert replay["idempotent"] is True
+
+        with pytest.raises(HTTPException) as mismatch:
+            global_memory.suppress_contact_evidence(
+                global_memory.ContactSuppressionRecord(
+                    email_hash=_email_hash(f"changed-{address}"),
+                    reason="hard_bounce",
+                    provider_event_id=event_id,
+                ),
+                claims=claims,
+            )
+        assert mismatch.value.status_code == 409
+
         with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "ALTER TABLE contact_suppression_receipts DISABLE TRIGGER contact_suppression_receipts_no_mutation"
+                    "SELECT count(*) FROM contact_suppression_receipts "
+                    "WHERE issuer = 'vantahire' AND provider_event_id = %s",
+                    (event_id,),
                 )
+                assert cur.fetchone()[0] == 1
+    finally:
+        _delete_receipts(email_hash=email_hash)
+        with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
+            with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM contact_suppression_receipts WHERE email_hash = %s", (email_hash,)
-                )
-                cur.execute(
-                    "ALTER TABLE contact_suppression_receipts ENABLE TRIGGER contact_suppression_receipts_no_mutation"
+                    "DELETE FROM contact_suppression_tombstones WHERE email_hash = %s",
+                    (email_hash,),
                 )
         _purge_candidate(candidate_id)
 
@@ -833,7 +1162,7 @@ def test_one_address_tombstone_reselects_alternates_for_every_candidate(
     monkeypatch, public_memory_rows
 ):
     global_memory = _enable_public_api(monkeypatch)
-    claims = SimpleNamespace(tenant_id=TENANT_A)
+    claims = _suppression_claims(TENANT_A)
     first_id = public_memory_rows["public_id"]
     second_id = str(uuid.uuid4())
     second_slug = f"contact-second-{uuid.uuid4().hex[:10]}"
@@ -894,9 +1223,9 @@ def test_one_address_tombstone_reselects_alternates_for_every_candidate(
 
         global_memory.suppress_contact_evidence(
             global_memory.ContactSuppressionRecord(
-                email=shared_bad,
+                email_hash=_email_hash(shared_bad),
                 reason="hard_bounce",
-                provider_event_id=f"brevo-{uuid.uuid4().hex}",
+                provider_event_id=_provider_event_id("shared-address-hard-bounce"),
             ),
             claims=claims,
         )
@@ -912,6 +1241,7 @@ def test_one_address_tombstone_reselects_alternates_for_every_candidate(
             second_id: second_alternate,
         }
     finally:
+        _delete_receipts(email_hash=sha256(shared_bad.lower().encode()).hexdigest())
         with psycopg.connect(OWNER_DSN, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
