@@ -10,6 +10,7 @@ from collections.abc import Iterable
 
 from activekg.common.logger import get_enhanced_logger
 from activekg.common.metrics import metrics
+from activekg.engine.model_config import DEFAULT_GROQ_FAST_MODEL
 
 logger = get_enhanced_logger(__name__)
 
@@ -20,7 +21,7 @@ class LLMProvider:
     def __init__(
         self,
         backend: str = "groq",
-        model: str = "mixtral-8x7b-32768",
+        model: str = DEFAULT_GROQ_FAST_MODEL,
         api_key: str | None = None,
         base_url: str | None = None,
         temperature: float = 0.1,
@@ -32,7 +33,7 @@ class LLMProvider:
             backend: "openai", "groq", or "litellm" (for multi-provider support)
             model: Model name
                 - OpenAI: "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"
-                - Groq: "mixtral-8x7b-32768", "llama2-70b-4096" (ultra-fast inference)
+                - Groq: "openai/gpt-oss-20b", "openai/gpt-oss-120b"
                 - LiteLLM: "claude-3-sonnet", "gemini-pro", etc.
             api_key: API key (defaults to env OPENAI_API_KEY, GROQ_API_KEY, or ANTHROPIC_API_KEY)
             base_url: Custom base URL (for Azure, local models, etc.)

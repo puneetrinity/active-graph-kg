@@ -10,14 +10,31 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from activekg.engine.model_config import (
+    DEFAULT_GROQ_FAST_MODEL,
+    DEFAULT_GROQ_LARGE_MODEL,
+    resolve_groq_model,
+)
 from activekg.extraction.prompt import build_extraction_prompt
 from activekg.extraction.schema import ExtractionResult
 
 logger = logging.getLogger(__name__)
 
-# Model tiers
-PRIMARY_MODEL = os.getenv("EXTRACTION_PRIMARY_MODEL", "llama-3.1-8b-instant")
-FALLBACK_MODEL = os.getenv("EXTRACTION_FALLBACK_MODEL", "llama-3.3-70b-versatile")
+
+# Model tiers are resolved when this service starts or a client is constructed.
+# Keeping resolution out of module import prevents the API process from being
+# coupled to extraction-worker-only environment variables.
+def resolve_extraction_models() -> tuple[str, str]:
+    return (
+        resolve_groq_model("EXTRACTION_PRIMARY_MODEL", DEFAULT_GROQ_FAST_MODEL),
+        resolve_groq_model("EXTRACTION_FALLBACK_MODEL", DEFAULT_GROQ_LARGE_MODEL),
+    )
+
+
+def assert_extraction_models_configured() -> None:
+    resolve_extraction_models()
+
+
 CONFIDENCE_THRESHOLD = float(os.getenv("EXTRACTION_CONFIDENCE_THRESHOLD", "0.65"))
 MAX_TOKENS = int(os.getenv("EXTRACTION_MAX_TOKENS", "1024"))
 
@@ -28,8 +45,8 @@ class ExtractionClient:
     def __init__(
         self,
         api_key: str | None = None,
-        primary_model: str = PRIMARY_MODEL,
-        fallback_model: str = FALLBACK_MODEL,
+        primary_model: str | None = None,
+        fallback_model: str | None = None,
         confidence_threshold: float = CONFIDENCE_THRESHOLD,
         max_tokens: int = MAX_TOKENS,
     ):
@@ -43,8 +60,12 @@ class ExtractionClient:
             max_tokens: Max tokens for LLM response (defaults to EXTRACTION_MAX_TOKENS env)
         """
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
-        self.primary_model = primary_model
-        self.fallback_model = fallback_model
+        self.primary_model = primary_model or resolve_groq_model(
+            "EXTRACTION_PRIMARY_MODEL", DEFAULT_GROQ_FAST_MODEL
+        )
+        self.fallback_model = fallback_model or resolve_groq_model(
+            "EXTRACTION_FALLBACK_MODEL", DEFAULT_GROQ_LARGE_MODEL
+        )
         self.confidence_threshold = confidence_threshold
         self.max_tokens = max_tokens
 
