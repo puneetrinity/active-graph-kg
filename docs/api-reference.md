@@ -113,7 +113,7 @@ Health check endpoint with system status.
     "db": {"status": "unknown"}
   },
   "llm_backend": "groq",
-  "llm_model": "llama-3.1-8b-instant"
+  "llm_model": "openai/gpt-oss-20b"
 }
 ```
 
@@ -885,7 +885,7 @@ The `/ask` endpoint detects structured query intents and applies specialized ret
 
 When `HYBRID_ROUTING_ENABLED=true`, the system routes to fast or fallback LLM:
 
-- **Fast path** (`llama-3.1-8b-instant`): High-confidence queries (top_sim >= 0.70)
+- **Fast path** (`openai/gpt-oss-20b`): High-confidence queries (top_sim >= 0.70)
 - **Fallback path** (`gpt-4o-mini`): Complex queries, low confidence, reasoning
 
 **Gating & Quality:**
@@ -2079,12 +2079,12 @@ Key environment variables:
 ### LLM (Q&A)
 - `LLM_ENABLED`: Enable `/ask` endpoint (default: `true`)
 - `LLM_BACKEND`: `groq`, `openai`, `litellm`
-- `LLM_MODEL`: Model name (default: `llama-3.1-8b-instant`)
+- `LLM_MODEL`: Model name (development default: `openai/gpt-oss-20b`; set explicitly in Railway production)
 
 ### Hybrid Routing
 - `HYBRID_ROUTING_ENABLED`: Enable fast/fallback routing (default: `false`)
 - `ASK_FAST_BACKEND`: Fast LLM backend (default: `groq`)
-- `ASK_FAST_MODEL`: Fast model (default: `llama-3.1-8b-instant`)
+- `ASK_FAST_MODEL`: Fast model (development default: `openai/gpt-oss-20b`; set explicitly in Railway production)
 - `ASK_FALLBACK_BACKEND`: Fallback backend (default: `openai`)
 - `ASK_FALLBACK_MODEL`: Fallback model (default: `gpt-4o-mini`)
 

@@ -79,6 +79,7 @@ from activekg.engine.llm_provider import (
     extract_citation_numbers,
     filter_context_by_similarity,
 )
+from activekg.engine.model_config import DEFAULT_GROQ_FAST_MODEL, resolve_model_for_backend
 from activekg.extraction.queue import (
     enqueue_extraction_job,
     extraction_queue_depth,
@@ -193,8 +194,13 @@ WEIGHTED_SEARCH_CANDIDATE_FACTOR = float(os.getenv("WEIGHTED_SEARCH_CANDIDATE_FA
 
 # LLM provider for /ask endpoint (optional, falls back gracefully)
 LLM_BACKEND = os.getenv("LLM_BACKEND", "groq")  # "openai", "groq", or "litellm"
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")  # Groq's Llama 3.1 8B (ultra-fast)
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
+LLM_MODEL = resolve_model_for_backend(
+    "LLM_MODEL",
+    DEFAULT_GROQ_FAST_MODEL,
+    backend=LLM_BACKEND,
+    enabled=LLM_ENABLED,
+)
 AUTO_EMBED_ON_CREATE = os.getenv("AUTO_EMBED_ON_CREATE", "true").lower() == "true"
 EMBEDDING_ASYNC = os.getenv("EMBEDDING_ASYNC", "false").lower() == "true"
 EMBEDDING_QUEUE_MAX_DEPTH = int(os.getenv("EMBEDDING_QUEUE_MAX_DEPTH", "5000"))
@@ -211,7 +217,12 @@ RUN_GCS_POLLER = os.getenv("RUN_GCS_POLLER", "true").lower() == "true"
 # Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
 HYBRID_ROUTING_ENABLED = os.getenv("HYBRID_ROUTING_ENABLED", "false").lower() == "true"
 ASK_FAST_BACKEND = os.getenv("ASK_FAST_BACKEND", "groq")
-ASK_FAST_MODEL = os.getenv("ASK_FAST_MODEL", "llama-3.1-8b-instant")
+ASK_FAST_MODEL = resolve_model_for_backend(
+    "ASK_FAST_MODEL",
+    DEFAULT_GROQ_FAST_MODEL,
+    backend=ASK_FAST_BACKEND,
+    enabled=LLM_ENABLED,
+)
 ASK_FALLBACK_BACKEND = os.getenv("ASK_FALLBACK_BACKEND", "openai")
 ASK_FALLBACK_MODEL = os.getenv("ASK_FALLBACK_MODEL", "gpt-4o-mini")
 

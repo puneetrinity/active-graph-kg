@@ -20,7 +20,11 @@ from typing import Any, cast
 import redis
 
 from activekg.embedding.queue import enqueue_embedding_job
-from activekg.extraction.client import ExtractionClient, ExtractionError
+from activekg.extraction.client import (
+    ExtractionClient,
+    ExtractionError,
+    assert_extraction_models_configured,
+)
 from activekg.extraction.prompt import get_extraction_version
 from activekg.extraction.queue import (
     EXTRACTION_DLQ_KEY,
@@ -365,6 +369,8 @@ def start_extraction_worker() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    assert_extraction_models_configured()
 
     dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])
     if not dsn:

@@ -20,8 +20,8 @@ POST /nodes (extract_before_embed=true)
 ```
 
 **Two-tier model fallback**:
-1. Primary: `llama-3.1-8b-instant` (fast, cheap)
-2. Fallback: `llama-3.3-70b-versatile` (if JSON invalid, missing fields, or confidence < 0.65)
+1. Primary: `openai/gpt-oss-20b` (fast path)
+2. Fallback: `openai/gpt-oss-120b` (if JSON invalid, missing fields, or confidence < 0.65)
 
 ---
 
@@ -82,8 +82,8 @@ queued → processing → ready
 | `ACTIVEKG_DSN` | — | Database connection (same as API) |
 | `REDIS_URL` | — | Redis connection |
 | `GROQ_API_KEY` | — | Groq API key (required) |
-| `EXTRACTION_PRIMARY_MODEL` | `llama-3.1-8b-instant` | Primary model |
-| `EXTRACTION_FALLBACK_MODEL` | `llama-3.3-70b-versatile` | Fallback model |
+| `EXTRACTION_PRIMARY_MODEL` | `openai/gpt-oss-20b` | Primary model; set explicitly in Railway production |
+| `EXTRACTION_FALLBACK_MODEL` | `openai/gpt-oss-120b` | Fallback model; set explicitly in Railway production |
 | `EXTRACTION_CONFIDENCE_THRESHOLD` | `0.65` | Below this triggers fallback |
 | `EXTRACTION_MAX_TOKENS` | `1024` | Max response tokens |
 | `EXTRACTION_MAX_INPUT_CHARS` | `12000` | Truncate input text |
