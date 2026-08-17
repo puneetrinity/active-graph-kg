@@ -36,6 +36,12 @@ theme:
     - content.code.copy
     - content.code.annotate
 
+# README.md is a deploy-trigger stub (see docs/README.md); index.md is the real
+# homepage. Exclude the stub so `mkdocs build --strict` does not abort on the
+# README/index conflict warning.
+exclude_docs: |
+  README.md
+
 plugins:
   - search
   - mkdocstrings  # Optional: for API docs from Python docstrings
