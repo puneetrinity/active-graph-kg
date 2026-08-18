@@ -93,19 +93,16 @@ export REDIS_URL=redis://localhost:6379/0
 - Default: 100 requests/minute per tenant
 - Adjust based on your use case
 
-### Network Security
+### Content Admission
 
-✅ **SSRF Protection**
-```bash
-# Block internal IPs (enabled by default)
-export ACTIVEKG_URL_ALLOWLIST="trusted-api.com,example.com"
-export ACTIVEKG_FILE_BASEDIRS="/opt/data,/mnt/uploads"
-```
+✅ **Keep executable payload references closed**
+- New node writes accept `payload_ref` only when omitted or JSON `null`.
+- The repository performs no URL, S3 or local-file payload fetch.
+- Use bounded inline properties or authenticated multipart upload.
 
 ✅ **Request Size Limits**
 ```bash
-export ACTIVEKG_MAX_REQUEST_BODY_BYTES=10485760  # 10MB
-export ACTIVEKG_MAX_FILE_BYTES=1048576          # 1MB
+export MAX_REQUEST_SIZE_BYTES=10485760  # 10MB
 ```
 
 ### Database Security
@@ -237,10 +234,10 @@ Active Graph KG includes the following security features:
 - Size limits on request bodies and files
 - Content-Type validation
 
-✅ **Network Security**
-- SSRF protection with IP blocklists
-- URL allowlists for external requests
-- File access restricted to base directories
+✅ **Closed External-Content Boundary**
+- New node writes accept no executable URL, S3 or local-file reference
+- Historical `payload_ref` values remain inert metadata and are never fetched
+- Supported content arrives through inline properties or bounded authenticated upload
 
 ✅ **Data Protection**
 - Encrypted connector credentials (Fernet)
@@ -276,7 +273,7 @@ Before deploying to production, verify:
 - [ ] Strong JWT secret configured (RS256 with key pair)
 - [ ] Rate limiting enabled with Redis backend
 - [ ] RLS policies applied to all tables
-- [ ] SSRF protection configured
+- [ ] Non-null node `payload_ref` values reject with HTTP 422 and cannot trigger network/file access
 - [ ] Request size limits set appropriately
 - [ ] HTTPS enforced (no HTTP access)
 - [ ] Database backups configured and tested

@@ -893,13 +893,12 @@ curl -X POST http://prod.example.com/_admin/connectors/rotate_keys \
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/debug/embed_info` | GET | Embedding backend status |
-| `/debug/search_explain` | GET | Query plan analysis |
+| `/debug/search_explain` | POST | HTTP 410 compatibility tombstone |
 | `/debug/search_sanity` | GET | Sanity checks |
 | `/debug/dbinfo` | GET | Database metadata |
 
-**/ask metadata interpretation:**
-- `top_similarity` is the gating score (RRF/weighted/cosine depending on mode)
-- `top_vector_similarity` / `max_vector_similarity` are true cosine similarities
+Generic `/ask`, `/ask/stream`, and `/debug/search_explain` are unavailable for launch. Direct authenticated
+`/search` remains the supported retrieval contract.
 
 ### Governance Metrics
 

@@ -9,7 +9,6 @@ Metrics:
 
 SLA Targets:
 - /search: p95 < 100ms (with index), p95 < 200ms (weighted)
-- /ask: p95 < 2s (Groq), p95 < 5s (OpenAI)
 - /admin/anomalies: p95 < 500ms
 - /nodes/{id}/versions: p95 < 50ms
 """
@@ -127,7 +126,6 @@ def run_latency_benchmarks(
     num_requests: int = 100,
     concurrency: int = 1,
     warmup: int = 10,
-    skip_ask: bool = False,
 ) -> dict[str, Any]:
     """Run latency benchmarks for all endpoints.
 
@@ -136,8 +134,6 @@ def run_latency_benchmarks(
         num_requests: Number of requests per endpoint
         concurrency: Number of concurrent workers (1 = sequential)
         warmup: Number of warmup requests
-        skip_ask: Skip /ask endpoint (if LLM not enabled)
-
     Returns:
         Dict with benchmark results
     """
@@ -181,17 +177,6 @@ def run_latency_benchmarks(
             "sla_p95": 0.050,  # 50ms
         },
     ]
-
-    if not skip_ask:
-        endpoints.append(
-            {
-                "name": "/ask",
-                "url": f"{api_url}/ask",
-                "method": "POST",
-                "payload": {"question": "What is Active Graph KG?", "max_results": 5},
-                "sla_p95": 2.000,  # 2s (Groq)
-            }
-        )
 
     results = {}
 
@@ -286,9 +271,6 @@ def main():
     )
     parser.add_argument("--warmup", type=int, default=10, help="Warmup requests")
     parser.add_argument(
-        "--skip-ask", action="store_true", help="Skip /ask endpoint (if LLM not enabled)"
-    )
-    parser.add_argument(
         "--output", default="evaluation/latency_results.json", help="Output JSON file"
     )
     args = parser.parse_args()
@@ -300,7 +282,6 @@ def main():
             num_requests=args.num_requests,
             concurrency=args.concurrency,
             warmup=args.warmup,
-            skip_ask=args.skip_ask,
         )
 
         # Save results
@@ -312,7 +293,6 @@ def main():
                 "num_requests": args.num_requests,
                 "concurrency": args.concurrency,
                 "warmup": args.warmup,
-                "skip_ask": args.skip_ask,
             },
         }
 

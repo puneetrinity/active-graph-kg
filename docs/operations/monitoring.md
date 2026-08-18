@@ -3,6 +3,10 @@
 **Status**: ✅ Production Ready
 **Last Updated:** 2025-11-24
 
+> **Current launch boundary:** generic `/ask`, `/ask/stream`, and `/debug/search_explain` are unavailable and
+> return HTTP 410. Ask/citation metric definitions below are retained only as inactive historical series; current
+> dashboards must not present them as live product traffic or quality evidence.
+
 ---
 
 ## Overview
@@ -171,7 +175,7 @@ scrape_configs:
 
 ## Endpoint Instrumentation
 
-### /ask Endpoint
+### Archived /ask Instrumentation (Inactive)
 
 **Location**: `activekg/api/main.py:1800-1900`
 
@@ -709,13 +713,6 @@ export RATE_LIMIT_ENABLED=false
 
 #### 2. Generate Test Traffic
 ```bash
-# /ask endpoint
-for i in {1..10}; do
-  curl -X POST http://localhost:8000/ask \
-    -H "Content-Type: application/json" \
-    -d '{"question":"What ML frameworks are required for the Machine Learning Engineer position?"}'
-done
-
 # /search endpoint (hybrid)
 curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
@@ -799,12 +796,8 @@ bash scripts/test_prometheus_integration.sh
 # Check METRICS_ENABLED
 echo $METRICS_ENABLED
 
-# Verify metrics are being tracked
-curl -s http://localhost:8000/prometheus | grep activekg_ask_requests_total
-
-# Generate test traffic and check again
-curl -X POST http://localhost:8000/ask -d '{"question":"test"}'
-curl -s http://localhost:8000/prometheus | grep activekg_ask_requests_total
+# Verify active search metrics are being tracked
+curl -s http://localhost:8000/prometheus | grep activekg_search_requests_total
 ```
 
 ### Issue: Missing metrics
@@ -815,8 +808,7 @@ curl -s http://localhost:8000/prometheus | grep activekg_ask_requests_total
 
 **Solution**:
 ```bash
-# Trigger all endpoints
-curl -X POST http://localhost:8000/ask -d '{"question":"test"}'
+# Trigger active endpoints
 curl -X POST http://localhost:8000/search -d '{"query":"test"}'
 curl http://localhost:8000/debug/embed_info
 
@@ -873,11 +865,10 @@ pip show prometheus-client
 
 **Active Graph KG Prometheus Integration:**
 
-✅ **Comprehensive Coverage** - All critical endpoints instrumented
-✅ **Score Tracking** - RRF and cosine score distributions
-✅ **Citation Quality** - Citation counts and zero-citation tracking
-✅ **Rejection Analysis** - Rejection reasons and rates
-✅ **Latency Monitoring** - P50/P95/P99 with reranking labels
+✅ **Direct-search Coverage** - Active search latency and result-count instrumentation
+✅ **Score Tracking** - Direct-search score-mode labels and distributions
+ℹ️ **Archived Ask Metrics** - Definitions are retained for metric-name history, but no launch route emits them
+✅ **Latency Monitoring** - Direct-search P50/P95/P99 with reranking labels
 ✅ **Embedding Health** - Coverage and staleness gauges
 ✅ **Multi-Tenant Support** - Tenant-scoped metrics
 ✅ **Production Ready** - Tested, validated, documented
@@ -889,7 +880,7 @@ pip show prometheus-client
 ## References
 
 - **Original Documentation**:
-  - `PROMETHEUS_WIRING_SUMMARY.md` - /ask endpoint instrumentation
+  - `PROMETHEUS_WIRING_SUMMARY.md` - historical, inactive `/ask` instrumentation
   - `SEARCH_INSTRUMENTATION_SUMMARY.md` - /search endpoint instrumentation
   - `EMBEDDING_HEALTH_INSTRUMENTATION.md` - /debug/embed_info instrumentation
   - `docs/PROMETHEUS_INTEGRATION.md` - Original integration guide

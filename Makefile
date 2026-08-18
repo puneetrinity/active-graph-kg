@@ -49,11 +49,6 @@ retrieval-quality:
 	TOPK=$${TOPK:-20} OUT=$${OUT:-evaluation/weighted_search_results.json} \
 	bash scripts/retrieval_quality.sh
 
-qa-benchmark:
-	@API=$$API DATASET=$${DATASET:-evaluation/datasets/qa_questions.json} \
-	TIMEOUT=$${TIMEOUT:-30} OUT=$${OUT:-evaluation/llm_qa_results.json} \
-	bash scripts/qa_benchmark.sh
-
 search-latency-vector:
 	@API=$$API QUERIES=$${QUERIES:-evaluation/datasets/test_queries.json} \
 	REPEATS=$${REPEATS:-5} MODE=vector bash scripts/search_latency_eval.sh

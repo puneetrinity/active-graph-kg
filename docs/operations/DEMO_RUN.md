@@ -38,7 +38,7 @@ make proof-report
 ```
 
 5) Open Grafana (optional)
-- Vector Index Build Latency, Index Build Success Rate, Search/Ask latency, Scheduler/Trigger metrics
+- Vector Index Build Latency, Index Build Success Rate, search latency and refresh metrics
 - URL: http://localhost:3000/d/activekg-ops or simply:
 ```bash
 make open-grafana

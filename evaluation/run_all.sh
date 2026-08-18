@@ -3,18 +3,16 @@
 # Run all Active Graph KG evaluations
 #
 # Usage:
-#   ./run_all.sh [--api-url URL] [--skip-ask]
+#   ./run_all.sh [--api-url URL]
 #
 # Options:
 #   --api-url URL    API base URL (default: http://localhost:8000)
-#   --skip-ask       Skip LLM Q&A evaluation (if LLM not enabled)
 #
 
 set -e  # Exit on error
 
 # Default configuration
 API_URL="http://localhost:8000"
-SKIP_ASK=""
 OUTPUT_DIR="evaluation"
 
 # Parse arguments
@@ -23,10 +21,6 @@ while [[ $# -gt 0 ]]; do
         --api-url)
             API_URL="$2"
             shift 2
-            ;;
-        --skip-ask)
-            SKIP_ASK="--skip-ask"
-            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -61,7 +55,6 @@ python3 "$OUTPUT_DIR/latency_benchmark.py" \
     --api-url "$API_URL" \
     --num-requests 100 \
     --warmup 10 \
-    $SKIP_ASK \
     --output "$OUTPUT_DIR/latency_results.json" || true
 echo ""
 
@@ -108,26 +101,6 @@ else
 fi
 echo ""
 
-# 5. LLM Q&A Evaluation (requires dataset, optional if LLM not enabled)
-echo "======================================================================"
-echo "5/5: LLM Q&A Evaluation"
-echo "======================================================================"
-if [ -z "$SKIP_ASK" ]; then
-    if [ -f "$OUTPUT_DIR/datasets/qa_questions.json" ]; then
-        python3 "$OUTPUT_DIR/llm_qa_eval.py" \
-            --api-url "$API_URL" \
-            --dataset "$OUTPUT_DIR/datasets/qa_questions.json" \
-            --timeout 30 \
-            --output "$OUTPUT_DIR/llm_qa_results.json" || true
-    else
-        echo "⚠ Skipping: Q&A dataset not found"
-        echo "   Create: $OUTPUT_DIR/datasets/qa_questions.json"
-    fi
-else
-    echo "⚠ Skipping: --skip-ask flag set"
-fi
-echo ""
-
 # Summary
 echo "======================================================================"
 echo "Evaluation Complete"
@@ -137,7 +110,6 @@ echo "  - $OUTPUT_DIR/latency_results.json"
 echo "  - $OUTPUT_DIR/freshness_results.json"
 echo "  - $OUTPUT_DIR/weighted_search_results.json"
 echo "  - $OUTPUT_DIR/drift_cohort_results.json"
-echo "  - $OUTPUT_DIR/llm_qa_results.json"
 echo ""
 echo "Next steps:"
 echo "  1. Review results in each JSON file"

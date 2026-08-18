@@ -2,7 +2,7 @@
   "info": {
     "name": "actvgraph-kg API",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Postman collection for actvgraph-kg (health, nodes, search, lineage, events, ask). Semantic triggers are unavailable for launch."
+    "description": "Postman collection for active Memory capabilities (health, nodes, search, lineage and events). Semantic triggers, connectors and grounded Q&A are unavailable for launch."
   },
   "item": [
     {
@@ -42,18 +42,6 @@
         "body": {
           "mode": "raw",
           "raw": "{\n  \"query\": \"machine learning optimization techniques\",\n  \"top_k\": 5,\n  \"use_weighted_score\": true,\n  \"decay_lambda\": 0.01,\n  \"drift_beta\": 0.1\n}"
-        }
-      }
-    },
-    {
-      "name": "Ask (Q&A)",
-      "request": {
-        "method": "POST",
-        "header": [{"key": "Content-Type", "value": "application/json"}],
-        "url": "{{base_url}}/ask",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"question\": \"What vector databases are discussed?\",\n  \"max_results\": 3\n}"
         }
       }
     },

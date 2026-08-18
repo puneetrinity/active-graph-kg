@@ -108,45 +108,6 @@ def test_hybrid_search_returns_results(user_token, test_node):
     assert data["count"] > 0, "Hybrid search returned zero results"
 
 
-def test_ask_includes_citations(user_token, test_node):
-    """Test that /ask endpoint returns citations when context is available.
-
-    This test validates the citation requirement:
-    - If context is found (non-empty results), answer MUST include citations like [0], [1]
-    - If no context is found, answer may say "no information available"
-    """
-    headers = {"Authorization": f"Bearer {user_token}"}
-
-    import time
-
-    time.sleep(2)
-
-    ask_body = {"question": "Who is a Python developer with Django experience?"}
-
-    r = requests.post(f"{API_URL}/ask", json=ask_body, headers=headers, timeout=30)
-
-    # Handle case where LLM backend is unavailable
-    if r.status_code == 503:
-        pytest.skip("LLM backend not configured")
-
-    assert r.status_code == 200, f"/ask endpoint failed: {r.text}"
-
-    data = r.json()
-    answer = data.get("answer", "")
-    citations = data.get("citations", [])
-
-    # If we have citations in the response, the answer should reference them
-    if len(citations) > 0:
-        assert "[0]" in answer or "[1]" in answer, (
-            f"Answer has {len(citations)} citations but no citation markers in text: {answer}"
-        )
-    else:
-        # If no citations, answer should acknowledge lack of information
-        assert any(
-            phrase in answer.lower() for phrase in ["no information", "don't have", "cannot"]
-        ), f"Answer has no citations but doesn't acknowledge lack of information: {answer}"
-
-
 def test_search_sanity_endpoint(user_token):
     """Test /debug/search_sanity endpoint for retrieval diagnostics."""
     # This endpoint requires admin scope
@@ -167,30 +128,6 @@ def test_search_sanity_endpoint(user_token):
 
     # Should have at least our test node
     assert data["total_nodes"] > 0, "No nodes found in database"
-
-
-# Debug: search explain endpoint
-def test_search_explain_endpoint(user_token):
-    """Test /debug/search_explain endpoint structure and basic behavior."""
-    admin_token = make_token(TENANT, ["admin:refresh", "search:read"])
-    headers = {"Authorization": f"Bearer {admin_token}"}
-
-    body = {"query": "kubernetes", "use_hybrid": True, "top_k": 3}
-
-    r = requests.post(f"{API_URL}/debug/search_explain", json=body, headers=headers, timeout=30)
-    assert r.status_code == 200, f"search_explain endpoint failed: {r.text}"
-    data = r.json()
-
-    # Validate response structure
-    assert data.get("query") == body["query"]
-    assert data.get("mode") in ("vector", "hybrid")
-    assert isinstance(data.get("results"), list)
-    assert "threshold_info" in data
-    # If there are results, entries should have expected fields
-    if data.get("results"):
-        r0 = data["results"][0]
-        for k in ["node_id", "similarity", "classes"]:
-            assert k in r0
 
 
 # Parametrized test for search modes

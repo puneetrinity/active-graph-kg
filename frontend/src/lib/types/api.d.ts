@@ -234,11 +234,10 @@ export interface paths {
         };
         /**
          * Get Security Limits
-         * @description Get configured security limits and SSRF protection settings.
+         * @description Report the active request and closed external-content boundaries.
          *
          *     Returns current configuration for:
-         *     - SSRF protection (URL allowlist, blocked IP ranges)
-         *     - File access controls (allowed directories, size limits)
+         *     - External payload-reference availability
          *     - Request body size limits
          *
          *     Security:
@@ -455,33 +454,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Ask Question
-         * @description LLM-powered Q&A with grounded citations from knowledge graph.
-         *
-         *     Uses structured KG for retrieval, LLM for natural language answer generation.
-         *     All facts are cited with node IDs and lineage chains (Zhu et al., 2023 design).
-         *
-         *     Example:
-         *         POST /ask {"question": "What are the best ML engineering candidates?"}
-         *
-         *     Returns:
-         *         {
-         *             "answer": "Based on recent resumes:\n1. Jane Doe (5yrs PyTorch) [0]\n2. ...",
-         *             "citations": [
-         *                 {
-         *                     "node_id": "resume_123",
-         *                     "classes": ["Resume"],
-         *                     "drift_score": 0.08,
-         *                     "age_days": 1.2,
-         *                     "lineage": [{"ancestor": "linkedin_profile_456", "depth": 1}]
-         *                 }
-         *             ],
-         *             "confidence": 0.92,
-         *             "metadata": {"searched_nodes": 5, "cited_nodes": 3}
-         *         }
-         */
-        post: operations["ask_question_ask_post"];
+        /** Ask Unavailable */
+        post: operations["ask_unavailable_ask_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -497,14 +471,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Ask Stream
-         * @description Server-Sent Events streaming for LLM Q&A with citations.
-         *
-         *     Streams tokens as they are generated and emits a final JSON payload with
-         *     citations, confidence, and metadata.
-         */
-        post: operations["ask_stream_ask_stream_post"];
+        /** Ask Stream Unavailable */
+        post: operations["ask_stream_unavailable_ask_stream_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -813,47 +781,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Debug Search Explain
-         * @description Debug endpoint for detailed search result triage.
-         *
-         *     Returns top-k results with similarity scores, snippets, and metadata
-         *     to help diagnose retrieval issues and tune thresholds.
-         *
-         *     Security:
-         *         - When JWT is enabled, require admin:refresh scope.
-         *         - When JWT is disabled (dev mode), allow access.
-         *
-         *     Args:
-         *         query: Search query text
-         *         use_hybrid: Whether to use hybrid BM25+vector search
-         *         top_k: Number of results to return (max 20)
-         *
-         *     Returns:
-         *         {
-         *           "query": str,
-         *           "mode": "vector" | "hybrid",
-         *           "result_count": int,
-         *           "results": [
-         *             {
-         *               "node_id": str,
-         *               "similarity": float,
-         *               "classes": List[str],
-         *               "snippet": str (first 300 chars of props.text),
-         *               "metadata": dict,
-         *               "has_embedding": bool,
-         *               "has_text_search": bool
-         *             }
-         *           ],
-         *           "threshold_info": {
-         *             "recommended_min": float,
-         *             "recommended_max": float,
-         *             "top_similarity": float,
-         *             "bottom_similarity": float
-         *           }
-         *         }
-         */
-        post: operations["debug_search_explain_debug_search_explain_post"];
+        /** Search Explain Unavailable */
+        post: operations["search_explain_unavailable_debug_search_explain_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1573,55 +1502,12 @@ export interface components {
             /** Visibility */
             visibility: string;
         };
-        /**
-         * AskRequest
-         * @description LLM-powered Q&A request with grounded citations.
-         */
-        AskRequest: {
-            /**
-             * Max Results
-             * @description Max context nodes to retrieve
-             * @default 5
-             */
-            max_results: number | null;
-            /**
-             * Question
-             * @description Question to answer using KG context
-             */
-            question: string;
-            /**
-             * Tenant Id
-             * @description Tenant ID for multi-tenancy
-             */
-            tenant_id?: string | null;
-            /**
-             * Use Weighted Score
-             * @description Use recency/drift weighting for context (default: True)
-             * @default true
-             */
-            use_weighted_score: boolean;
-        };
         /** AttachedIdentifier */
         AttachedIdentifier: {
             /** Identifier Type */
             identifier_type: string;
             /** Value Normalized */
             value_normalized: string;
-        };
-        /** Body_debug_search_explain_debug_search_explain_post */
-        Body_debug_search_explain_debug_search_explain_post: {
-            /** Query */
-            query: string;
-            /**
-             * Top K
-             * @default 5
-             */
-            top_k: number;
-            /**
-             * Use Hybrid
-             * @default false
-             */
-            use_hybrid: boolean;
         };
         /** Body_upload_files_upload_post */
         Body_upload_files_upload_post: {
@@ -2249,9 +2135,9 @@ export interface components {
             };
             /**
              * Payload Ref
-             * @description External payload reference (URL, S3 key, etc.)
+             * @description External payload references are unavailable; use inline node properties or bounded multipart upload.
              */
-            payload_ref?: string | null;
+            payload_ref?: null;
             /**
              * Props
              * @description Node properties (arbitrary JSON)
@@ -3083,68 +2969,42 @@ export interface operations {
             };
         };
     };
-    ask_question_ask_post: {
+    ask_unavailable_ask_post: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AskRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Grounded Q&A unavailable */
+            410: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
     };
-    ask_stream_ask_stream_post: {
+    ask_stream_unavailable_ask_stream_post: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AskRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Grounded Q&A unavailable */
+            410: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3484,35 +3344,22 @@ export interface operations {
             };
         };
     };
-    debug_search_explain_debug_search_explain_post: {
+    search_explain_unavailable_debug_search_explain_post: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Body_debug_search_explain_debug_search_explain_post"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Search explanation unavailable */
+            410: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

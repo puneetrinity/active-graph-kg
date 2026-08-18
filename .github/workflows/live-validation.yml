@@ -34,8 +34,6 @@ jobs:
     env:
       API: http://localhost:8000
       ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
-      # Keep LLM disabled for CI; /ask/stream will return 503 which scripts tolerate
-      LLM_ENABLED: "false"
       # Avoid startup-time DDL in CI
       AUTO_INDEX_ON_STARTUP: "false"
       # JWT dev token should be set as secret if you enable smoke/extended

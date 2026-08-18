@@ -8,13 +8,12 @@ import os
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 # Enable test mode to avoid DB connection during import
 os.environ["ACTIVEKG_TEST_NO_DB"] = "true"
 os.environ["JWT_ENABLED"] = "false"  # Disable JWT for easier testing
 
-from activekg.api.main import app, get_route_name
+from activekg.api.main import app, get_route_name, get_security_limits
 from activekg.connectors.config_store import validate_connector_config
 
 
@@ -23,35 +22,21 @@ class TestSecurityLimitsEndpoint:
 
     def test_security_limits_default_config(self):
         """Test security limits with default configuration."""
-        client = TestClient(app)
-
-        # Test without JWT (dev mode)
         with patch.dict(os.environ, {"JWT_ENABLED": "false"}, clear=False):
-            response = client.get("/_admin/security/limits")
+            data = get_security_limits(None)
 
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify SSRF protection structure
-        assert "ssrf_protection" in data
-        assert data["ssrf_protection"]["enabled"] is True
-        assert data["ssrf_protection"]["max_fetch_bytes"] == 10485760  # 10MB default
-        assert data["ssrf_protection"]["max_fetch_mb"] == 10.0
-        assert data["ssrf_protection"]["fetch_timeout_seconds"] == 10.0
-        assert "text/*" in data["ssrf_protection"]["allowed_content_types"]
-        assert "application/json" in data["ssrf_protection"]["allowed_content_types"]
-
-        # Verify blocked IP ranges
-        blocked_ranges = data["ssrf_protection"]["blocked_ip_ranges"]
-        assert any("127.0.0.0/8" in r for r in blocked_ranges)
-        assert any("169.254.0.0/16" in r for r in blocked_ranges)
-
-        # Verify file access protection
-        assert "file_access" in data
-        assert data["file_access"]["enabled"] is True
-        assert data["file_access"]["symlinks_blocked"] is True
-        assert data["file_access"]["max_file_bytes"] == 1048576  # 1MB default
-        assert data["file_access"]["max_file_mb"] == 1.0
+        assert data["external_payload_loading"] == {
+            "enabled": False,
+            "accepted_sources": ["inline_node_properties", "bounded_multipart_upload"],
+        }
+        assert data["ssrf_protection"] == {
+            "enabled": False,
+            "reason": "Remote payload-reference loading is unavailable.",
+        }
+        assert data["file_payload_ref_loading"] == {
+            "enabled": False,
+            "reason": "Local file payload-reference loading is unavailable.",
+        }
 
         # Verify request limits
         assert "request_limits" in data
@@ -60,10 +45,7 @@ class TestSecurityLimitsEndpoint:
         assert "Content-Length header" in data["request_limits"]["enforced_for"]
         assert "chunked transfers" in data["request_limits"]["enforced_for"]
 
-    def test_security_limits_with_allowlist(self):
-        """Test security limits with URL allowlist configured."""
-        client = TestClient(app)
-
+    def test_security_limits_do_not_expose_stale_url_configuration(self):
         with patch.dict(
             os.environ,
             {
@@ -72,19 +54,13 @@ class TestSecurityLimitsEndpoint:
             },
             clear=False,
         ):
-            response = client.get("/_admin/security/limits")
+            data = get_security_limits(None)
 
-        assert response.status_code == 200
-        data = response.json()
+        assert "url_allowlist" not in data["ssrf_protection"]
+        assert "example.com" not in str(data)
+        assert "trusted-api.com" not in str(data)
 
-        allowlist = data["ssrf_protection"]["url_allowlist"]
-        assert "example.com" in allowlist
-        assert "trusted-api.com" in allowlist
-
-    def test_security_limits_with_custom_file_basedirs(self):
-        """Test security limits with custom file basedirs."""
-        client = TestClient(app)
-
+    def test_security_limits_do_not_expose_stale_file_configuration(self):
         with patch.dict(
             os.environ,
             {
@@ -93,14 +69,11 @@ class TestSecurityLimitsEndpoint:
             },
             clear=False,
         ):
-            response = client.get("/_admin/security/limits")
+            data = get_security_limits(None)
 
-        assert response.status_code == 200
-        data = response.json()
-
-        basedirs = data["file_access"]["allowed_base_directories"]
-        assert "/opt/data" in basedirs
-        assert "/mnt/uploads" in basedirs
+        assert "file_access" not in data
+        assert "/opt/data" not in str(data)
+        assert "/mnt/uploads" not in str(data)
 
 
 class TestRouteNameExtraction:

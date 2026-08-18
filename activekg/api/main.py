@@ -4,10 +4,8 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
 import uuid
-from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
@@ -28,7 +26,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -49,12 +47,15 @@ from activekg.api.global_memory import (
 )
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
-from activekg.api.retirement import connector_retirement_router, semantic_triggers_router
+from activekg.api.retirement import (
+    connector_retirement_router,
+    grounded_qa_retirement_router,
+    semantic_triggers_router,
+)
 from activekg.common.env import env_str
 from activekg.common.logger import clear_log_context, get_enhanced_logger, set_log_context
 from activekg.common.metrics import get_redis_client, metrics
 from activekg.common.validation import (
-    AskRequest,
     EdgeCreate,
     HealthCheckResponse,
     KGSearchRequest,
@@ -69,14 +70,6 @@ from activekg.embedding.queue import (
     queue_depth,
 )
 from activekg.engine.embedding_provider import EmbeddingProvider
-from activekg.engine.llm_provider import (
-    LLMProvider,
-    build_strict_citation_prompt,
-    calculate_confidence,
-    extract_citation_numbers,
-    filter_context_by_similarity,
-)
-from activekg.engine.model_config import DEFAULT_GROQ_FAST_MODEL, resolve_model_for_backend
 from activekg.extraction.queue import (
     enqueue_extraction_job,
     extraction_queue_depth,
@@ -96,7 +89,6 @@ from activekg.graph.repository import GraphRepository
 # Prometheus observability
 from activekg.observability import (
     get_metrics_handler,
-    track_ask_request,
     track_embedding_health,
     track_search_request,
 )
@@ -177,15 +169,6 @@ EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "sentence-transformers")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 WEIGHTED_SEARCH_CANDIDATE_FACTOR = float(os.getenv("WEIGHTED_SEARCH_CANDIDATE_FACTOR", "2.0"))
 
-# LLM provider for /ask endpoint (optional, falls back gracefully)
-LLM_BACKEND = os.getenv("LLM_BACKEND", "groq")  # "openai", "groq", or "litellm"
-LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
-LLM_MODEL = resolve_model_for_backend(
-    "LLM_MODEL",
-    DEFAULT_GROQ_FAST_MODEL,
-    backend=LLM_BACKEND,
-    enabled=LLM_ENABLED,
-)
 AUTO_EMBED_ON_CREATE = os.getenv("AUTO_EMBED_ON_CREATE", "true").lower() == "true"
 EMBEDDING_ASYNC = os.getenv("EMBEDDING_ASYNC", "false").lower() == "true"
 EMBEDDING_QUEUE_MAX_DEPTH = int(os.getenv("EMBEDDING_QUEUE_MAX_DEPTH", "5000"))
@@ -198,48 +181,17 @@ EXTRACTION_ENABLED = os.getenv("EXTRACTION_ENABLED", "false").lower() == "true"
 EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "async")  # "async" or "sync"
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "true").lower() == "true"
 
-# Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
-HYBRID_ROUTING_ENABLED = os.getenv("HYBRID_ROUTING_ENABLED", "false").lower() == "true"
-ASK_FAST_BACKEND = os.getenv("ASK_FAST_BACKEND", "groq")
-ASK_FAST_MODEL = resolve_model_for_backend(
-    "ASK_FAST_MODEL",
-    DEFAULT_GROQ_FAST_MODEL,
-    backend=ASK_FAST_BACKEND,
-    enabled=LLM_ENABLED,
-)
-ASK_FALLBACK_BACKEND = os.getenv("ASK_FALLBACK_BACKEND", "openai")
-ASK_FALLBACK_MODEL = os.getenv("ASK_FALLBACK_MODEL", "gpt-4o-mini")
-
-# Routing thresholds
-ASK_ROUTER_TOPSIM = float(os.getenv("ASK_ROUTER_TOPSIM", "0.70"))  # Use fast if top_sim >= this
-ASK_ROUTER_MINCONF = float(os.getenv("ASK_ROUTER_MINCONF", "0.60"))  # Fallback if conf < this
-
-# Ask/Q&A tuning knobs (env configurable)
-ASK_SIM_THRESHOLD = float(
-    os.getenv("ASK_SIM_THRESHOLD", "0.30")
-)  # similarity cutoff for gating and context
-ASK_MAX_TOKENS = int(os.getenv("ASK_MAX_TOKENS", "256"))  # LLM token budget
-ASK_MAX_SNIPPETS = int(os.getenv("ASK_MAX_SNIPPETS", "3"))  # max context snippets
-ASK_SNIPPET_LEN = int(os.getenv("ASK_SNIPPET_LEN", "300"))  # chars per snippet
-
-# Fast path uses smaller budget for speed
-ASK_FAST_MAX_TOKENS = int(os.getenv("ASK_FAST_MAX_TOKENS", "192"))
-ASK_FALLBACK_MAX_TOKENS = int(os.getenv("ASK_FALLBACK_MAX_TOKENS", "320"))
-
-# Similarity gating thresholds (scale-aware: RRF vs raw cosine)
-# RRF fused scores are in 0.01-0.04 range, cosine scores are 0.0-1.0
-RRF_LOW_SIM_THRESHOLD = float(os.getenv("RRF_LOW_SIM_THRESHOLD", "0.01"))
-RAW_LOW_SIM_THRESHOLD = float(os.getenv("RAW_LOW_SIM_THRESHOLD", "0.15"))
-
-# Reranker configuration (ops control toggles)
-ASK_USE_RERANKER = os.getenv("ASK_USE_RERANKER", "true").lower() == "true"
-RERANK_SKIP_TOPSIM = float(os.getenv("RERANK_SKIP_TOPSIM", "0.80"))
-
 MAX_REQUEST_SIZE = int(os.getenv("MAX_REQUEST_SIZE_BYTES", str(10 * 1024 * 1024)))
+_BODYLESS_RETIREMENT_PATHS = {"/ask", "/ask/stream", "/debug/search_explain"}
 
 
 class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # These compatibility tombstones never read a body. Preserve their stable
+        # retirement contract even when callers send malformed or oversized metadata.
+        if request.url.path in _BODYLESS_RETIREMENT_PATHS:
+            return await call_next(request)
+
         # Enforce Content-Length if present
         try:
             cl = request.headers.get("content-length")
@@ -382,81 +334,13 @@ else:
 app.include_router(global_memory_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
+app.include_router(grounded_qa_retirement_router)
 
 # Global-candidate vector search reuses the process-wide embedding model.
 if embedder is not None:
     from activekg.api.global_memory import set_embedder as _gm_set_embedder
 
     _gm_set_embedder(embedder)
-
-# Initialize LLM provider(s)
-llm = None
-llm_fast = None
-llm_fallback = None
-
-if LLM_ENABLED:
-    try:
-        if HYBRID_ROUTING_ENABLED:
-            # Initialize both fast and fallback models for hybrid routing
-            llm_fast = LLMProvider(backend=ASK_FAST_BACKEND, model=ASK_FAST_MODEL)
-            llm_fallback = LLMProvider(backend=ASK_FALLBACK_BACKEND, model=ASK_FALLBACK_MODEL)
-            llm = llm_fallback  # Default to fallback for backward compat
-            logger.info(
-                "Hybrid routing enabled",
-                extra_fields={
-                    "fast_backend": ASK_FAST_BACKEND,
-                    "fast_model": ASK_FAST_MODEL,
-                    "fallback_backend": ASK_FALLBACK_BACKEND,
-                    "fallback_model": ASK_FALLBACK_MODEL,
-                    "router_topsim": ASK_ROUTER_TOPSIM,
-                    "router_minconf": ASK_ROUTER_MINCONF,
-                },
-            )
-        else:
-            # Single LLM mode
-            llm = LLMProvider(backend=LLM_BACKEND, model=LLM_MODEL)
-            logger.info(
-                "LLM provider enabled", extra_fields={"backend": LLM_BACKEND, "model": LLM_MODEL}
-            )
-    except Exception as e:
-        logger.warning(
-            "LLM provider initialization failed, /ask endpoint disabled",
-            extra_fields={"error": str(e)},
-        )
-        LLM_ENABLED = False
-
-# In-memory LRU cache for /ask responses (context-aware, thread-safe)
-ASK_CACHE_MAX = int(os.getenv("ASK_CACHE_MAX", "512"))
-ASK_CACHE_TTL = int(os.getenv("ASK_CACHE_TTL", "600"))  # seconds
-_ASK_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
-_ASK_CACHE_LOCK = threading.RLock()  # Reentrant lock for thread safety
-
-
-def _ask_cache_get(key: str) -> dict | None:
-    """Thread-safe cache get with TTL expiration."""
-    with _ASK_CACHE_LOCK:
-        now = time.time()
-        entry = _ASK_CACHE.get(key)
-        if not entry:
-            return None
-        ts, value = entry
-        if now - ts > ASK_CACHE_TTL:
-            _ASK_CACHE.pop(key, None)
-            return None
-        _ASK_CACHE.move_to_end(key)
-        return value
-
-
-def _ask_cache_put(key: str, value: dict) -> None:
-    """Thread-safe cache put with LRU eviction."""
-    with _ASK_CACHE_LOCK:
-        _ASK_CACHE[key] = (time.time(), value)
-        _ASK_CACHE.move_to_end(key)
-        while len(_ASK_CACHE) > ASK_CACHE_MAX:
-            try:
-                _ASK_CACHE.popitem(last=False)
-            except KeyError:
-                break
 
 
 @app.on_event("startup")
@@ -468,8 +352,6 @@ def startup_event():
             "version": APP_VERSION,
             "weighted_search_candidate_factor": WEIGHTED_SEARCH_CANDIDATE_FACTOR,
             "run_scheduler": RUN_SCHEDULER,
-            "rrf_low_sim_threshold": RRF_LOW_SIM_THRESHOLD,
-            "raw_low_sim_threshold": RAW_LOW_SIM_THRESHOLD,
         },
     )
 
@@ -548,8 +430,8 @@ def health() -> HealthCheckResponse:
         version=APP_VERSION,
         uptime_seconds=0.0,
         components={"db": {"status": "unknown"}},
-        llm_backend=LLM_BACKEND if LLM_ENABLED and llm else None,
-        llm_model=LLM_MODEL if LLM_ENABLED and llm else None,
+        llm_backend=None,
+        llm_model=None,
     )
 
 
@@ -1401,56 +1283,28 @@ def readyz() -> JSONResponse:
 
 @app.get("/_admin/security/limits", response_model=None)
 def get_security_limits(claims: JWTClaims | None = Depends(get_jwt_claims)) -> dict[str, Any]:
-    """Get configured security limits and SSRF protection settings.
+    """Report the active request and closed external-content boundaries.
 
     Returns current configuration for:
-    - SSRF protection (URL allowlist, blocked IP ranges)
-    - File access controls (allowed directories, size limits)
+    - External payload-reference availability
     - Request body size limits
 
     Security:
         - When JWT is enabled, requires authenticated token
         - No admin scope required (read-only configuration)
     """
-    import os
-
-    # Parse URL allowlist
-    allow_raw = os.getenv("ACTIVEKG_URL_ALLOWLIST", "")
-    allow_hosts = [h.strip() for h in allow_raw.split(",") if h.strip()]
-
-    # Parse file basedirs
-    basedirs_raw = os.getenv("ACTIVEKG_FILE_BASEDIRS", "")
-    basedirs = [d.strip() for d in basedirs_raw.split(",") if d.strip()]
-    if not basedirs:
-        basedirs = ["<current working directory>"]
-
     return {
-        "ssrf_protection": {
-            "enabled": True,
-            "url_allowlist": allow_hosts if allow_hosts else ["*any domain*"],
-            "blocked_ip_ranges": [
-                "127.0.0.0/8 (localhost)",
-                "10.0.0.0/8 (private)",
-                "172.16.0.0/12 (private)",
-                "192.168.0.0/16 (private)",
-                "169.254.0.0/16 (link-local / AWS metadata)",
-                "224.0.0.0/4 (multicast)",
-            ],
-            "max_fetch_bytes": int(os.getenv("ACTIVEKG_MAX_FETCH_BYTES", "10485760")),
-            "max_fetch_mb": round(
-                int(os.getenv("ACTIVEKG_MAX_FETCH_BYTES", "10485760")) / (1024 * 1024), 2
-            ),
-            "fetch_timeout_seconds": float(os.getenv("ACTIVEKG_FETCH_TIMEOUT", "10")),
-            "allowed_content_types": ["text/*", "application/json"],
+        "external_payload_loading": {
+            "enabled": False,
+            "accepted_sources": ["inline_node_properties", "bounded_multipart_upload"],
         },
-        "file_access": {
-            "enabled": True,
-            "allowed_base_directories": basedirs,
-            "symlinks_blocked": True,
-            "max_file_bytes": int(os.getenv("ACTIVEKG_MAX_FILE_BYTES", "1048576")),
-            "max_file_mb": round(
-                int(os.getenv("ACTIVEKG_MAX_FILE_BYTES", "1048576")) / (1024 * 1024), 2
-            ),
+        "ssrf_protection": {
+            "enabled": False,
+            "reason": "Remote payload-reference loading is unavailable.",
+        },
+        "file_payload_ref_loading": {
+            "enabled": False,
+            "reason": "Local file payload-reference loading is unavailable.",
         },
         "request_limits": {
             "max_request_body_bytes": MAX_REQUEST_SIZE,
@@ -1607,170 +1461,6 @@ def debug_search_sanity(claims: JWTClaims | None = Depends(get_jwt_claims)):
     except Exception as e:
         logger.error("/debug/search_sanity failed", extra_fields={"error": str(e)})
         raise HTTPException(status_code=500, detail=f"search_sanity error: {str(e)}")
-
-
-@app.post("/debug/search_explain", response_model=None)
-def debug_search_explain(
-    query: str = Body(..., embed=True),
-    use_hybrid: bool = Body(False, embed=True),
-    top_k: int = Body(5, embed=True),
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """Debug endpoint for detailed search result triage.
-
-    Returns top-k results with similarity scores, snippets, and metadata
-    to help diagnose retrieval issues and tune thresholds.
-
-    Security:
-        - When JWT is enabled, require admin:refresh scope.
-        - When JWT is disabled (dev mode), allow access.
-
-    Args:
-        query: Search query text
-        use_hybrid: Whether to use hybrid BM25+vector search
-        top_k: Number of results to return (max 20)
-
-    Returns:
-        {
-          "query": str,
-          "mode": "vector" | "hybrid",
-          "result_count": int,
-          "results": [
-            {
-              "node_id": str,
-              "similarity": float,
-              "classes": List[str],
-              "snippet": str (first 300 chars of props.text),
-              "metadata": dict,
-              "has_embedding": bool,
-              "has_text_search": bool
-            }
-          ],
-          "threshold_info": {
-            "recommended_min": float,
-            "recommended_max": float,
-            "top_similarity": float,
-            "bottom_similarity": float
-          }
-        }
-    """
-    assert repo is not None, "GraphRepository not initialized"
-    assert embedder is not None, "EmbeddingProvider not initialized"
-    # Enforce admin scope when JWT is enabled
-    if JWT_ENABLED:
-        if not claims:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        if "admin:refresh" not in (claims.scopes or []):
-            raise HTTPException(
-                status_code=403, detail="Insufficient permissions. Required scope: admin:refresh"
-            )
-
-    # Get tenant from claims or default
-    tenant_id = claims.tenant_id if claims else "default"
-
-    # Limit top_k to prevent abuse
-    top_k = min(max(1, top_k), 20)
-
-    try:
-        # Generate query embedding
-        query_embedding = embedder.encode([query])[0]
-
-        # Perform search
-        if use_hybrid:
-            # Hybrid search
-            search_results = repo.hybrid_search(
-                query_embedding=query_embedding,
-                query_text=query,
-                top_k=top_k,
-                tenant_id=tenant_id,
-                use_reranker=ASK_USE_RERANKER,
-            )
-            mode = "hybrid"
-        else:
-            # Vector-only search
-            search_results = repo.vector_search(
-                query_embedding=query_embedding, top_k=top_k, tenant_id=tenant_id
-            )
-            mode = "vector"
-
-        # Determine score type for explanatory metadata
-        rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
-        if use_hybrid:
-            score_type = "rrf_fused" if rrf_enabled else "weighted_fusion"
-            score_range = "0.01-0.04 (low)" if rrf_enabled else "0.0-1.0 (cosine-like)"
-        else:
-            score_type = "cosine"
-            score_range = "0.0-1.0"
-
-        # Format results with detailed info
-        detailed_results = []
-        for node, similarity in search_results:
-            node_id = str(node.id)
-            classes = node.classes or []
-            props = node.props or {}
-            metadata = node.metadata or {}
-
-            # Extract snippet (first 300 chars of text)
-            text = props.get("text", "")
-            snippet = text[:300] + "..." if len(text) > 300 else text
-
-            # Check for embedding and text search
-            has_embedding = node.embedding is not None
-            # text_search_vector presence not directly in result, infer from hybrid success
-            has_text_search = True if use_hybrid else None
-
-            detailed_results.append(
-                {
-                    "node_id": node_id,
-                    "similarity": round(similarity, 4),
-                    "score_type": score_type,
-                    "classes": classes,
-                    "snippet": snippet,
-                    "metadata": metadata,
-                    "has_embedding": has_embedding,
-                    "has_text_search": has_text_search,
-                }
-            )
-
-        # Calculate threshold recommendations
-        similarities = [r["similarity"] for r in detailed_results if r["similarity"] > 0]
-
-        if similarities:
-            top_sim = max(similarities)
-            bottom_sim = min(similarities)
-            # Recommended min: 20% below bottom similarity (but >= 0.15)
-            recommended_min = max(0.15, bottom_sim * 0.8)
-            # Recommended max: 10% below top similarity
-            recommended_max = top_sim * 0.9
-        else:
-            top_sim = 0.0
-            bottom_sim = 0.0
-            recommended_min = 0.15
-            recommended_max = 0.30
-
-        return {
-            "query": query,
-            "mode": mode,
-            "score_type": score_type,
-            "score_range": score_range,
-            "result_count": len(detailed_results),
-            "results": detailed_results,
-            "threshold_info": {
-                "recommended_min": round(recommended_min, 2),
-                "recommended_max": round(recommended_max, 2),
-                "top_similarity": round(top_sim, 4),
-                "bottom_similarity": round(bottom_sim, 4),
-            },
-            "scoring_notes": {
-                "rrf_fused": "RRF scores range 0.01-0.04 (rank-based fusion of vector+BM25)",
-                "weighted_fusion": "Weighted scores range 0.0-1.0 (linear combination of vector+BM25)",
-                "cosine": "Cosine similarity range 0.0-1.0 (vector-only)",
-            },
-        }
-
-    except Exception as e:
-        logger.error("/debug/search_explain failed", extra_fields={"error": str(e), "query": query})
-        raise HTTPException(status_code=500, detail=f"search_explain error: {str(e)}")
 
 
 @app.get("/debug/embed_info", response_model=None)
@@ -3198,802 +2888,6 @@ def detect_intent(question: str) -> tuple[str | None, dict | None]:
         )
 
     return (None, None)
-
-
-def filter_by_must_have_terms(
-    results: list[tuple[Node, float]], must_have_terms: list[str] | None
-) -> list[tuple[Node, float]]:
-    """Filter results to only include nodes containing required terms.
-
-    Args:
-        results: List of (Node, similarity) tuples
-        must_have_terms: List of terms that must appear in node text (case-insensitive)
-
-    Returns:
-        Filtered results, or original if no matches (graceful fallback)
-    """
-    if not must_have_terms:
-        return results
-
-    filtered = []
-    for node, score in results:
-        text = (node.props or {}).get("text", "").lower()
-        # Node must contain at least one of the must-have terms
-        if any(term.lower() in text for term in must_have_terms):
-            filtered.append((node, score))
-
-    # Graceful fallback: if filter removes everything, return original
-    return filtered if filtered else results
-
-
-def should_use_fast_path(
-    question: str, top_similarity: float, result_count: int
-) -> tuple[bool, str]:
-    """Decide whether to use fast or fallback LLM based on query characteristics.
-
-    Args:
-        question: User question
-        top_similarity: Similarity score of top search result
-        result_count: Number of search results found
-
-    Returns:
-        Tuple of (use_fast: bool, reason: str)
-    """
-    if not HYBRID_ROUTING_ENABLED:
-        return (False, "hybrid_disabled")
-
-    # Skip complex queries that need reasoning
-    complex_keywords = ["explain", "why", "how", "compare", "difference", "analyze"]
-    if any(kw in question.lower() for kw in complex_keywords):
-        return (False, "complex_query")
-
-    # Skip long queries (likely complex)
-    if len(question.split()) > 20:
-        return (False, "long_query")
-
-    # Use fast path if high confidence (top similarity above threshold)
-    if top_similarity >= ASK_ROUTER_TOPSIM:
-        return (True, f"high_confidence_sim={top_similarity:.3f}")
-
-    # Use fast path for listing queries with multiple good results
-    listing_patterns = [
-        r"^(who|what|which|list|show|find)\s+(has|are|have|with|need)",
-        r"^list\s+",
-        r"^show\s+(me\s+)?(all|the)",
-    ]
-    import re
-
-    if result_count >= 3 and any(re.match(pat, question.lower()) for pat in listing_patterns):
-        return (True, "listing_query")
-
-    # Default: use fallback for safety
-    return (False, f"low_confidence_sim={top_similarity:.3f}")
-
-
-@app.post("/ask", dependencies=[Depends(require_scope("ask:read"))])
-async def ask_question(
-    http_request: Request,
-    http_response: Response,
-    request: AskRequest,
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """LLM-powered Q&A with grounded citations from knowledge graph.
-
-    Uses structured KG for retrieval, LLM for natural language answer generation.
-    All facts are cited with node IDs and lineage chains (Zhu et al., 2023 design).
-
-    Example:
-        POST /ask {"question": "What are the best ML engineering candidates?"}
-
-    Returns:
-        {
-            "answer": "Based on recent resumes:\\n1. Jane Doe (5yrs PyTorch) [0]\\n2. ...",
-            "citations": [
-                {
-                    "node_id": "resume_123",
-                    "classes": ["Resume"],
-                    "drift_score": 0.08,
-                    "age_days": 1.2,
-                    "lineage": [{"ancestor": "linkedin_profile_456", "depth": 1}]
-                }
-            ],
-            "confidence": 0.92,
-            "metadata": {"searched_nodes": 5, "cited_nodes": 3}
-        }
-    """
-    assert repo is not None, "GraphRepository not initialized"
-    assert embedder is not None, "EmbeddingProvider not initialized"
-    if not LLM_ENABLED or llm is None:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM provider not enabled. Set LLM_ENABLED=true and configure LLM_BACKEND/LLM_MODEL.",
-        )
-
-    # Extract tenant context from JWT (secure) or request body (dev mode only)
-    tenant_id, actor_id, actor_type = get_tenant_context(
-        http_request, claims, allow_override=not JWT_ENABLED
-    )
-
-    # In dev mode, allow tenant_id override from request body
-    if not JWT_ENABLED and request.tenant_id:
-        tenant_id = request.tenant_id
-
-    # Apply rate limiting with concurrency control
-    request_id = await apply_rate_limit(
-        http_request,
-        http_response,
-        endpoint="ask",
-        tenant_id=tenant_id,
-        check_concurrency=True,  # Max 3 concurrent /ask per tenant
-    )
-
-    try:
-        # Start timing for latency tracking
-        start_time = time.time()
-
-        # 0. Intent detection for structured queries
-        intent_type, intent_params = detect_intent(request.question)
-        # Ensure intent_params is not None for .get() calls
-        if intent_params is None:
-            intent_params = {}
-        structured_results: list[Any] = []
-
-        # TRACK 1: Extract class filtering and term gating from intent
-        classes_filter = None
-        must_have_terms = None
-        if intent_type in ("entity_job", "entity_resume", "entity_article"):
-            classes_filter = intent_params.get("expected_classes")
-            must_have_terms = intent_params.get("must_have_terms")
-
-        if intent_type == "open_positions":
-            # Use structured query for open positions
-            role_terms = intent_params.get("role_terms")
-            # Normalize role_terms defensively to avoid ambiguous truth checks
-            try:
-                import numpy as _np
-
-                if isinstance(role_terms, _np.ndarray):
-                    role_terms = role_terms.tolist()
-            except Exception:
-                pass
-            if role_terms is not None and not isinstance(role_terms, list):
-                role_terms = [str(role_terms)]
-            structured_results = repo.list_open_positions(
-                role_terms=role_terms,
-                limit=10,
-                tenant_id=tenant_id,  # From JWT, not request body
-            )
-            logger.info(
-                "Intent detected: open_positions",
-                extra_fields={"role_terms": role_terms, "results": len(structured_results)},
-            )
-
-        elif intent_type == "performance_issues":
-            # Use structured query for performance issues
-            lookback_days = intent_params.get("lookback_days", 30)
-            structured_results = repo.list_performance_issues(
-                lookback_days=lookback_days,
-                limit=10,
-                tenant_id=tenant_id,  # From JWT, not request body
-            )
-            logger.info(
-                "Intent detected: performance_issues",
-                extra_fields={"lookback_days": lookback_days, "results": len(structured_results)},
-            )
-
-        # 1. Hybrid search with BM25+vector fusion and reranking
-        query_embedding = embedder.encode([request.question])[0]
-
-        # Determine if we should use cross-encoder reranking
-        # Skip reranking for: structured intents (bypass hybrid), small result sets, ultra-low latency mode
-        intent_detected = bool(intent_type and intent_type != "search")
-        skip_rerank = (
-            intent_detected or not ASK_USE_RERANKER
-        )  # Skip for structured queries or if master toggle disabled
-
-        # Use hybrid search for better retrieval (50 candidates → rerank to top 20)
-        logger.info(
-            f"Calling hybrid_search with classes_filter={classes_filter}, tenant_id={tenant_id}"
-        )
-        try:
-            hybrid_results = repo.hybrid_search(
-                query_text=request.question,
-                query_embedding=query_embedding,
-                top_k=20,  # Increased from 5 to get more candidates
-                classes_filter=classes_filter,  # TRACK 1: Filter by node class
-                tenant_id=tenant_id,  # From JWT, not request body
-                use_reranker=not skip_rerank,  # Skip rerank for structured queries; gate on hybrid_score
-                rerank_skip_threshold=RERANK_SKIP_TOPSIM,  # Use env-configurable threshold
-            )
-            # Fallback: if hybrid returns 0, try vector-only to avoid empty context
-            if not hybrid_results:
-                hybrid_results = repo.vector_search(
-                    query_embedding=query_embedding,
-                    top_k=request.max_results or 5,
-                    classes_filter=classes_filter,  # TRACK 1: Filter by node class
-                    tenant_id=tenant_id,
-                    use_weighted_score=request.use_weighted_score,
-                )
-        except Exception:
-            # Fallback if hybrid is unavailable (e.g., missing text_search_vector)
-            hybrid_results = repo.vector_search(
-                query_embedding=query_embedding,
-                top_k=request.max_results or 5,
-                classes_filter=classes_filter,  # TRACK 1: Filter by node class
-                tenant_id=tenant_id,  # From JWT, not request body
-                use_weighted_score=request.use_weighted_score,
-            )
-
-        # Merge structured and hybrid results (structured results take priority)
-        # Use len() to avoid ambiguous array truthiness
-        if len(structured_results) > 0:
-            # De-duplicate: use structured results first, then add hybrid results not already in structured
-            seen_ids = {node.id for node, _ in structured_results}
-            for node, score in hybrid_results:
-                if node.id not in seen_ids:
-                    structured_results.append((node, score))
-                    if len(structured_results) >= 20:
-                        break
-            results = structured_results
-        else:
-            results = hybrid_results
-
-        # TRACK 1: Apply must-have term gating for entity-typed queries with logging
-        gating_before_cnt = None
-        gating_after_cnt = None
-        gating_relaxed = None
-        if intent_type in ("entity_job", "entity_resume", "entity_article"):
-            try:
-                before_cnt = len(results)
-                after_cnt = before_cnt
-                relaxed = False
-
-                if must_have_terms:
-                    # Compute matches
-                    matches = []
-                    for node, score in results:
-                        txt = (node.props or {}).get("text", "").lower()
-                        if any(term.lower() in txt for term in must_have_terms):
-                            matches.append((node, score))
-                    after_cnt = len(matches)
-                    if after_cnt == 0:
-                        # One-pass relax: keep original results
-                        relaxed = True
-                        filtered = results
-                    else:
-                        filtered = matches
-                else:
-                    filtered = results
-
-                # Emit gating log
-                logger.info(
-                    "term_gating",
-                    extra_fields={
-                        "intent": intent_type,
-                        "before": before_cnt,
-                        "after": after_cnt,
-                        "relaxed": relaxed,
-                        "terms": must_have_terms[:5] if must_have_terms else None,
-                    },
-                )
-
-                results = filtered
-                gating_before_cnt = before_cnt
-                gating_after_cnt = after_cnt
-                gating_relaxed = relaxed
-            except Exception:
-                # Fallback to existing filter function on any error
-                results = filter_by_must_have_terms(results, must_have_terms)
-
-        if not results:
-            # Determine gating score type for consistent metadata
-            rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
-            gating_score_type = "rrf_fused" if rrf_enabled else "cosine"
-            response_data = {
-                "answer": "I couldn't find relevant information in the knowledge graph to answer your question.",
-                "citations": [],
-                "confidence": 0.0,
-                "metadata": {
-                    "searched_nodes": 0,
-                    "cited_nodes": 0,
-                    "filtered_nodes": 0,
-                    "gating_score": 0.0,
-                    "gating_score_type": gating_score_type,
-                },
-            }
-            # Track metrics
-            if METRICS_ENABLED:
-                latency_ms = (time.time() - start_time) * 1000
-                track_ask_request(
-                    gating_score=0.0,
-                    gating_score_type=gating_score_type,
-                    cited_nodes=0,
-                    latency_ms=latency_ms,
-                    rejected=True,
-                    rejection_reason="no_results",
-                    reranked=False,
-                )
-            return response_data
-
-        # 2. Low-similarity guardrail with fallback policy
-        # Ensure top_similarity is Python float, not numpy scalar (avoid ambiguous array truthiness)
-        top_similarity = float(results[0][1]) if results else 0.0
-        # Preserve true cosine similarity for the top-ranked result (if embedding is available)
-        top_vector_similarity = 0.0
-        max_vector_similarity = 0.0
-        try:
-            if results:
-                top_node = results[0][0]
-                if top_node.embedding is not None:
-                    top_vector_similarity = float(top_node.embedding @ query_embedding)
-                # Track max cosine similarity across candidate results for debugging
-                for node, _score in results:
-                    if node.embedding is None:
-                        continue
-                    sim = float(node.embedding @ query_embedding)
-                    if sim > max_vector_similarity:
-                        max_vector_similarity = sim
-        except Exception:
-            top_vector_similarity = 0.0
-            max_vector_similarity = 0.0
-
-        # Determine gating score type based on fusion mode
-        rrf_enabled = os.getenv("HYBRID_RRF_ENABLED", "true").lower() == "true"
-        gating_score_type = "rrf_fused" if rrf_enabled else "cosine"
-
-        # Hard reject if similarity is extremely low
-        # When RRF is enabled, scores are much lower (0.01-0.04 range), so use a lower threshold
-        extremely_low_threshold = RRF_LOW_SIM_THRESHOLD if rrf_enabled else RAW_LOW_SIM_THRESHOLD
-        if top_similarity < extremely_low_threshold:
-            response_data = {
-                "answer": "I don't have enough information to answer this question confidently.",
-                "citations": [],
-                "confidence": 0.2,
-                "metadata": {
-                    "searched_nodes": len(results),
-                    "cited_nodes": 0,
-                    "filtered_nodes": 0,
-                    "top_similarity": round(top_similarity, 3),
-                    "top_vector_similarity": round(top_vector_similarity, 3),
-                    "max_vector_similarity": round(max_vector_similarity, 3),
-                    "gating_score": round(top_similarity, 3),
-                    "gating_score_type": gating_score_type,
-                    "reason": "extremely_low_similarity",
-                },
-            }
-            # Track metrics
-            if METRICS_ENABLED:
-                latency_ms = (time.time() - start_time) * 1000
-                track_ask_request(
-                    gating_score=top_similarity,
-                    gating_score_type=gating_score_type,
-                    cited_nodes=0,
-                    latency_ms=latency_ms,
-                    rejected=True,
-                    rejection_reason="extremely_low_similarity",
-                    reranked=not skip_rerank,
-                )
-            return response_data
-
-        # Soft fallback: if below threshold but above 0.15, proceed with top-1 only and capped confidence
-        low_sim_fallback = top_similarity < ASK_SIM_THRESHOLD
-        if low_sim_fallback:
-            # Limit to top-1 result only for low-confidence queries
-            results = results[:1]
-
-        # 2.5. Ambiguity gating (loosened): if top result isn't significantly better than 3rd, results are ambiguous
-        # Skip for structured queries (intent-based) since they're already pre-filtered for relevance
-        if len(results) >= 3 and not low_sim_fallback and intent_type is None:
-            kth_similarity = results[2][1]  # 3rd result (0-indexed)
-            if top_similarity - kth_similarity < 0.02:
-                response_data = {
-                    "answer": "I don't have enough information to answer this question confidently.",
-                    "citations": [],
-                    "confidence": 0.2,
-                    "metadata": {
-                        "searched_nodes": len(results),
-                        "cited_nodes": 0,
-                        "filtered_nodes": 0,
-                        "top_similarity": round(top_similarity, 3),
-                        "top_vector_similarity": round(top_vector_similarity, 3),
-                        "max_vector_similarity": round(max_vector_similarity, 3),
-                        "kth_similarity": round(kth_similarity, 3),
-                        "gating_score": round(top_similarity, 3),
-                        "gating_score_type": gating_score_type,
-                        "ambiguity_reason": "top-k gap too small",
-                    },
-                }
-                # Track metrics
-                if METRICS_ENABLED:
-                    latency_ms = (time.time() - start_time) * 1000
-                    track_ask_request(
-                        gating_score=top_similarity,
-                        gating_score_type=gating_score_type,
-                        cited_nodes=0,
-                        latency_ms=latency_ms,
-                        rejected=True,
-                        rejection_reason="ambiguity",
-                        reranked=not skip_rerank,
-                    )
-                return response_data
-
-        # 3. Filter context by similarity threshold and cap to top-3 for latency
-        filtered_results = filter_context_by_similarity(
-            results,
-            similarity_threshold=ASK_SIM_THRESHOLD,
-            min_results=2,
-            max_results=min(request.max_results or ASK_MAX_SNIPPETS, ASK_MAX_SNIPPETS),
-        )
-
-        # 3. Build context from filtered nodes
-        context_items = []
-        for i, (node, similarity) in enumerate(filtered_results):
-            # Calculate age in days
-            age_days = None
-            if node.last_refreshed:
-                age_seconds = (datetime.now(timezone.utc) - node.last_refreshed).total_seconds()
-                age_days = age_seconds / 86400.0
-
-            # Format context with metadata
-            text = node.props.get("text", "")[:ASK_SNIPPET_LEN]
-            age_str = f"{age_days:.1f}d" if age_days else "unknown"
-            context_items.append(
-                f"[{i}] {text}\n"
-                f"   (similarity={similarity:.3f}, drift={node.drift_score or 0:.3f}, age={age_str})"
-            )
-
-        # 4. Hybrid routing: select fast or fallback LLM
-        use_fast, routing_reason = should_use_fast_path(
-            request.question, top_similarity, len(filtered_results)
-        )
-
-        # Select LLM provider and token budget
-        if use_fast and llm_fast is not None:
-            selected_llm = llm_fast
-            max_tokens = ASK_FAST_MAX_TOKENS
-            llm_path = "fast"
-        else:
-            selected_llm = llm_fallback if llm_fallback is not None else llm
-            max_tokens = ASK_FALLBACK_MAX_TOKENS if HYBRID_ROUTING_ENABLED else ASK_MAX_TOKENS
-            llm_path = "fallback"
-
-        # Log routing decision
-        logger.info(
-            "LLM routing decision",
-            extra_fields={
-                "question": request.question[:50],
-                "path": llm_path,
-                "reason": routing_reason,
-                "top_similarity": round(top_similarity, 3),
-            },
-        )
-
-        # 5. LLM call with optimized prompt and parameters (with simple context-aware cache)
-        system_message, prompt = build_strict_citation_prompt(context_items, request.question)
-        # Cache key based on tenant + question + context node IDs + LLM path
-        ctx_ids = ",".join([n.id for n, _ in filtered_results])
-        cache_key = f"ask::{request.tenant_id or ''}::{request.question}::{ctx_ids}::{llm_path}"
-        cached = _ask_cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-        answer = selected_llm.generate(
-            prompt,
-            system_message=system_message,
-            max_tokens=max_tokens,
-            temperature=0.1,  # Keep deterministic for consistency
-        )
-
-        # 5. Extract citations and add lineage (use filtered_results for indexing)
-        citation_indices = extract_citation_numbers(answer)
-        cited_nodes = [
-            filtered_results[i][0] for i in citation_indices if i < len(filtered_results)
-        ]
-
-        citations = []
-        for node in cited_nodes:
-            # Get lineage (up to 3 ancestors)
-            lineage = repo.get_lineage(node.id, max_depth=3)
-
-            # Calculate age
-            age_days = None
-            if node.last_refreshed:
-                age_seconds = (datetime.now(timezone.utc) - node.last_refreshed).total_seconds()
-                age_days = round(age_seconds / 86400.0, 2)
-
-            citations.append(
-                {
-                    "node_id": node.id,
-                    "classes": node.classes,
-                    "drift_score": node.drift_score,
-                    "age_days": age_days,
-                    "lineage": [{"ancestor": anc["id"], "depth": anc["depth"]} for anc in lineage],
-                }
-            )
-
-        # 6. Calculate confidence (use filtered results for confidence calculation)
-        confidence = calculate_confidence(answer, filtered_results, citation_indices, intent_type)
-
-        # Cap confidence at 0.6 for low-sim fallback queries
-        if low_sim_fallback:
-            confidence = min(confidence, 0.6)
-
-        # 7. Per-question metrics for evaluation and debugging
-        first_citation_idx = citation_indices[0] if citation_indices else None
-        first_citation_precision = (
-            1.0 if first_citation_idx == 0 else 0.0 if first_citation_idx is not None else None
-        )
-
-        # 7.5 Include term gating diagnostics when available
-        gating_info = {}
-        try:
-            if gating_before_cnt is not None:
-                gating_info = {
-                    "term_gating_before": gating_before_cnt,
-                    "term_gating_after": gating_after_cnt,
-                    "term_gating_relaxed": gating_relaxed,
-                }
-        except Exception:
-            gating_info = {}
-
-        response = {
-            "answer": answer,
-            "citations": citations,
-            "confidence": confidence,
-            "metadata": {
-                "searched_nodes": len(results),
-                "filtered_nodes": len(filtered_results),
-                "cited_nodes": len(citations),
-                "top_similarity": round(top_similarity, 3),
-                "top_vector_similarity": round(top_vector_similarity, 3),
-                "max_vector_similarity": round(max_vector_similarity, 3),
-                "gating_score": round(top_similarity, 3),
-                "gating_score_type": gating_score_type,
-                "first_citation_idx": first_citation_idx,
-                "citation_at_1_precision": first_citation_precision,
-                "llm_path": llm_path,
-                "routing_reason": routing_reason,
-                "intent_detected": intent_type,
-                "intent_type": intent_type,  # TRACK 1: Include intent type
-                "classes_filter": classes_filter
-                if classes_filter
-                else None,  # TRACK 1: Show class filtering
-                "must_have_terms": must_have_terms
-                if must_have_terms
-                else None,  # TRACK 1: Show term gating
-                "structured_results_count": len(structured_results) if structured_results else 0,
-                **gating_info,
-            },
-        }
-
-        _ask_cache_put(cache_key, response)
-
-        # Track Prometheus metrics (if enabled)
-        if METRICS_ENABLED:
-            latency_ms = (time.time() - start_time) * 1000
-            track_ask_request(
-                gating_score=top_similarity,
-                gating_score_type=gating_score_type,
-                cited_nodes=len(citations),
-                latency_ms=latency_ms,
-                rejected=False,
-                rejection_reason=None,
-                reranked=not skip_rerank,
-            )
-
-        return response
-
-    except Exception as e:
-        # Handle any unexpected errors during /ask processing
-        import traceback
-
-        tb = traceback.format_exc()
-        logger.error(
-            "Error in /ask endpoint",
-            extra_fields={"error": str(e), "traceback": tb, "actor_id": actor_id},
-        )
-        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
-    finally:
-        # ALWAYS mark request as complete for concurrency tracking
-        # This runs even if exception occurs or response returned early
-        if request_id and tenant_id:
-            identifier = get_identifier(http_request, tenant_id)
-            rate_limiter.mark_request_end(identifier, "ask", request_id)
-
-
-@app.post("/ask/stream", dependencies=[Depends(require_scope("ask:read"))])
-async def ask_stream(
-    http_request: Request,
-    http_response: Response,
-    request: AskRequest,
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """Server-Sent Events streaming for LLM Q&A with citations.
-
-    Streams tokens as they are generated and emits a final JSON payload with
-    citations, confidence, and metadata.
-    """
-    if not LLM_ENABLED or llm is None:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM provider not enabled. Set LLM_ENABLED=true and configure LLM_BACKEND/LLM_MODEL.",
-        )
-
-    # Extract tenant context from JWT (secure) or request body (dev mode only)
-    tenant_id, actor_id, actor_type = get_tenant_context(
-        http_request, claims, allow_override=not JWT_ENABLED
-    )
-
-    # In dev mode, allow tenant_id override from request body
-    if not JWT_ENABLED and request.tenant_id:
-        tenant_id = request.tenant_id
-
-    # Apply rate limiting with concurrency control (stricter limits for streaming)
-    request_id = await apply_rate_limit(
-        http_request,
-        http_response,
-        endpoint="ask_stream",
-        tenant_id=tenant_id,
-        check_concurrency=True,  # Max 2 concurrent /ask/stream per tenant
-    )
-
-    def sse(data: str, event: str | None = None) -> bytes:
-        assert repo is not None, "GraphRepository not initialized"
-        assert embedder is not None, "EmbeddingProvider not initialized"
-        if event:
-            return f"event: {event}\ndata: {data}\n\n".encode()
-        return f"data: {data}\n\n".encode()
-
-    def gen():
-        try:
-            # 1) Retrieval (same as /ask): try hybrid + reranker with fallback
-            query_embedding = embedder.encode([request.question])[0]
-            try:
-                results = repo.hybrid_search(
-                    query_text=request.question,
-                    query_embedding=query_embedding,
-                    top_k=20,
-                    tenant_id=tenant_id,  # From JWT, not request body
-                    use_reranker=True,
-                )
-            except Exception:
-                results = repo.vector_search(
-                    query_embedding=query_embedding,
-                    top_k=request.max_results or 5,
-                    tenant_id=tenant_id,  # From JWT, not request body
-                    use_weighted_score=request.use_weighted_score,
-                )
-
-            if not results:
-                yield sse(
-                    '{"type":"final","answer":"I couldn\'t find relevant information.","citations":[],"confidence":0.0}',
-                    "final",
-                )
-                return
-
-            top_similarity = results[0][1]
-            if top_similarity < ASK_SIM_THRESHOLD:
-                yield sse(
-                    '{"type":"final","answer":"I don\'t have enough information to answer this question confidently.","citations":[],"confidence":0.2}',
-                    "final",
-                )
-                return
-
-            # Filter context to top-3
-            filtered_results = filter_context_by_similarity(
-                results,
-                similarity_threshold=ASK_SIM_THRESHOLD,
-                min_results=2,
-                max_results=min(request.max_results or ASK_MAX_SNIPPETS, ASK_MAX_SNIPPETS),
-            )
-
-            # Build context and prompt
-            context_items = []
-            for i, (node, similarity) in enumerate(filtered_results):
-                age_days = None
-                if node.last_refreshed:
-                    age_seconds = (datetime.now(timezone.utc) - node.last_refreshed).total_seconds()
-                    age_days = age_seconds / 86400.0
-                text = node.props.get("text", "")[
-                    :ASK_SNIPPET_LEN
-                ]  # snippet length is configurable
-                age_str = f"{age_days:.1f}d" if age_days else "unknown"
-                context_items.append(
-                    f"[{i}] {text}\n   (similarity={similarity:.3f}, drift={node.drift_score or 0:.3f}, age={age_str})"
-                )
-
-            system_message, prompt = build_strict_citation_prompt(context_items, request.question)
-
-            # Send initial context metadata event
-            try:
-                ctx_ids = [n.id for n, _ in filtered_results]
-                yield sse(
-                    data=json.dumps(
-                        {
-                            "type": "context",
-                            "node_ids": ctx_ids,
-                            "top_similarity": round(top_similarity, 3),
-                            "count": len(filtered_results),
-                        }
-                    ),
-                    event="context",
-                )
-            except Exception:
-                pass
-
-            # 2) Stream tokens
-            answer_buf = []
-            for piece in llm.generate_stream(
-                prompt,
-                system_message=system_message,
-                max_tokens=ASK_MAX_TOKENS,
-                temperature=0.1,
-            ):
-                answer_buf.append(piece)
-                # Emit token event
-                yield sse(json.dumps({"type": "token", "text": piece}), event="token")
-
-            # 3) Finalize with citations + confidence
-            answer = "".join(answer_buf)
-            citation_indices = extract_citation_numbers(answer)
-            cited_nodes = [
-                filtered_results[i][0] for i in citation_indices if i < len(filtered_results)
-            ]
-
-            citations = []
-            for node in cited_nodes:
-                lineage = repo.get_lineage(node.id, max_depth=3)
-                age_days = None
-                if node.last_refreshed:
-                    age_seconds = (datetime.now(timezone.utc) - node.last_refreshed).total_seconds()
-                    age_days = round(age_seconds / 86400.0, 2)
-                citations.append(
-                    {
-                        "node_id": node.id,
-                        "classes": node.classes,
-                        "drift_score": node.drift_score,
-                        "age_days": age_days,
-                        "lineage": [
-                            {"ancestor": anc["id"], "depth": anc["depth"]} for anc in lineage
-                        ],
-                    }
-                )
-
-            confidence = calculate_confidence(answer, filtered_results, citation_indices)
-
-            final_payload = {
-                "type": "final",
-                "answer": answer,
-                "citations": citations,
-                "confidence": confidence,
-                "metadata": {
-                    "searched_nodes": len(results),
-                    "filtered_nodes": len(filtered_results),
-                    "cited_nodes": len(citations),
-                    "top_similarity": round(top_similarity, 3),
-                },
-            }
-            yield sse(json.dumps(final_payload), event="final")
-
-        except Exception as e:
-            yield sse(json.dumps({"type": "error", "message": str(e)}), event="error")
-        finally:
-            # ALWAYS mark request as complete for concurrency tracking
-            if request_id and tenant_id:
-                identifier = get_identifier(http_request, tenant_id)
-                rate_limiter.mark_request_end(identifier, "ask_stream", request_id)
-
-    # Ensure X-RateLimit headers make it to streaming responses
-    rl_headers = {}
-    try:
-        for h in ("X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"):
-            v = http_response.headers.get(h)
-            if v is not None:
-                rl_headers[h] = v
-    except Exception:
-        pass
-
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=rl_headers)
 
 
 @app.post("/edges", response_model=None, dependencies=[Depends(require_scope("kg:write"))])

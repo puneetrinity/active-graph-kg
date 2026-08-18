@@ -369,19 +369,6 @@ Expected response:
 }
 ```
 
-### Test LLM /ask Endpoint (if enabled)
-
-```bash
-curl -X POST http://staging.activekg.example.com/ask \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "What is in the staging test document?",
-    "tenant_id": "staging-tenant"
-  }' | jq .
-```
-
-Expected response should reference the ingested content.
-
 ## Stage 5: Backfill Validation
 
 ### Trigger Historical Backfill

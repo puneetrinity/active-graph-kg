@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
-import socket
 import sys
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import timezone
 from typing import Any, Literal, TypedDict, cast
-from urllib.parse import urlparse
 
 # NotRequired was added in Python 3.11, use typing_extensions for 3.10
 if sys.version_info >= (3, 11):
@@ -1811,28 +1808,7 @@ class GraphRepository:
 
     # --- Payload loading ---
     def load_payload_text(self, node: Node) -> str:
-        """Load payload text from various sources.
-
-        Supports:
-        - payload_ref starting with 's3://' -> fetch from S3
-        - payload_ref starting with 'file://' -> read from local file
-        - payload_ref starting with 'http://' or 'https://' -> fetch from URL
-        - props['text'], props['resume_text'], props['content'], etc. -> inline text
-        - Empty payload_ref -> check common text keys or return empty string
-        """
-        # Try payload_ref first
-        if node.payload_ref:
-            if node.payload_ref.startswith("s3://"):
-                return self._load_from_s3(node.payload_ref)
-            elif node.payload_ref.startswith("file://"):
-                return self._load_from_file(node.payload_ref[7:])  # Strip 'file://'
-            elif node.payload_ref.startswith(("http://", "https://")):
-                return self._load_from_url(node.payload_ref)
-            else:
-                # Assume local file path
-                return self._load_from_file(node.payload_ref)
-
-        # Fallback to inline text - check multiple common keys
+        """Return inline node text without resolving executable payload references."""
         props = node.props or {}
         for key in ("text", "resume_text", "content", "body", "description"):
             value = props.get(key)
@@ -1945,168 +1921,6 @@ class GraphRepository:
 
         prefix = "\n".join(prefix_lines)
         return f"{prefix}\n\n{base_text}"
-
-    def _load_from_file(self, file_path: str) -> str:
-        """Load text from local file."""
-        try:
-            import os
-
-            # Security: realpath normalization + base dir allowlist
-            allowlist_raw = os.getenv("ACTIVEKG_FILE_BASEDIRS", "")
-            allowed_dirs = [d.strip() for d in allowlist_raw.split(",") if d.strip()]
-            # Default to repo cwd if not provided
-            if not allowed_dirs:
-                allowed_dirs = [os.getcwd()]
-
-            real = os.path.realpath(file_path)
-            # Reject symlinks
-            if os.path.islink(file_path):
-                self.logger.warning(f"Symlink path rejected: {file_path}")
-                return ""
-            # Ensure within an allowed base dir
-            try:
-                allowed = any(
-                    os.path.commonpath([real, base]) == os.path.abspath(base)
-                    for base in allowed_dirs
-                )
-            except ValueError:
-                # Different-drive edge cases (Windows) or invalid paths
-                allowed = False
-            if not allowed:
-                self.logger.warning(
-                    "Path outside allowed base directories rejected",
-                    extra_fields={"path": file_path, "real": real, "allowed": allowed_dirs},
-                )
-                return ""
-
-            if not os.path.exists(real) or not os.path.isfile(real):
-                self.logger.warning(f"File not found or not a file: {real}")
-                return ""
-
-            # Enforce max bytes (default 1MB) for file read
-            max_bytes = int(os.getenv("ACTIVEKG_MAX_FILE_BYTES", "1048576"))
-            with open(real, "rb") as f:
-                data = f.read(max_bytes + 1)
-            if len(data) > max_bytes:
-                self.logger.warning(
-                    "File too large; truncated", extra_fields={"path": real, "max_bytes": max_bytes}
-                )
-                data = data[:max_bytes]
-            return data.decode("utf-8", errors="ignore")
-        except Exception as e:
-            self.logger.error(f"Failed to load file {file_path}: {e}")
-            return ""
-
-    def _load_from_s3(self, s3_uri: str) -> str:
-        """Load text from S3 bucket."""
-        try:
-            import boto3
-
-            # Parse s3://bucket/key
-            parts = s3_uri[5:].split("/", 1)
-            if len(parts) != 2:
-                self.logger.warning(f"Invalid S3 URI: {s3_uri}")
-                return ""
-
-            bucket, key = parts
-            s3_client = boto3.client("s3")
-            response = s3_client.get_object(Bucket=bucket, Key=key)
-            return cast(str, response["Body"].read().decode("utf-8", errors="ignore"))
-
-        except ImportError:
-            self.logger.warning("boto3 not installed, cannot load from S3")
-            return ""
-        except Exception as e:
-            self.logger.error(f"Failed to load from S3 {s3_uri}: {e}")
-            return ""
-
-    def _load_from_url(self, url: str) -> str:
-        """Load text from HTTP/HTTPS URL."""
-        try:
-            import requests
-
-            # Security: SSRF protections
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                self.logger.warning("Blocked non-http(s) URL", extra_fields={"url": url})
-                return ""
-
-            # Domain allowlist (optional)
-            allow_raw = os.getenv("ACTIVEKG_URL_ALLOWLIST", "")
-            allow_hosts = {h.strip().lower() for h in allow_raw.split(",") if h.strip()}
-            host = parsed.hostname or ""
-            if allow_hosts and host.lower() not in allow_hosts:
-                self.logger.warning("URL host not in allowlist", extra_fields={"host": host})
-                return ""
-
-            # Resolve and block private/localhost ranges
-            try:
-                addrs = {ai[4][0] for ai in socket.getaddrinfo(host, None)}
-            except Exception:
-                self.logger.warning("DNS resolution failed", extra_fields={"host": host})
-                return ""
-            for addr in addrs:
-                try:
-                    ip = ipaddress.ip_address(addr)
-                    if (
-                        ip.is_private
-                        or ip.is_loopback
-                        or ip.is_link_local
-                        or ip.is_reserved
-                        or ip.is_multicast
-                    ):
-                        self.logger.warning(
-                            "Blocked private/loopback address", extra_fields={"ip": addr}
-                        )
-                        return ""
-                except ValueError:
-                    continue
-
-            # Fetch with limits
-            max_bytes = int(os.getenv("ACTIVEKG_MAX_FETCH_BYTES", "10485760"))  # 10MB default
-            timeout = float(os.getenv("ACTIVEKG_FETCH_TIMEOUT", "10"))
-            r = requests.get(url, timeout=timeout, stream=True)
-            r.raise_for_status()
-
-            # Content-Type allow (default: text/*, application/json)
-            ctype = r.headers.get("Content-Type", "").lower()
-            allowed_types = {"text/", "application/json"}
-            if not any(ctype.startswith(p) for p in allowed_types):
-                self.logger.warning("Blocked content-type", extra_fields={"content_type": ctype})
-                return ""
-
-            # Respect Content-Length if present
-            try:
-                clen = int(r.headers.get("Content-Length", "0"))
-                if clen > 0 and clen > max_bytes:
-                    self.logger.warning(
-                        "Content-Length too large", extra_fields={"content_length": clen}
-                    )
-                    return ""
-            except Exception:
-                pass
-
-            # Stream up to max_bytes
-            buf = bytearray()
-            for chunk in r.iter_content(chunk_size=4096):
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                if len(buf) > max_bytes:
-                    self.logger.warning(
-                        "Fetched content exceeded max_bytes; truncated",
-                        extra_fields={"max_bytes": max_bytes},
-                    )
-                    buf = buf[:max_bytes]
-                    break
-            return bytes(buf).decode("utf-8", errors="ignore")
-
-        except ImportError:
-            self.logger.warning("requests not installed, cannot load from URL")
-            return ""
-        except Exception as e:
-            self.logger.error(f"Failed to load from URL {url}: {e}")
-            return ""
 
     # --- Anomaly Detection ---
     def detect_drift_spikes(

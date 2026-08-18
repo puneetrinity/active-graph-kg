@@ -2,7 +2,11 @@
 
 **Last Updated:** 2025-11-24
 **Version:** 1.0
-**Status:** Production
+**Status:** Current runtime plus explicitly labelled archived design
+
+> **Current launch boundary:** generic grounded Q&A, search explanation, semantic triggers, connectors, and
+> caller-selected URL/S3/local-file payload loading are unavailable. Their compatibility HTTP routes return 410.
+> Node content is admitted through inline properties or bounded multipart upload only.
 
 ---
 
@@ -18,7 +22,7 @@ and trigger modules describe dormant future design rather than a deployed monito
 
 - **Near-Real-Time Refresh:** Nodes auto-refresh based on configurable policies (interval or cron)
 - **Semantic Drift Detection:** Cosine distance tracking between old/new embeddings
-- **Trigger-Based Workflows:** Pattern matching emits events when nodes match semantic signatures
+- **Dormant Trigger Design:** retained code/schema is not launch-wired
 - **Hybrid Search:** BM25 + vector similarity with optional cross-encoder reranking
 - **Multi-Tenant:** Row-Level Security (RLS) for complete data isolation
 - **Production-Ready:** Connection pooling, Prometheus metrics, JWT auth, rate limiting
@@ -30,7 +34,7 @@ and trigger modules describe dormant future design rather than a deployed monito
 | **Database** | PostgreSQL 14+ with pgvector 0.7+ | Vector storage, JSONB flexibility, RLS |
 | **Vector Index** | IVFFLAT (auto-created) | Fast ANN search (10-100x speedup) |
 | **Embeddings** | sentence-transformers | Local embedding generation (384-dim) |
-| **LLM** | Groq (Llama 3.1) / OpenAI | Q&A with citations (optional) |
+| **Extraction LLM** | Provider configured by the extraction worker | Structured extraction only |
 | **Scheduler** | APScheduler | Background refresh cycles |
 | **API** | FastAPI | High-performance async endpoints |
 | **Auth** | JWT + rate limiting | Multi-tenant security |
@@ -51,7 +55,7 @@ CREATE TABLE nodes (
   tenant_id TEXT,                    -- Multi-tenant isolation
   classes TEXT[],                    -- Node type(s) for classification
   props JSONB,                       -- Flexible properties (text, metadata)
-  payload_ref TEXT,                  -- Reference to external content (s3://, http://, file://)
+  payload_ref TEXT,                  -- Historical inert metadata; never fetched
   embedding VECTOR(384),             -- Semantic embedding (all-MiniLM-L6-v2)
   metadata JSONB,                    -- Additional metadata (confidence, source_type, etc.)
   refresh_policy JSONB,              -- {"interval": "5m"} or {"cron": "*/5 * * * *"}
@@ -112,7 +116,8 @@ FastAPI-based REST API with JWT authentication and rate limiting.
 | `/nodes` | POST | Create node with auto-embedding | `main.py:250-290` |
 | `/nodes/{id}` | GET | Retrieve node by ID | `main.py:292-310` |
 | `/search` | POST | Semantic search (vector/hybrid) | `main.py:312-380` |
-| `/ask` | POST | Q&A with citations | `main.py:382-520` |
+| `/ask`, `/ask/stream` | POST | Unavailable compatibility tombstones (HTTP 410) | `api/retirement.py` |
+| `/debug/search_explain` | POST | Unavailable compatibility tombstone (HTTP 410) | `api/retirement.py` |
 | `/edges` | POST | Create relationship | `main.py:522-550` |
 | `/triggers` | POST/GET/DELETE | Unavailable compatibility tombstones (HTTP 410) | `api/retirement.py` |
 | `/events` | GET | Query event log | `main.py:612-640` |
@@ -265,20 +270,14 @@ ORDER BY depth;
 - Compliance audits (regulated data origins)
 - Debugging derived nodes
 
-#### Payload Loaders (`repository.py:271-354`)
+#### Inline Payload Text (`repository.py`)
 
-Fetch content from various sources for embedding:
+`GraphRepository.load_payload_text()` checks only the inline properties `text`, `resume_text`, `content`, `body`,
+and `description`, in that order. It never resolves `Node.payload_ref`.
 
-**Supported Sources:**
-- `s3://bucket/key` → Boto3 S3 fetch
-- `file:///path/to/file` → Local file read (path-traversal protected)
-- `http://` / `https://` → HTTP GET with 10s timeout
-- Inline text → `props['text']` fallback
+New node writes accept `payload_ref` only when omitted or JSON `null`. Historical values remain readable as inert
+metadata. Authenticated bounded multipart `/upload` parses content in memory and stores inline properties.
 
-**Security:**
-- Rejects paths with `..` or `/etc` prefixes
-- 10-second timeout for HTTP requests
-- Graceful degradation if libraries missing
 
 ### 4. Refresh Scheduler (`activekg/refresh/scheduler.py`)
 
@@ -316,7 +315,7 @@ class RefreshScheduler:
 2. For each node:
    - Check if due (cron OR interval)
 3. For due nodes:
-   - Fetch payload from payload_ref
+   - Read bounded inline text from node properties
    - Re-embed content
    - Compute drift: 1 - cosine_similarity(old, new)
    - Update embedding, drift_score, last_refreshed
@@ -583,7 +582,7 @@ There are two embedding modes:
 └────────────────────┘
 ```
 
-### Q&A Flow with Citations
+### Archived Q&A Flow with Citations (Unavailable)
 
 ```
 ┌─────────────────┐
@@ -741,7 +740,7 @@ the scheduler. The examples below describe retained design code, not active prod
 
 **Implementation:** `activekg/graph/repository.py:281-420`
 
-### 5. Q&A with Citations
+### 5. Archived Q&A with Citations (Unavailable)
 
 **What it does:** LLM-powered question answering with source attribution.
 
@@ -846,7 +845,7 @@ db/
 | Vector search | 145-279 | ANN search with optional weighted scoring |
 | Hybrid search | 281-420 | BM25 + vector fusion + reranking |
 | Lineage traversal | 142-185 | Recursive CTE for DERIVED_FROM edges |
-| Payload loaders | 271-354 | S3/HTTP/file content fetching |
+| Payload text | shared repository method | Inline textual node properties only; remote/local references are inert |
 | Event logging | 339-372 | Audit trail with actor tracking |
 
 #### API Main (`activekg/api/main.py`)
@@ -857,7 +856,7 @@ db/
 | Startup event | 122-145 | Vector index creation, scheduler start |
 | Health check | 180-195 | System status with component health |
 | Search endpoint | 312-380 | Hybrid/vector search routing |
-| Ask endpoint | 382-520 | Q&A with LLM routing and citations |
+| Ask compatibility routes | retirement router | Dependency-free HTTP 410 tombstones |
 | Admin refresh | 672-720 | Manual refresh trigger |
 
 #### Refresh Scheduler (`activekg/refresh/scheduler.py`)
@@ -924,7 +923,7 @@ def _check_custom_policy(self, node: Node, params: dict) -> bool:
     return True
 ```
 
-### 2. Custom Payload Loaders
+### 2. Archived Custom Payload Loader Design (Unavailable)
 
 **How to add a new content source:**
 
@@ -1111,7 +1110,7 @@ def custom_search_endpoint(request: CustomSearchRequest):
 
 **Dataset:** 100K nodes, 50 candidates, cross-encoder on top 50
 
-### Q&A Latency
+### Archived Q&A Latency Targets (Product Unavailable)
 
 | Configuration | p50 | p95 | p99 |
 |---------------|-----|-----|-----|
@@ -1152,13 +1151,14 @@ Active Graph KG is a production-ready, self-maintaining knowledge graph system w
 
 - **Automatic refresh:** Nodes update themselves based on policies
 - **Semantic drift tracking:** Measure content change over time
-- **Trigger-based workflows:** Pattern matching for event-driven systems
+- **Dormant trigger design:** retained without launch execution
 - **Hybrid search:** BM25 + vector + reranking for best quality
 - **Multi-tenant security:** Database-level RLS with JWT auth
 - **Production observability:** Prometheus metrics, structured logging
 - **Extensible architecture:** Clean extension points for custom logic
 
-**Core Strength:** Combines traditional graph capabilities with modern vector search and LLM integration, while maintaining automatic freshness without manual intervention.
+**Core Strength:** Combines graph capabilities with vector search and automatic freshness. Generic graph Q&A and
+external payload-reference loading are deliberately outside the launch runtime.
 
 **Deployment:** Single FastAPI app + PostgreSQL, scales to millions of nodes with proper indexing.
 

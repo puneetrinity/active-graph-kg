@@ -30,32 +30,30 @@ fi
 echo "Generated token (first 50 chars): ${TOKEN:0:50}..."
 echo ""
 
-# Test 3: Call /ask without JWT (should fail if JWT_ENABLED=true)
-echo "Test 3: /ask without JWT"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/ask" \
+# Test 3: Call /search without JWT (should fail if JWT_ENABLED=true)
+echo "Test 3: /search without JWT"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/search" \
   -H "Content-Type: application/json" \
-  -d '{"question":"test"}')
+  -d '{"query":"test","top_k":1}')
 
 if [ "$HTTP_CODE" = "401" ]; then
     echo "✅ PASS: Returned 401 (JWT required)"
-elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
+elif [ "$HTTP_CODE" = "200" ]; then
     echo "⚠️  PASS: Returned $HTTP_CODE (JWT disabled in dev mode)"
 else
     echo "❌ FAIL: Unexpected status code $HTTP_CODE"
 fi
 echo ""
 
-# Test 4: Call /ask with JWT (should succeed)
-echo "Test 4: /ask with JWT"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/ask" \
+# Test 4: Call /search with JWT (should succeed)
+echo "Test 4: /search with JWT"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/search" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"question":"What are vector databases?"}')
+  -d '{"query":"vector databases","top_k":1}')
 
 if [ "$HTTP_CODE" = "200" ]; then
     echo "✅ PASS: Returned 200 (request succeeded)"
-elif [ "$HTTP_CODE" = "503" ]; then
-    echo "⚠️  PASS: Returned 503 (LLM disabled, but JWT worked)"
 else
     echo "❌ FAIL: Unexpected status code $HTTP_CODE"
 fi
@@ -67,14 +65,14 @@ success=0
 rate_limited=0
 
 for i in {1..10}; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/ask" \
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API_URL/search" \
       -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
-      -d "{\"question\":\"test $i\"}")
+      -d "{\"query\":\"test $i\",\"top_k\":1}")
 
     if [ "$HTTP_CODE" = "429" ]; then
         rate_limited=$((rate_limited + 1))
-    elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
+    elif [ "$HTTP_CODE" = "200" ]; then
         success=$((success + 1))
     fi
 

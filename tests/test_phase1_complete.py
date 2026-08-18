@@ -8,7 +8,7 @@ Tests all claimed Phase 1 features:
 3. Pattern persistence (DB-backed)
 4. Trigger firing
 5. Embedding history writes
-6. Payload loaders (inline, file://, http://, s3://)
+6. Inline payload loading (remote/local payload references unavailable)
 7. Lineage traversal
 8. All API endpoints
 """
@@ -147,7 +147,7 @@ def test_refresh_scheduler(repo, embedder, trigger_engine):
 
 
 def test_payload_loaders(repo):
-    """Test payload loading methods."""
+    """Test the inline-only payload boundary."""
     print("\n=== Test 7: Payload Loaders ===")
 
     # Test inline
@@ -156,14 +156,12 @@ def test_payload_loaders(repo):
     assert text == "inline content"
     print("✓ Inline payload loader works")
 
-    # Test file:// (would need actual file)
-    print("✓ File loader exists (skipping live test)")
-
-    # Test http:// (would need network)
-    print("✓ HTTP loader exists (skipping live test)")
-
-    # Test s3:// (would need AWS)
-    print("✓ S3 loader exists (skipping live test)")
+    inert = Node(props={}, payload_ref="https://example.invalid/content")
+    assert repo.load_payload_text(inert) == ""
+    assert not hasattr(repo, "_load_from_url")
+    assert not hasattr(repo, "_load_from_file")
+    assert not hasattr(repo, "_load_from_s3")
+    print("✓ Remote/local payload references are inert")
 
 
 def test_lineage(repo, node_id):

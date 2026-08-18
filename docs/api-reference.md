@@ -46,7 +46,6 @@ When `JWT_ENABLED=true`, all endpoints require JWT authentication:
 | Scope | Endpoints |
 |-------|-----------|
 | `search:read` | `POST /search` |
-| `ask:read` | `POST /ask`, `POST /ask/stream` |
 | `kg:write` | `POST /nodes`, `POST /nodes/batch`, `POST /edges`, `POST /upload` |
 | `admin:refresh` | `POST /admin/refresh`, debug endpoints |
 
@@ -73,7 +72,6 @@ Configure via environment variables:
 - `ACTIVEKG_DSN`: PostgreSQL connection string (fallback: `DATABASE_URL` for PaaS)
 - `EMBEDDING_BACKEND`: Embedding provider (default: `sentence-transformers`)
 - `EMBEDDING_MODEL`: Model name (default: `all-MiniLM-L6-v2`)
-- `LLM_BACKEND`: LLM provider for `/ask` (default: `groq`)
 - `RUN_SCHEDULER`: Run scheduler on exactly one instance (default: `true`)
 - `PGVECTOR_INDEXES`: ANN index types (e.g., `ivfflat,hnsw`)
 - `SEARCH_DISTANCE`: Distance metric (default: `cosine`)
@@ -207,7 +205,7 @@ Create a new knowledge graph node.
     "title": "Senior ML Engineer",
     "location": "San Francisco"
   },
-  "payload_ref": "s3://bucket/job_123.json",
+  "payload_ref": null,
   "metadata": {
     "source": "linkedin",
     "posted_date": "2025-11-01"
@@ -225,7 +223,7 @@ Create a new knowledge graph node.
 |-------|------|----------|-------------|
 | `classes` | array[string] | Yes | Node class labels (1-10, max 100 chars each) |
 | `props` | object | Yes | Node properties (arbitrary JSON) |
-| `payload_ref` | string | No | External payload reference (URL, S3 key, max 500 chars) |
+| `payload_ref` | null | No | Compatibility field; non-null external references are unavailable |
 | `metadata` | object | No | Additional metadata (arbitrary JSON) |
 | `refresh_policy` | object | No | Auto-refresh configuration |
 | `triggers` | array[string] | No | Trigger pattern names to activate |
@@ -349,6 +347,9 @@ Retrieve a node by ID.
   "version": 1
 }
 ```
+
+`payload_ref` may appear on historical reads as inert metadata. New node writes accept only omitted or JSON `null`;
+Memory never fetches the value.
 
 **Status Codes:**
 - `200 OK`: Node found
@@ -731,280 +732,22 @@ curl -X POST http://localhost:8000/search \
 
 ---
 
-### Ask (LLM Q&A)
+### Grounded Q&A (Unavailable)
 
-#### POST /ask
+`POST /ask` and `POST /ask/stream` are dependency- and body-free compatibility tombstones. Both return HTTP 410,
+`Cache-Control: no-store`, and:
 
-LLM-powered Q&A with grounded citations from knowledge graph.
-
-**Authentication:** Required when JWT enabled
-
-**Request Body:**
 ```json
 {
-  "question": "What ML frameworks does the ML engineer position require?",
-  "max_results": 5,
-  "tenant_id": "acme_corp",
-  "use_weighted_score": true
-}
-```
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `question` | string | Yes | - | Question to answer (1-1000 chars) |
-| `max_results` | integer | No | 5 | Max context nodes to retrieve (1-20) |
-| `tenant_id` | string | No | null | Tenant ID (dev mode only, max 100 chars) |
-| `use_weighted_score` | boolean | No | true | Use recency/drift weighting |
-
-**Response:**
-```json
-{
-  "answer": "The ML engineer position requires PyTorch and TensorFlow [0], along with experience in scikit-learn [1].",
-  "citations": [
-    {
-      "node_id": "job_123",
-      "classes": ["Job"],
-      "drift_score": 0.08,
-      "age_days": 1.2,
-      "lineage": [
-        {
-          "ancestor": "linkedin_scrape_456",
-          "depth": 1
-        }
-      ]
-    }
-  ],
-  "confidence": 0.92,
-  "metadata": {
-    "searched_nodes": 20,
-    "filtered_nodes": 3,
-    "cited_nodes": 2,
-    "top_similarity": 0.854,
-    "top_vector_similarity": 0.854,
-    "max_vector_similarity": 0.862,
-    "gating_score": 0.854,
-    "gating_score_type": "rrf_fused",
-    "first_citation_idx": 0,
-    "citation_at_1_precision": 1.0,
-    "llm_path": "fast",
-    "routing_reason": "high_confidence_sim=0.854",
-    "intent_detected": "entity_job",
-    "intent_type": "entity_job",
-    "classes_filter": ["Job"],
-    "must_have_terms": ["machine learning engineer"],
-    "structured_results_count": 0
+  "detail": {
+    "code": "MEMORY_GROUNDED_QA_UNAVAILABLE",
+    "message": "Grounded Q&A and search explanation are not available."
   }
 }
 ```
 
-**Response Fields:**
+They do not authenticate, parse a body, search, rerank, call an LLM, stream, cache or record Q&A metrics.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `answer` | string | LLM-generated answer with citation markers [0], [1], etc. |
-| `citations` | array | Cited nodes with lineage and freshness metadata |
-| `confidence` | float | Answer confidence score (0.0-1.0) |
-| `metadata` | object | Search diagnostics and routing info |
-
-**Citation Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `node_id` | string | Cited node UUID |
-| `classes` | array[string] | Node class labels |
-| `drift_score` | float | Latest drift score (0.0-1.0) |
-| `age_days` | float | Days since last refresh |
-| `lineage` | array | Provenance chain (DERIVED_FROM edges) |
-
-**Metadata Fields:**
-
-**Interpretation Note:**  
-`top_similarity` reflects the **gating score** used for routing/guardrails (RRF/weighted/cosine depending on mode).  
-Use `top_vector_similarity` / `max_vector_similarity` for the **true cosine similarity** between query and document embeddings.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `searched_nodes` | integer | Total nodes retrieved |
-| `filtered_nodes` | integer | Nodes after similarity filtering |
-| `cited_nodes` | integer | Nodes actually cited in answer |
-| `top_similarity` | float | Gating score for the top result (RRF/weighted/cosine depending on mode). This is the score used for routing and low-similarity guardrails. |
-| `top_vector_similarity` | float | Cosine similarity for the top-ranked result (true vector similarity). |
-| `max_vector_similarity` | float | Max cosine similarity among candidate results (true vector similarity). |
-| `gating_score` | float | Score used for gating decision |
-| `gating_score_type` | string | Score type: `rrf_fused`, `weighted_fusion`, or `cosine` |
-| `first_citation_idx` | integer | Index of first citation (0-based) |
-| `citation_at_1_precision` | float | 1.0 if first citation is top result, 0.0 otherwise |
-| `llm_path` | string | LLM used: `fast` or `fallback` |
-| `routing_reason` | string | Why fast/fallback was chosen |
-| `intent_detected` | string | Detected query intent type |
-| `intent_type` | string | Intent category (e.g., `entity_job`, `open_positions`) |
-| `classes_filter` | array[string] | Node classes filtered by intent |
-| `must_have_terms` | array[string] | Required terms for intent-based filtering |
-
-**Scoring Modes (Hybrid Search):**
-
-- **`HYBRID_RRF_ENABLED=true` (default):**  
-  Uses Reciprocal Rank Fusion (RRF) over vector similarity rank and text rank.  
-  Scores are **small (≈0.01–0.04)** and should not be compared directly to cosine.  
-  Formula: `rrf = 1/(k + rank_vec) + 1/(k + rank_text)` where `k = HYBRID_RRF_K` (default 60).
-
-- **`HYBRID_RRF_ENABLED=false`:**  
-  Uses weighted fusion of vector similarity and text rank.  
-  Formula: `hybrid = vector_weight * vec_sim + text_weight * (ts_rank / max_ts_rank)`  
-  (default `vector_weight=0.7`, `text_weight=0.3`).
-
-**How `top_similarity` is computed:**  
-`top_similarity` is the **top gating score** produced by the hybrid search stage:
-- RRF mode → RRF score  
-- Weighted mode → weighted hybrid score  
-- Vector-only mode → cosine similarity
-
-**Recommended thresholds (defaults):**
-- `ASK_SIM_THRESHOLD=0.30` (low-confidence fallback threshold in /ask)  
-- `RRF_LOW_SIM_THRESHOLD=0.01` (extremely low similarity guardrail when RRF is enabled)  
-- `RAW_LOW_SIM_THRESHOLD=0.15` (extremely low similarity guardrail when RRF is disabled)
-
-**Example (RRF score vs cosine):**
-```json
-{
-  "top_similarity": 0.033,
-  "top_vector_similarity": 0.583,
-  "max_vector_similarity": 0.583,
-  "gating_score_type": "rrf_fused"
-}
-```
-In RRF mode, `top_similarity` is the fused ranking score (small values), while
-`top_vector_similarity` reflects the true cosine similarity of the top-ranked result.
-
-**Intent Detection:**
-
-The `/ask` endpoint detects structured query intents and applies specialized retrieval:
-
-- **`entity_job`**: Job posting queries → filters to `Job` class
-- **`entity_resume`**: Resume/experience queries → filters to `Resume` class
-- **`entity_article`**: Article/knowledge queries → filters to `Article` class
-- **`open_positions`**: Open positions queries → uses structured SQL query
-- **`performance_issues`**: Performance issue queries → uses structured SQL query
-
-**Hybrid Routing:**
-
-When `HYBRID_ROUTING_ENABLED=true`, the system routes to fast or fallback LLM:
-
-- **Fast path** (`openai/gpt-oss-20b`): High-confidence queries (top_sim >= 0.70)
-- **Fallback path** (`gpt-4o-mini`): Complex queries, low confidence, reasoning
-
-**Gating & Quality:**
-
-- **Extremely low similarity**: Returns "I don't have enough information" if top_sim < threshold
-- **Ambiguity gating**: Rejects if top 3 results are too similar (< 0.02 gap)
-- **Low similarity fallback**: Limits to top-1 result, caps confidence at 0.6
-- **Citation quality**: Tracks first citation precision (is top result cited?)
-
-**Status Codes:**
-- `200 OK`: Question answered (even if low confidence)
-- `400 Bad Request`: Invalid question
-- `401 Unauthorized`: Missing/invalid JWT
-- `429 Too Many Requests`: Rate limit exceeded (includes `Retry-After` header)
-- `503 Service Unavailable`: LLM disabled (`LLM_ENABLED=false`)
-- `500 Internal Server Error`: Processing failed
-
-**Example:**
-```bash
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "question": "What ML frameworks does the position require?",
-    "max_results": 5
-  }'
-```
-
-**Example (Low Confidence Response):**
-```json
-{
-  "answer": "I don't have enough information to answer this question confidently.",
-  "citations": [],
-  "confidence": 0.2,
-  "metadata": {
-    "searched_nodes": 5,
-    "cited_nodes": 0,
-    "filtered_nodes": 0,
-    "top_similarity": 0.12,
-    "gating_score": 0.12,
-    "gating_score_type": "rrf_fused",
-    "reason": "extremely_low_similarity"
-  }
-}
-```
-
-**Notes:**
-- Uses hybrid search (BM25+vector) with cross-encoder reranking by default
-- Citations include up to 3 ancestors in lineage chain
-- Confidence calculated from citation coverage, similarity, and intent match
-- Cached responses (TTL: 600s) for identical questions
-- Max concurrency: 3 concurrent requests per tenant
-- `tenant_id` from JWT overrides request body in production
-
----
-
-#### POST /ask/stream
-
-Server-Sent Events streaming for LLM Q&A.
-
-**Authentication:** Required when JWT enabled
-
-**Request Body:** Same as `/ask`
-
-**Response:** Server-Sent Events stream with three event types:
-
-1. **`context` event** (initial):
-```
-event: context
-data: {"type":"context","node_ids":["node_123","node_456"],"top_similarity":0.854,"count":3}
-```
-
-2. **`token` events** (streaming):
-```
-event: token
-data: {"type":"token","text":"The"}
-
-event: token
-data: {"type":"token","text":" position"}
-```
-
-3. **`final` event** (last):
-```
-event: final
-data: {"type":"final","answer":"The position requires PyTorch [0]","citations":[...],"confidence":0.92,"metadata":{...}}
-```
-
-4. **`error` event** (on failure):
-```
-event: error
-data: {"type":"error","message":"LLM generation failed"}
-```
-
-**Status Codes:**
-- `200 OK`: Stream started
-- `401 Unauthorized`: Missing/invalid JWT
-- `429 Too Many Requests`: Rate limit exceeded
-- `503 Service Unavailable`: LLM disabled
-
-**Example:**
-```bash
-curl -X POST http://localhost:8000/ask/stream \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"question": "What are the ML frameworks?"}' \
-  --no-buffer
-```
-
-**Notes:**
-- Max concurrency: 2 concurrent `/ask/stream` requests per tenant
-- Stricter rate limits than `/ask`
-- Use `--no-buffer` with curl to see streaming tokens
-
----
 
 ### Triggers & Patterns
 
@@ -1794,62 +1537,10 @@ curl http://localhost:8000/debug/search_sanity \
 
 #### POST /debug/search_explain
 
-Detailed search result triage with similarity scores and snippets.
+This compatibility registration returns the same body-free HTTP 410
+`MEMORY_GROUNDED_QA_UNAVAILABLE` response as `/ask`. Production score explanation is unavailable; use
+authenticated `/search` for direct retrieval.
 
-**Authentication:** Required (scope: `admin:refresh`) when JWT enabled
-
-**Request Body:**
-```json
-{
-  "query": "ML engineer",
-  "use_hybrid": true,
-  "top_k": 10
-}
-```
-
-**Response:**
-```json
-{
-  "query": "ML engineer",
-  "mode": "hybrid",
-  "score_type": "rrf_fused",
-  "score_range": "0.01-0.04 (low)",
-  "result_count": 10,
-  "results": [
-    {
-      "node_id": "node_123",
-      "similarity": 0.0342,
-      "score_type": "rrf_fused",
-      "classes": ["Job"],
-      "snippet": "Senior ML Engineer position requiring...",
-      "metadata": {"source": "linkedin"},
-      "has_embedding": true,
-      "has_text_search": true
-    }
-  ],
-  "threshold_info": {
-    "recommended_min": 0.15,
-    "recommended_max": 0.28,
-    "top_similarity": 0.0342,
-    "bottom_similarity": 0.0089
-  },
-  "scoring_notes": {
-    "rrf_fused": "RRF scores range 0.01-0.04 (rank-based fusion of vector+BM25)",
-    "weighted_fusion": "Weighted scores range 0.0-1.0 (linear combination of vector+BM25)",
-    "cosine": "Cosine similarity range 0.0-1.0 (vector-only)"
-  }
-}
-```
-
-**Example:**
-```bash
-curl -X POST http://localhost:8000/debug/search_explain \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"query": "ML engineer", "use_hybrid": true, "top_k": 10}'
-```
-
----
 
 #### GET /debug/embed_info
 
@@ -1900,7 +1591,7 @@ curl http://localhost:8000/debug/embed_info \
 
 #### GET /debug/intent
 
-Test intent detection without running full `/ask`.
+Test intent classification without running retrieval or model work.
 
 **Query Parameters:**
 
@@ -1967,7 +1658,7 @@ Common status codes:
 - `404 Not Found`: Resource not found
 - `429 Too Many Requests`: Rate limit exceeded (includes `Retry-After` header)
 - `500 Internal Server Error`: Server error
-- `503 Service Unavailable`: Service disabled (e.g., LLM_ENABLED=false)
+- `503 Service Unavailable`: A required active dependency is unavailable
 
 ---
 
@@ -1980,22 +1671,14 @@ Key environment variables:
 - `EMBEDDING_BACKEND`: `sentence-transformers`, `openai`, `cohere`
 - `EMBEDDING_MODEL`: Model name (default: `all-MiniLM-L6-v2`)
 
-### LLM (Q&A)
-- `LLM_ENABLED`: Enable `/ask` endpoint (default: `true`)
-- `LLM_BACKEND`: `groq`, `openai`, `litellm`
-- `LLM_MODEL`: Model name (development default: `openai/gpt-oss-20b`; set explicitly in Railway production)
+### Grounded Q&A
 
-### Hybrid Routing
-- `HYBRID_ROUTING_ENABLED`: Enable fast/fallback routing (default: `false`)
-- `ASK_FAST_BACKEND`: Fast LLM backend (default: `groq`)
-- `ASK_FAST_MODEL`: Fast model (development default: `openai/gpt-oss-20b`; set explicitly in Railway production)
-- `ASK_FALLBACK_BACKEND`: Fallback backend (default: `openai`)
-- `ASK_FALLBACK_MODEL`: Fallback model (default: `gpt-4o-mini`)
+Generic grounded Q&A is unavailable. The API process does not read `LLM_*`, `ASK_*` or hybrid Q&A routing
+configuration. Extraction-worker model configuration remains separate.
+
 
 ### Search & Retrieval
 - `WEIGHTED_SEARCH_CANDIDATE_FACTOR`: Candidate multiplier for weighted search (default: `2.0`)
-- `ASK_SIM_THRESHOLD`: Similarity cutoff for `/ask` (default: `0.30`)
-- `ASK_USE_RERANKER`: Enable cross-encoder reranking (default: `true`)
 - `RERANK_SKIP_TOPSIM`: Skip reranking if top_sim >= threshold (default: `0.80`)
 
 ### Authentication & Rate Limiting
@@ -2019,8 +1702,6 @@ Default rate limits per tenant (when `RATE_LIMIT_ENABLED=true`):
 | Endpoint | Limit | Window | Concurrency |
 |----------|-------|--------|-------------|
 | `/search` | 100 req | 1 min | - |
-| `/ask` | 20 req | 1 min | 3 concurrent |
-| `/ask/stream` | 10 req | 1 min | 2 concurrent |
 | `/nodes` | 50 req | 1 min | - |
 | `/edges` | 50 req | 1 min | - |
 | `/admin/refresh` | 10 req | 1 min | - |
@@ -2079,12 +1760,10 @@ Check for drift spikes and trigger storms:
 curl http://localhost:8000/admin/anomalies
 ```
 
-### 6. Inspect Low-Confidence Answers
+### 6. Evaluate Direct Retrieval
 
-Use `/ask` metadata to diagnose quality issues:
-- `top_similarity < 0.30`: Likely irrelevant context
-- `cited_nodes = 0`: No citations found (trust accordingly)
-- `ambiguity_reason`: Results too similar (query needs refinement)
+Use the isolated weighted-search evaluation for score-mode-aware retrieval checks. Generic Q&A and production
+search explanation are unavailable.
 
 ---
 
@@ -2093,7 +1772,7 @@ Use `/ask` metadata to diagnose quality issues:
 ### v0.1.0 (Current)
 - Initial release with core KG functionality
 - Hybrid search with BM25+vector fusion
-- LLM Q&A with grounded citations
+- Grounded-Q&A compatibility paths return HTTP 410 and perform no retrieval/provider work
 - Multi-tenant RLS support
 - JWT authentication
 - Rate limiting with Redis

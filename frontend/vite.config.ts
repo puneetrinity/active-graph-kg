@@ -23,25 +23,6 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/ask': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        // Disable buffering for SSE streaming
-        configure: (proxy, options) => {
-          proxy.on('proxyReq', (proxyReq, req, res) => {
-            // For /ask/stream, ensure we don't buffer
-            if (req.url?.includes('/ask/stream')) {
-              proxyReq.setHeader('Connection', 'keep-alive');
-            }
-          });
-          proxy.on('proxyRes', (proxyRes, req, res) => {
-            // For SSE endpoints, disable buffering
-            if (req.url?.includes('/ask/stream')) {
-              proxyRes.headers['x-accel-buffering'] = 'no';
-            }
-          });
-        },
-      },
       '/events': {
         target: 'http://localhost:8000',
         changeOrigin: true,

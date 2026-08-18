@@ -316,22 +316,10 @@ def search_nodes(request: Request, ...):
     ...
 ```
 
-### 3. Payload Size Limits
+### 3. Content Size Limits
 
-Update `activekg/graph/repository.py`:
-```python
-def _load_from_file(self, file_path: str) -> str:
-    """Load text from local file with size limit."""
-    MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB
-
-    file_size = os.path.getsize(file_path)
-    if file_size > MAX_PAYLOAD_SIZE:
-        self.logger.warning(f"Payload too large: {file_size} bytes")
-        return ''
-
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        return f.read(MAX_PAYLOAD_SIZE)
-```
+Set `MAX_REQUEST_SIZE_BYTES` for the API-wide body ceiling. Node content is accepted through bounded inline
+properties or authenticated multipart upload only; URL, S3 and local-file payload references are unavailable.
 
 ### 4. HTTPS/TLS (Required for production)
 

@@ -208,32 +208,24 @@ fi
 if [ "$DO_SMOKE" = true ]; then
     echo -e "\n${YELLOW}Running smoke tests...${NC}"
 
-    # Test 1: /debug/search_explain (hybrid)
-    echo -e "\n  Test 1: Hybrid search scoring"
-    HYBRID_RESULT=$(curl -s -X POST http://localhost:8000/debug/search_explain \
+    # Test 1: direct hybrid search
+    echo -e "\n  Test 1: Hybrid search"
+    HYBRID_RESULT=$(curl -s -X POST http://localhost:8000/search \
         -H "Content-Type: application/json" \
         -d '{"query":"machine learning engineer frameworks","use_hybrid":true,"top_k":5}' \
-        | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'score_type': d.get('score_type'), 'result_count': d.get('result_count'), 'score_range': d.get('score_range')}, indent=2))")
+        | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'count': d.get('count'), 'applied_limit': d.get('applied_limit')}, indent=2))")
     echo "$HYBRID_RESULT"
 
-    # Test 2: /debug/search_explain (vector-only)
-    echo -e "\n  Test 2: Vector-only search scoring"
-    VECTOR_RESULT=$(curl -s -X POST http://localhost:8000/debug/search_explain \
+    # Test 2: direct vector search
+    echo -e "\n  Test 2: Vector-only search"
+    VECTOR_RESULT=$(curl -s -X POST http://localhost:8000/search \
         -H "Content-Type: application/json" \
         -d '{"query":"machine learning engineer frameworks","use_hybrid":false,"top_k":5}' \
-        | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'score_type': d.get('score_type'), 'result_count': d.get('result_count'), 'score_range': d.get('score_range')}, indent=2))")
+        | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'count': d.get('count'), 'applied_limit': d.get('applied_limit')}, indent=2))")
     echo "$VECTOR_RESULT"
 
-    # Test 3: /ask endpoint metadata
-    echo -e "\n  Test 3: /ask endpoint metadata"
-    ASK_RESULT=$(curl -s -X POST http://localhost:8000/ask \
-        -H "Content-Type: application/json" \
-        -d '{"question":"What ML frameworks does the Machine Learning Engineer position require?"}' \
-        | python3 -c "import sys, json; d=json.load(sys.stdin); m=d.get('metadata',{}); print(json.dumps({'gating_score': m.get('gating_score'), 'gating_score_type': m.get('gating_score_type'), 'cited_nodes': m.get('cited_nodes'), 'confidence': d.get('confidence')}, indent=2))")
-    echo "$ASK_RESULT"
-
-    # Test 4: Embedding info
-    echo -e "\n  Test 4: Embedding configuration"
+    # Test 3: Embedding info
+    echo -e "\n  Test 3: Embedding configuration"
     EMBED_RESULT=$(curl -s http://localhost:8000/debug/embed_info \
         | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'backend': d.get('backend'), 'model': d.get('model'), 'dimension': d.get('vector_dimension',{}).get('db_dim')}, indent=2))")
     echo "$EMBED_RESULT"
