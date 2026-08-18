@@ -34,7 +34,7 @@ Operational Guides (selected)
 - TUNING_PRESETS.md
 - RUNBOOK.md
 - OPERATIONS.md (product-level)
-- docs/operations/OPERATIONS.md (connectors)
+- docs/operations/OPERATIONS.md (archived connector design; unavailable)
 
 Miscellaneous Summaries
 - STATUS.md
@@ -46,4 +46,3 @@ Miscellaneous Summaries
 Notes
 - This index is for convenience only; it does not move files.
 - Auto-generated proof report lives at: `evaluation/PROOF_POINTS_REPORT.md`
-

@@ -1,5 +1,8 @@
 # Active Graph KG Operations Guide
 
+> **CONNECTOR OPERATIONS ARCHIVED — DO NOT RUN.** S3/GCS/Drive connectors, webhooks, pollers and the connector
+> worker are unavailable. Connector procedures below are dormant future-design material, not current operations.
+
 **Last Updated**: 2026-02-03
 **Target Audience**: SREs, DevOps, Production Support
 

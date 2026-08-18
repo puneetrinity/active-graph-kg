@@ -295,41 +295,9 @@ class ConnectorWorker:
 
 
 def start_worker():
-    """CLI entry point for starting worker.
-
-    Usage:
-        python -m activekg.connectors.worker
-    """
-    import os
-
-    from activekg.common.metrics import get_redis_client
-    from activekg.graph.repository import GraphRepository
-
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
-    # Get dependencies
-    redis_client = get_redis_client()
-    from activekg.common.env import env_str
-
-    dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])  # empty string if not set
-    if not dsn:
-        logger.error("ACTIVEKG_DSN/DATABASE_URL not set")
-        sys.exit(1)
-
-    repo = GraphRepository(dsn)
-
-    # Create and run worker
-    worker = ConnectorWorker(
-        redis_client=redis_client,
-        repo=repo,
-        batch_size=int(os.getenv("CONNECTOR_WORKER_BATCH_SIZE", "10")),
-        poll_interval_seconds=float(os.getenv("CONNECTOR_WORKER_POLL_INTERVAL", "1.0")),
-    )
-
-    worker.run()
+    """Fail closed while the connector product is unavailable."""
+    print("MEMORY_CONNECTORS_UNAVAILABLE: Connectors are not available.", file=sys.stderr)
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

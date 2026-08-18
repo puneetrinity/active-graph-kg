@@ -8,7 +8,9 @@
 
 ## System Overview
 
-Active Graph KG is a **self-refreshing knowledge graph** where nodes automatically update their embeddings, track semantic drift, and emit triggers based on content changes. Unlike traditional static knowledge graphs, Active Graph KG continuously monitors and refreshes node content from authoritative sources (S3, HTTP, local files), enabling near-real-time knowledge maintenance without manual intervention.
+Active Graph KG is a **self-refreshing knowledge graph** where nodes can update embeddings and track semantic
+drift. S3/GCS/Drive connector synchronization and semantic-trigger execution are unavailable; retained connector
+and trigger modules describe dormant future design rather than a deployed monitoring capability.
 
 **Core Innovation:** Nodes are "active" - they know when they need refreshing, detect drift in their content, and trigger downstream workflows when semantically significant changes occur.
 

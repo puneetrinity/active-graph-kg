@@ -30,7 +30,6 @@ jobs:
       LLM_ENABLED: 'false'
       AUTO_INDEX_ON_STARTUP: 'false'
       JWT_ENABLED: 'false'
-      CONNECTOR_KEK_V1: YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA=
       TOKEN: ${{ secrets.E2E_ADMIN_TOKEN || 'dummy-token-jwt-disabled' }}
 
     steps:

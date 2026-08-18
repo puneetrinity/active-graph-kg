@@ -1,5 +1,8 @@
 # AWS S3 Connector
 
+> **DORMANT FUTURE DESIGN — NOT AVAILABLE.** Do not follow the commands in this document. The API accepts no S3
+> configuration or webhook and returns HTTP 410 on every connector compatibility route.
+
 Complete guide for integrating ActiveKG with AWS S3 to automatically sync and embed documents.
 
 ## Overview
@@ -328,5 +331,5 @@ print(f"Connector created: {config_id}")
 
 ---
 
-**Status:** ✅ Production Ready
+**Status:** Dormant future design; unavailable.
 **Last Updated:** 2025-11-24

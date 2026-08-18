@@ -1,5 +1,9 @@
 # Active Graph KG - Operations Guide
 
+> **Connector product unavailable.** Any connector cache, key-rotation, poller, webhook or worker procedure below
+> is retained only as historical future-design material. Do not run it against a deployed environment. The API
+> requires no connector key/configuration and all connector compatibility routes return HTTP 410.
+
 **Last Updated**: 2025-11-17
 
 ## Table of Contents

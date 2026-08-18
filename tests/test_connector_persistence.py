@@ -21,6 +21,14 @@ import os
 import subprocess
 import time
 
+import pytest
+
+if __name__ == "__main__":
+    print("MEMORY_CONNECTORS_UNAVAILABLE: connector persistence proof is archived.")
+    raise SystemExit(1)
+
+pytest.skip("connector product unavailable", allow_module_level=True)
+
 # Base URL
 BASE_URL = "http://localhost:8000"
 

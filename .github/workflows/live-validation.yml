@@ -40,8 +40,6 @@ jobs:
       AUTO_INDEX_ON_STARTUP: "false"
       # JWT dev token should be set as secret if you enable smoke/extended
       TOKEN: ${{ secrets.E2E_ADMIN_TOKEN }}
-      # Connector encryption key for API startup
-      CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
 
     steps:
       - name: Checkout
@@ -102,4 +100,3 @@ jobs:
           name: proof-points-report
           path: evaluation/PROOF_POINTS_REPORT.md
           if-no-files-found: ignore
-

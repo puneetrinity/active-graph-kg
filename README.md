@@ -48,23 +48,11 @@ Unlike traditional knowledge graphs, Active Graph KG **actively maintains itself
 
 ---
 
-## Supported Connectors
+## Connectors
 
-Active Graph KG automatically syncs content from cloud storage:
-
-| Provider | Status | Documentation |
-|----------|--------|---------------|
-| **AWS S3** | ✅ Production | [S3 Connector Guide](docs/S3_CONNECTOR.md) |
-| **Google Cloud Storage** | ✅ Production | [GCS Connector Guide](docs/GCS_CONNECTOR.md) |
-| **Google Drive** | ✅ Production | [Drive Connector Guide](docs/DRIVE_CONNECTOR.md) |
-| Azure Blob Storage | 🚧 Planned | Config schema ready |
-
-**Features:**
-- Automatic polling for new/updated files
-- Incremental sync with cursor-based pagination
-- Multi-format support (PDF, DOCX, HTML, TXT)
-- ETag/generation-based change detection
-- Idempotent ingestion (no duplicates)
+S3, Google Cloud Storage, Google Drive and future ATS connectors are **not available**. Their 15 historical
+administration and webhook registrations return HTTP 410 without reading credentials, configuration, queues or
+request bodies. Provider-neutral implementation is retained as dormant future-design material only.
 
 ---
 
@@ -265,8 +253,7 @@ Set `{{base_url}}` (default `http://localhost:8000`) and run requests for `/heal
 
 ---
 
-See also:
-- docs/operations/connectors.md — Idempotency, cursors, rotation
+Historical connector design notes are retained in the repository but are not current operating instructions.
 
 ## Makefile Shortcuts
 
@@ -583,19 +570,12 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 - `POST /admin/refresh` - Trigger on-demand refresh
 - `GET /admin/anomalies` - Detect anomalies in node embeddings
 - `GET /_admin/security/limits` - Get security configuration and limits
-- `POST /_admin/connectors/rotate_keys` - Rotate connector encryption keys
-- `GET /_admin/connectors/cache/health` - Check connector cache health
 
-### Connectors (Admin)
-- `POST /_admin/connectors/configs` - Create connector configuration
-- `GET /_admin/connectors/configs` - List all connector configs
-- `GET /_admin/connectors/configs/{config_id}` - Get specific config
-- `PUT /_admin/connectors/configs/{config_id}` - Update config
-- `DELETE /_admin/connectors/configs/{config_id}` - Delete config
-- `POST /_admin/connectors/configs/{config_id}/test` - Test connection
-- `POST /_admin/connectors/configs/{config_id}/sync` - Trigger manual sync
-- `GET /_admin/connectors/runs` - List connector run history
-- `GET /_admin/connectors/runs/{run_id}` - Get specific run details
+### Connectors (Unavailable)
+- All 13 `/_admin/connectors/*` compatibility methods return HTTP 410 with
+  `MEMORY_CONNECTORS_UNAVAILABLE` and `Cache-Control: no-store`.
+- `POST /_webhooks/s3` and `GET /_webhooks/s3/health` return the same no-work response.
+- No connector poller or connector worker is started.
 
 ### Debug & Diagnostics
 - `GET /debug/embed_info` - Embedding backend status

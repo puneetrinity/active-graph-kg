@@ -413,36 +413,24 @@ def test_admin_refresh():
         print_test("POST /admin/refresh", False, str(e))
 
 
-def test_connectors_admin():
-    """Test connector admin endpoints."""
-    print_section("Connector Admin")
+def test_connectors_unavailable():
+    """Verify the connector product stays quarantined."""
+    print_section("Connector Product Quarantine")
 
-    # List connectors
     try:
         resp = requests.get(
             f"{API_URL}/_admin/connectors/",
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
             timeout=10,
         )
-        data = resp.json()
-        passed = resp.status_code == 200
-        print_test(
-            "GET /_admin/connectors/", passed, f"Found {len(data.get('connectors', []))} connectors"
+        expected_code = resp.json().get("detail", {}).get("code")
+        passed = (
+            resp.status_code == 410
+            and resp.headers.get("cache-control") == "no-store"
+            and expected_code == "MEMORY_CONNECTORS_UNAVAILABLE"
         )
+        print_test("Connector product unavailable", passed, resp.text[:160])
     except Exception as e:
-        print_test("GET /_admin/connectors/", False, str(e))
-
-    # Cache health
-    try:
-        resp = requests.get(
-            f"{API_URL}/_admin/connectors/cache/health",
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
-            timeout=10,
-        )
-        passed = resp.status_code == 200
-        print_test("GET /_admin/connectors/cache/health", passed, resp.text[:100])
-    except Exception as e:
-        print_test("GET /_admin/connectors/cache/health", False, str(e))
+        print_test("Connector product unavailable", False, str(e))
 
 
 def test_auth_rls():
@@ -626,7 +614,9 @@ def main():
     results.append(("Q&A", lambda: (test_qa(), True)[1] or True))
     results.append(("Events & Lineage", lambda: (test_events_lineage(), True)[1] or True))
     results.append(("Admin Refresh", lambda: (test_admin_refresh(), True)[1] or True))
-    results.append(("Connectors Admin", lambda: (test_connectors_admin(), True)[1] or True))
+    results.append(
+        ("Connector Product Quarantine", lambda: (test_connectors_unavailable(), True)[1] or True)
+    )
 
     # Execute callable tests
     executed_results = []

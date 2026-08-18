@@ -1,5 +1,8 @@
 # Drive Connector E2E Validation (Staging)
 
+> **ARCHIVED — DO NOT RUN.** The Drive connector is unavailable. This checklist is retained only as future-design
+> history and is not part of current staging or production validation.
+
 Use this checklist to validate the Drive poller → Redis → worker → DB path in a staging environment.
 
 ## Prerequisites

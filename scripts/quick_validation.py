@@ -159,34 +159,30 @@ def test_ask():
 test("POST /search", test_search)
 test("POST /ask", test_ask)
 
-# 5. Connectors admin
-print("\nConnector Admin Tests:")
+# 5. Closed connector product
+print("\nConnector Retirement Tests:")
 
 
-def test_connectors_list():
+def test_connectors_unavailable():
     resp = requests.get(
         f"{API_URL}/_admin/connectors/",
-        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
         timeout=10,
     )
-    data = resp.json() if resp.status_code == 200 else {}
-    print(f"  Connectors: {len(data.get('connectors', []))}")
-    return resp.status_code == 200
-
-
-def test_cache_health():
-    resp = requests.get(
-        f"{API_URL}/_admin/connectors/cache/health",
-        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
-        timeout=10,
+    expected = {
+        "detail": {
+            "code": "MEMORY_CONNECTORS_UNAVAILABLE",
+            "message": "Connectors are not available.",
+        }
+    }
+    print(f"  Connector boundary: HTTP {resp.status_code}")
+    return (
+        resp.status_code == 410
+        and resp.headers.get("cache-control") == "no-store"
+        and resp.json() == expected
     )
-    data = resp.json() if resp.status_code == 200 else {}
-    print(f"  Cache status: {data.get('status', 'unknown')}")
-    return resp.status_code == 200
 
 
-test("GET /_admin/connectors/", test_connectors_list)
-test("GET /_admin/connectors/cache/health", test_cache_health)
+test("Connector product unavailable", test_connectors_unavailable)
 
 print("\n" + "=" * 60)
 print("VALIDATION COMPLETE")

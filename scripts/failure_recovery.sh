@@ -20,8 +20,6 @@ code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/ask/stream" \
 echo "POST /ask/stream -> ${code}"
 
 echo "== Connector poller errors (if any) exposed in Prometheus =="
-curl -sS "${API_URL}/prometheus" | grep -E '^connector_poller_errors_total' || true
 
 echo "(For full chaos tests, add guarded /_admin/simulate_failure endpoints)"
 echo "✓ Failure recovery placeholder probe complete"
-
