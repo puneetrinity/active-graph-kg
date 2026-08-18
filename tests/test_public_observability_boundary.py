@@ -150,6 +150,22 @@ def test_readyz_uses_bounded_result_after_auth() -> None:
     }
 
 
+def test_authenticated_no_cache_directive_forces_a_fresh_readiness_snapshot() -> None:
+    class RecordingCoordinator:
+        force_refresh: bool | None = None
+
+        def run(self, _check, *, force_refresh: bool = False) -> ReadinessResult:
+            self.force_refresh = force_refresh
+            return ReadinessResult(True)
+
+    coordinator = RecordingCoordinator()
+    with patch.object(main, "_readiness_coordinator", coordinator):
+        response = main.readyz(None, "max-age=0, no-cache")
+
+    assert response.status_code == 200
+    assert coordinator.force_refresh is True
+
+
 def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() -> None:
     class FakeCursor:
         def __init__(self) -> None:
@@ -182,22 +198,107 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     (name, hashlib.sha256((base / name).read_bytes()).hexdigest())
                     for name in operational.MIGRATIONS
                 ]
+            if "SELECT 'index'" in self.last:
+                rows = [("index", name, {"valid": True}) for name in operational._REQUIRED_INDEXES]
+                for name in operational._REQUIRED_FUNCTIONS:
+                    details = {}
+                    if name == operational._APPEND_ONLY_FUNCTION:
+                        details = {
+                            "arguments": 0,
+                            "returns_trigger": True,
+                            "language": "plpgsql",
+                            "security_definer": False,
+                            "source": operational._APPEND_ONLY_FUNCTION_BODY,
+                            "owned_by_runtime": False,
+                        }
+                    rows.append(("function", name, details))
+                for table, names in operational._REQUIRED_CONSTRAINTS_BY_TABLE.items():
+                    for name in names:
+                        details = {
+                            "type": "c",
+                            "delete_action": " ",
+                            "validated": True,
+                            "definition": "CHECK (true)",
+                        }
+                        expected_check = operational._EXPECTED_CHECK_DEFINITIONS.get((table, name))
+                        expected_structural = operational._EXPECTED_STRUCTURAL_DEFINITIONS.get(
+                            (table, name)
+                        )
+                        if expected_check is not None:
+                            details["definition"] = expected_check
+                        if expected_structural is not None:
+                            details["type"] = expected_structural[0]
+                            details["definition"] = expected_structural[1]
+                        rows.append(("constraint", f"{table}.{name}", details))
+                rows.extend(
+                    (
+                        "trigger",
+                        f"{table}.{name}",
+                        {"function": function, "type": trigger_type, "enabled": "O"},
+                    )
+                    for table, name, function, trigger_type in operational._SUPPRESSION_TRIGGERS
+                )
+                rows.append(
+                    (
+                        "sequence",
+                        operational._SUPPRESSION_SEQUENCE,
+                        {"kind": "S", "usage": True, "owned_by_runtime": False},
+                    )
+                )
+                rows.extend(("public_column", name, {}) for name in operational._PUBLIC_COLUMNS)
+                rows.append(
+                    (
+                        "privilege",
+                        "suppression_tables",
+                        {
+                            "receipt_select": True,
+                            "receipt_insert": True,
+                            "receipt_update": False,
+                            "receipt_delete": False,
+                            "receipt_truncate": False,
+                            "tombstone_delete": False,
+                            "tombstone_truncate": False,
+                            "person_delete": False,
+                            "person_truncate": False,
+                        },
+                    )
+                )
+                return rows
             if "FROM pg_class c" in self.last:
                 return [
                     (name, True, name == "candidate_contact_evidence", "owner", "runtime")
                     for name in operational._CANDIDATE_TABLES + operational._SHARED_TABLES
                 ]
             if "FROM pg_policies" in self.last:
-                return [
-                    (name, "tenant_id = current_setting('app.current_tenant_id', true)", None)
-                    for name in operational._CANDIDATE_TABLES
-                ]
-            if "SELECT 'index'" in self.last:
-                return (
-                    [("index", name) for name in operational._REQUIRED_INDEXES]
-                    + [("function", name) for name in operational._REQUIRED_FUNCTIONS]
-                    + [("constraint", name) for name in operational._REQUIRED_CONSTRAINTS]
+                tenant_expression = (
+                    "((tenant_id = current_setting('app.current_tenant_id', true)) "
+                    "AND (tenant_id <> '__quarantine__'))"
                 )
+                rows = []
+                for name in operational._CANDIDATE_TABLES:
+                    rows.extend(
+                        [
+                            (
+                                name,
+                                f"tenant_isolation_{name}",
+                                "PERMISSIVE",
+                                "{public}",
+                                "ALL",
+                                tenant_expression,
+                                tenant_expression,
+                            ),
+                            (
+                                name,
+                                f"admin_all_{name}",
+                                "PERMISSIVE",
+                                "{admin_role}",
+                                "ALL",
+                                "true",
+                                "true",
+                            ),
+                        ]
+                    )
+                return rows
             raise AssertionError(self.last)
 
     cursor = FakeCursor()
@@ -232,6 +333,20 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
     assert FakeRepository.pool.timeout == 0.25
     assert len(cursor.statements) == 8
     assert not any("count(" in statement.lower() for statement in cursor.statements)
+
+    cached = ReadinessCoordinator()
+    checks = 0
+
+    def changing_check() -> ReadinessResult:
+        nonlocal checks
+        checks += 1
+        return ReadinessResult(checks == 1)
+
+    assert cached.run(changing_check).ready
+    assert cached.run(changing_check).ready
+    assert checks == 1
+    assert not cached.run(changing_check, force_refresh=True).ready
+    assert checks == 2
 
     coordinator = ReadinessCoordinator()
     coordinator._lock.acquire()

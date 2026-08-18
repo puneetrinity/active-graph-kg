@@ -478,10 +478,18 @@ def _require_control_plane(
 
 
 @app.get("/readyz", response_model=None)
-def readyz(_control_plane: None = Depends(_require_control_plane)) -> JSONResponse:
+def readyz(
+    _control_plane: None = Depends(_require_control_plane),
+    cache_control: str | None = Header(default=None, alias="Cache-Control"),
+) -> JSONResponse:
     """Return one cached, single-flight, bounded readiness snapshot."""
 
     del _control_plane
+    raw_cache_control = cache_control if isinstance(cache_control, str) else ""
+    force_refresh = any(
+        directive.partition("=")[0].strip().lower() == "no-cache"
+        for directive in raw_cache_control.split(",")
+    )
     try:
         result = _readiness_coordinator.run(
             lambda: bounded_readiness_check(
@@ -491,7 +499,8 @@ def readyz(_control_plane: None = Depends(_require_control_plane)) -> JSONRespon
                 ),
                 jwt_enabled=JWT_ENABLED,
                 jwt_problems=verification_key_problems(),
-            )
+            ),
+            force_refresh=force_refresh,
         )
     except OperationalBusy:
         return JSONResponse(
