@@ -127,39 +127,7 @@ if node_id:
     test("PUT /nodes/{id}", update_node)
 test("DELETE /nodes/{id}?hard=true", delete_node_hard)
 
-# 3. Triggers (corrected endpoint)
-print("\nTrigger Tests:")
-
-
-def list_triggers():
-    resp = requests.get(
-        f"{API_URL}/triggers", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, timeout=10
-    )
-    data = resp.json()
-    print(f"  Existing triggers: {len(data.get('triggers', []))}")
-    return resp.status_code == 200
-
-
-def create_trigger():
-    resp = requests.post(
-        f"{API_URL}/triggers",
-        headers={"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"},
-        json={
-            "name": "validation_trigger",
-            "example_text": "This is a validation test",
-            "description": "Quick validation trigger",
-        },
-        timeout=10,
-    )
-    data = resp.json() if resp.status_code == 200 else {}
-    print(f"  Created trigger: {data.get('name')}")
-    return resp.status_code == 200
-
-
-test("GET /triggers", list_triggers)
-test("POST /triggers", create_trigger)
-
-# 4. Search & Q&A
+# 3. Search & Q&A
 print("\nSearch & Q&A Tests:")
 
 

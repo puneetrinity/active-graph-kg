@@ -2,10 +2,9 @@
 """
 Smoke Test - Quick E2E validation of Phase 1 MVP
 
-Tests the three critical flows:
+Tests the two available critical flows:
 1. Refresh cycle → embedding_history + gated event
-2. Pattern registration → trigger_fired event
-3. Lineage chain → recursive traversal
+2. Lineage chain → recursive traversal
 """
 
 import sys
@@ -61,68 +60,9 @@ def test_refresh_cycle():
     return node_id
 
 
-def test_pattern_trigger():
-    """Test: Register pattern → create matching node → trigger_fired event."""
-    print("\n=== Test 2: Pattern Registration & Trigger Firing ===")
-
-    # 1. Register pattern
-    pattern_data = {
-        "name": "fraud_test",
-        "example_text": "suspicious wire transfer to offshore account with unusual pattern",
-        "description": "Detects potential fraud",
-    }
-
-    resp = requests.post(f"{BASE_URL}/triggers", json=pattern_data)
-    assert resp.status_code == 200, f"Failed to register pattern: {resp.text}"
-    print(f"✓ Registered pattern: {resp.json()['name']}")
-
-    # 2. List patterns to verify DB persistence
-    resp = requests.get(f"{BASE_URL}/triggers")
-    assert resp.status_code == 200
-    patterns = resp.json()["patterns"]
-    assert any(p["name"] == "fraud_test" for p in patterns), "Pattern not in DB"
-    print(f"✓ Pattern persisted in DB (found {len(patterns)} total patterns)")
-
-    # 3. Create node with trigger
-    node_data = {
-        "classes": ["Transaction"],
-        "props": {"text": "large wire transfer to offshore account flagged by system"},
-        "triggers": [{"name": "fraud_test", "threshold": 0.7}],
-    }
-
-    resp = requests.post(f"{BASE_URL}/nodes", json=node_data)
-    assert resp.status_code == 200
-    node_id = resp.json()["id"]
-    print(f"✓ Created node with trigger: {node_id}")
-
-    # 4. Wait for trigger cycle (runs every 2min)
-    print("  Waiting 125 seconds for trigger cycle...")
-    time.sleep(125)
-
-    # 5. Check for trigger_fired events
-    resp = requests.get(f"{BASE_URL}/events", params={"event_type": "trigger_fired"})
-    assert resp.status_code == 200
-    events = resp.json()["events"]
-
-    if len(events) > 0:
-        print(f"✓ Found {len(events)} trigger_fired events")
-        for event in events[:3]:
-            print(
-                f"  - Trigger: {event['payload'].get('trigger')}, similarity: {event['payload'].get('similarity', 0):.4f}"
-            )
-    else:
-        print("⚠ No trigger_fired events yet (may need more time or similarity below threshold)")
-
-    # 6. Cleanup
-    resp = requests.delete(f"{BASE_URL}/triggers/fraud_test")
-    print("✓ Cleaned up test pattern")
-
-    return node_id
-
-
 def test_lineage_chain():
     """Test: Create chain A→B→C via DERIVED_FROM → traverse lineage."""
-    print("\n=== Test 3: Lineage Chain Traversal ===")
+    print("\n=== Test 2: Lineage Chain Traversal ===")
 
     # 1. Create parent (C)
     parent_data = {
@@ -234,7 +174,6 @@ def main():
     try:
         # Run tests
         node_id_1 = test_refresh_cycle()
-        node_id_2 = test_pattern_trigger()
         child_id, intermediate_id, parent_id = test_lineage_chain()
         result_count = test_search()
 
@@ -243,11 +182,11 @@ def main():
         print("=" * 70)
         print("\nCreated Resources:")
         print(
-            f"  - Nodes: {node_id_1[:8]}..., {node_id_2[:8]}..., {child_id[:8]}..., {intermediate_id[:8]}..., {parent_id[:8]}..."
+            f"  - Nodes: {node_id_1[:8]}..., {child_id[:8]}..., {intermediate_id[:8]}..., {parent_id[:8]}..."
         )
         print(f"  - Search results: {result_count} nodes indexed")
         print("\nNext Steps:")
-        print("  1. Check /events for 'refreshed' and 'trigger_fired' events")
+        print("  1. Check /events for refreshed events")
         print("  2. Query embedding_history table in DB")
         print("  3. Enable vector index: psql -f enable_vector_index.sql")
 

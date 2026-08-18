@@ -91,25 +91,11 @@ p99: 9ms
 
 ---
 
-### 4. **Trigger & Refresh Effectiveness**
+### 4. **Semantic Trigger Status**
 
-| Metric | Source | Make Target | Competitive Benchmark |
-|--------|--------|-------------|----------------------|
-| Triggers Fired (total) | Prometheus `activekg_triggers_fired_total` | `make trigger-effectiveness` | N/A (feature-specific) |
-| Trigger Run Latency p50 | Prometheus `activekg_trigger_run_latency_seconds_bucket` | Grafana dashboard | <100ms |
-| Trigger Run Latency p95 | Same | Same | <500ms |
-| Pattern Match Rate | `scripts/trigger_effectiveness.sh` | `make trigger-effectiveness` | 100% (test validation) |
-
-**Live Test**: Creates node with triggers → refresh → polls `/events` for `trigger_fired`
-
-**Prometheus Metrics**:
-```promql
-# Total triggers fired by pattern and mode
-activekg_triggers_fired_total{pattern="research_alert", mode="post_refresh"}
-
-# Trigger run latency histogram
-histogram_quantile(0.95, activekg_trigger_run_latency_seconds_bucket{mode="post_refresh"})
-```
+Semantic-trigger CRUD and evaluation are unavailable for launch. The compatibility routes return HTTP 410 and
+`scripts/trigger_effectiveness.sh` exits locally without making a request. Historical trigger metrics do not prove
+current product readiness and are not a launch proof point.
 
 ---
 

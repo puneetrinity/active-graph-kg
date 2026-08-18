@@ -184,6 +184,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/_admin/connectors/{provider}/ingest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest
+         * @description List files from connector and queue them for ingestion.
+         *
+         *     This endpoint lists files from the configured bucket/folder and pushes them
+         *     to the Redis queue for async processing by the ConnectorWorker.
+         *
+         *     Safeguards:
+         *     - dry_run=True (default): Preview what would be queued without actually queuing
+         *     - max_items: Cap total items per request (default 1000, max 10000)
+         *     - batch_size: Process in chunks (default 100, max 500)
+         *     - skip_existing: Dedupe against already queued/processed items
+         *     - Requires super_admin scope
+         *
+         *     Returns:
+         *         job_id: Unique identifier for this ingest job
+         *         queued_count: Number of items actually queued
+         *         skipped_count: Number of items skipped (already processed/queued)
+         *         total_found: Total items found in source
+         *         dry_run: Whether this was a preview only
+         *         next_cursor: Cursor for next page (null if done)
+         */
+        post: operations["ingest__admin_connectors__provider__ingest_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/_admin/connectors/{provider}/queue-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Queue Status
+         * @description Get the current queue depth for a connector.
+         *
+         *     Use this to monitor ingestion progress after calling /ingest.
+         *     Requires super_admin scope.
+         */
+        get: operations["queue_status__admin_connectors__provider__queue_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/_webhooks/s3": {
         parameters: {
             query?: never;
@@ -240,18 +301,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/_webhooks/gcs/health": {
+    "/global-candidates/upsert": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Gcs Webhook Health
-         * @description Health check for GCS webhook endpoint (Redis connectivity).
-         */
-        get: operations["gcs_webhook_health__webhooks_gcs_health_get"];
+        get?: never;
+        put?: never;
+        /** Upsert Global Candidate */
+        post: operations["upsert_global_candidate_global_candidates_upsert_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/global-candidates/by-anchor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get By Anchor */
+        get: operations["get_by_anchor_global_candidates_by_anchor_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -260,7 +335,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/_webhooks/gcs": {
+    "/global-candidates/{candidate_id}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Provenance */
+        post: operations["create_provenance_global_candidates__candidate_id__provenance_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/global-candidates/{candidate_id}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upsert Access */
+        post: operations["upsert_access_global_candidates__candidate_id__access_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/feedback-events/ingest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ingest Feedback Events */
+        post: operations["ingest_feedback_events_feedback_events_ingest_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contact-evidence/record": {
         parameters: {
             query?: never;
             header?: never;
@@ -270,21 +396,199 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Handle Gcs Pubsub
-         * @description Handle Google Cloud Pub/Sub push for GCS notifications.
-         *
-         *     Expected JSON envelope:
-         *     {
-         *       "message": {
-         *         "messageId": "...",
-         *         "data": "base64-encoded",
-         *         "attributes": { "bucketId": "...", "objectId": "...", "eventType": "...", "objectGeneration": "..." }
-         *       },
-         *       "subscription": "projects/.../subscriptions/..."
-         *     }
+         * Record Contact Evidence
+         * @description Record provider evidence without turning it into a shared profile field.
          */
-        post: operations["handle_gcs_pubsub__webhooks_gcs_post"];
+        post: operations["record_contact_evidence_contact_evidence_record_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contact-evidence/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lookup Contact Evidence
+         * @description Return only this tenant's selected, unsuppressed provider evidence.
+         */
+        post: operations["lookup_contact_evidence_contact_evidence_lookup_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contact-evidence/suppress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Suppress Contact Evidence
+         * @description Record a platform-wide hard-bounce/complaint suppression.
+         *
+         *     Scope differs by reason, per locked policy:
+         *       * hard_bounce - tombstones the ADDRESS. The person stays reachable at any
+         *         other validated address.
+         *       * complaint   - person-terminal AND platform-wide, because every org mails
+         *         under one sender identity. Suppressing only the address would leave the
+         *         same person reachable at a different address, including by another org.
+         */
+        post: operations["suppress_contact_evidence_contact_evidence_suppress_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/public-candidates/exclusions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Public Candidate Exclusions
+         * @description Return fresh, retrievable public Crustdata IDs for one coarse market.
+         *
+         *     Rows acquired before migration 021 have no market membership. They are
+         *     included after exact-market members as a bounded transition fallback:
+         *     extra ``not_in`` IDs are harmless because Crustdata applies the actual
+         *     query filters, while omitting a known public ID would repurchase it.
+         */
+        post: operations["public_candidate_exclusions_public_candidates_exclusions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/global-candidates/public-identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Public Identities
+         * @description Resolve LinkedIn anchors to public canonical IDs without exposing a profile.
+         */
+        post: operations["resolve_public_identities_global_candidates_public_identities_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/global-candidates/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Search Global Candidates
+         * @description Vector search over the platform pool.
+         *
+         *     ``public_v1`` is intentionally public-only. Tenant-private applicants and
+         *     uploads need a tenant-owned embedding/projection before they can safely be
+         *     combined with this search: the historical shared canonical embedding may
+         *     contain evidence contributed by a different tenant after identity
+         *     reconciliation.
+         */
+        post: operations["search_global_candidates_global_candidates_search_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/global-candidates/resume-refs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Refs
+         * @description Batch: which of these people have a resume the requesting tenant may see?
+         *
+         *     Joins global identity (linkedin_id) -> applicant/upload provenance and
+         *     returns the Flow application pointer so the caller can serve the resume
+         *     through its existing permission-gated streamer. RLS on candidate_provenance
+         *     scopes results to the requesting tenant's own applicant rows (cross-tenant
+         *     resume visibility is deliberately deferred to the consent work, #12).
+         */
+        post: operations["resume_refs_global_candidates_resume_refs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/triggers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Trigger Patterns
+         * @description Return the launch-time semantic-trigger quarantine response.
+         */
+        get: operations["list_trigger_patterns_triggers_get"];
+        put?: never;
+        /**
+         * Register Trigger Pattern
+         * @description Return the launch-time semantic-trigger quarantine response.
+         */
+        post: operations["register_trigger_pattern_triggers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/triggers/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Trigger Pattern
+         * @description Return the launch-time semantic-trigger quarantine response.
+         */
+        delete: operations["delete_trigger_pattern_triggers__name__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -299,6 +603,33 @@ export interface paths {
         };
         /** Health */
         get: operations["health_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/readyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readyz
+         * @description Readiness probe: schema, migrations, RLS and runtime-role posture.
+         *
+         *     Checks, in order: DB reachable; migration ledger contains every manifest
+         *     entry; candidate tables exist with RLS enabled and tenant policies
+         *     installed; the connected runtime role is NOSUPERUSER/NOBYPASSRLS and does
+         *     not own the candidate tables (owners bypass ordinary RLS). /health stays
+         *     a liveness probe with no schema dependency. Raw database errors are
+         *     logged, never returned.
+         */
+        get: operations["readyz_readyz_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -367,33 +698,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/_admin/connectors/purge_deleted": {
+    "/_admin/security/limits": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
         /**
-         * Purge Deleted Nodes
-         * @description Purge soft-deleted nodes past their grace period.
+         * Get Security Limits
+         * @description Get configured security limits and SSRF protection settings.
          *
-         *     Deletes nodes with 'Deleted' class where deletion_grace_until < NOW().
-         *     Deletes chunks first (via parent_id), then parent documents.
+         *     Returns current configuration for:
+         *     - SSRF protection (URL allowlist, blocked IP ranges)
+         *     - File access controls (allowed directories, size limits)
+         *     - Request body size limits
          *
          *     Security:
-         *         - When JWT is enabled, require authenticated token (admin:refresh scope recommended)
-         *         - When JWT is disabled (dev mode), allow access
-         *
-         *     Args:
-         *         request: Purge parameters (tenant_id, batch_size, dry_run)
-         *
-         *     Returns:
-         *         Summary dict with purge results
+         *         - When JWT is enabled, requires authenticated token
+         *         - No admin scope required (read-only configuration)
          */
-        post: operations["purge_deleted_nodes__admin_connectors_purge_deleted_post"];
+        get: operations["get_security_limits__admin_security_limits_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -647,10 +974,25 @@ export interface paths {
         };
         /**
          * List Nodes
-         * @description List nodes with optional class filtering.
+         * @description List all nodes with optional filtering by embedding status.
+         *
+         *     Args:
+         *         limit: Maximum number of nodes to return (default 100)
+         *         offset: Number of nodes to skip for pagination (default 0)
+         *         has_embedding: Filter by embedding status (None=all, True=with embedding, False=without)
+         *         tenant_id: Tenant ID (ignored when JWT_ENABLED)
          *
          *     Security:
-         *         When JWT_ENABLED=true, tenant_id derives from JWT claims.
+         *         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
+         *         Query param tenant_id is IGNORED in production to prevent RLS bypass.
+         *
+         *     Returns:
+         *         {
+         *             "nodes": [{"id": str, "classes": List[str], "has_embedding": bool}, ...],
+         *             "total": int,
+         *             "limit": int,
+         *             "offset": int
+         *         }
          */
         get: operations["list_nodes_nodes_get"];
         put?: never;
@@ -661,8 +1003,62 @@ export interface paths {
          *     Security:
          *         When JWT_ENABLED=true, tenant_id is derived from JWT claims (secure).
          *         When JWT_ENABLED=false (dev mode), tenant_id can be provided in request body.
+         *
+         *     Extraction:
+         *         When EXTRACTION_ENABLED=true, structured field extraction is available.
+         *         - extract_before_embed=true: Extract first, then embed (best quality)
+         *         - extract_before_embed=false: Embed immediately, extract async (faster)
+         *         - extract=false: Skip extraction for this request (even if enabled)
+         *         - Default behavior controlled by EXTRACTION_MODE env var
          */
         post: operations["create_node_nodes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Nodes Batch
+         * @description Create multiple nodes in a single request.
+         *
+         *     Extraction:
+         *         When EXTRACTION_ENABLED=true, structured field extraction is available.
+         *         - batch.extract_before_embed=true: Extract first for all nodes (best quality)
+         *         - batch.extract_before_embed=false: Embed immediately, extract async (faster)
+         *         - batch.extract=false: Skip extraction for all nodes in this batch
+         *         - Default behavior controlled by EXTRACTION_MODE env var
+         */
+        post: operations["create_nodes_batch_nodes_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/by-external-id": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Node By External Id
+         * @description Lookup a node by its external_id prop (tenant-scoped).
+         */
+        get: operations["get_node_by_external_id_nodes_by_external_id_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -685,17 +1081,9 @@ export interface paths {
          *         Query param tenant_id is IGNORED in production to prevent RLS bypass.
          */
         get: operations["get_node_nodes__node_id__get"];
-        /**
-         * Update Node
-         * @description Update mutable fields of a node (classes, props, payload_ref, metadata, refresh_policy, triggers).
-         */
-        put: operations["update_node_nodes__node_id__put"];
+        put?: never;
         post?: never;
-        /**
-         * Delete Node
-         * @description Delete a node. By default performs a soft-delete (adds 'Deleted' class). Set hard=true for permanent delete.
-         */
-        delete: operations["delete_node_nodes__node_id__delete"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -741,6 +1129,34 @@ export interface paths {
          *         Tenant ID derived from JWT claims to prevent cross-tenant refresh.
          */
         post: operations["refresh_node_nodes__node_id__refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Files
+         * @description Upload PDF/DOCX files, extract text, chunk, and enqueue embeddings.
+         *
+         *     Accepts multipart/form-data with one or more files. Each file is
+         *     extracted, chunked via ``create_chunk_nodes``, and embedding jobs are
+         *     enqueued for each chunk.
+         *
+         *     Security:
+         *         When JWT_ENABLED=true, tenant_id is derived from JWT claims.
+         *         The ``tenant_id`` form field is only used in dev mode.
+         */
+        post: operations["upload_files_upload_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -871,63 +1287,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/triggers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Trigger Patterns
-         * @description List all registered trigger patterns.
-         *
-         *     Security:
-         *         Returns all patterns (no tenant filtering for system-level triggers).
-         *         Rate limited for read protection.
-         */
-        get: operations["list_trigger_patterns_triggers_get"];
-        put?: never;
-        /**
-         * Register Trigger Pattern
-         * @description Register a semantic trigger pattern.
-         *
-         *     Expects: {"name": "pattern_name", "example_text": "...", "description": "..."}
-         *
-         *     Security:
-         *         Requires JWT authentication when JWT_ENABLED=true.
-         *         Triggers are global resources (not tenant-scoped).
-         */
-        post: operations["register_trigger_pattern_triggers_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/triggers/{name}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Trigger Pattern
-         * @description Delete a trigger pattern by name.
-         *
-         *     Security:
-         *         Requires JWT authentication when JWT_ENABLED=true.
-         */
-        delete: operations["delete_trigger_pattern_triggers__name__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/events": {
         parameters: {
             query?: never;
@@ -978,52 +1337,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/migrate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Admin Migrate
-         * @description Run idempotent DB bootstrap/migrations and ensure vector index.
-         *
-         *     Security:
-         *         Requires 'admin:refresh' scope when JWT is enabled.
-         */
-        post: operations["admin_migrate_admin_migrate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/db_status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Admin Db Status
-         * @description Report DB schema status: tables, columns, indexes, extensions, and RLS policies.
-         *
-         *     Security:
-         *         Requires 'admin:refresh' scope when JWT is enabled.
-         */
-        get: operations["admin_db_status_admin_db_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/admin/refresh": {
         parameters: {
             query?: never;
@@ -1046,6 +1359,100 @@ export interface paths {
          *         Summary of refresh operation
          */
         post: operations["admin_refresh_admin_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/embedding/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Embedding Status
+         * @description Return embedding queue status and DB counts.
+         */
+        get: operations["embedding_status_admin_embedding_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/extraction/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Extraction Status
+         * @description Return extraction queue status and DB counts.
+         *
+         *     Shows:
+         *     - Count of nodes by extraction_status (queued, processing, ready, failed, skipped)
+         *     - Extraction queue depth (if Redis available)
+         */
+        get: operations["extraction_status_admin_extraction_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/extraction/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Extraction Requeue
+         * @description Requeue extraction jobs for nodes.
+         *
+         *     Supports:
+         *     - Requeuing by extraction_status (null, failed, queued, etc.)
+         *     - Filtering nodes that never had extraction queued (only_null_status=true)
+         *     - Requeuing specific node_ids
+         */
+        post: operations["extraction_requeue_admin_extraction_requeue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/embedding/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Embedding Requeue
+         * @description Requeue embedding jobs and backfill statuses.
+         *
+         *     Supports:
+         *     - Requeuing by status (failed, queued, etc.)
+         *     - Filtering nodes without embeddings (only_missing_embedding=true)
+         *     - Backfilling status='ready' for nodes with embeddings (backfill_ready=true)
+         */
+        post: operations["embedding_requeue_admin_embedding_requeue_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1121,10 +1528,153 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/candidates/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Candidate
+         * @description Resolve-or-create a canonical ActiveKG candidate from upstream evidence.
+         *
+         *     Exact identifier-based matching only: if any normalized identifier already
+         *     belongs to a candidate, that candidate is returned; otherwise a new
+         *     canonical candidate is created. Upstream payloads are preserved verbatim in
+         *     ``candidate_source_records``. If identifiers point at multiple distinct
+         *     candidates the request is flagged ``review_required`` and no merge happens
+         *     — merging candidates is an explicit operation, not an implicit side-effect.
+         */
+        post: operations["resolve_candidate_candidates_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/candidates/resolve/vantahire/application": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Candidate From Vantahire Application
+         * @description Resolve-or-create a canonical candidate from a VantaHire application.
+         *
+         *     Maps VantaHire application fields onto canonical identifiers
+         *     (``vantahire_application_id``, ``vantahire_resume_id``, ``linkedin_url``,
+         *     ``github_url``, ``medium_url``, ``email``, ``phone``, plus any profile
+         *     URLs under ``other_links``) and stores the full application payload in
+         *     ``candidate_source_records`` with ``source='vantahire'`` /
+         *     ``source_record_type='application'``.
+         *
+         *     Per-field normalization failures on *optional* identifiers are dropped
+         *     silently; the request only 400s if no usable identifier survives.
+         */
+        post: operations["resolve_candidate_from_vantahire_application_candidates_resolve_vantahire_application_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/candidates/resolve/signal/candidate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Candidate From Signal
+         * @description Resolve-or-create a canonical candidate from a Signal sourced-candidate payload.
+         *
+         *     Maps Signal fields onto canonical identifiers (``signal_candidate_id``,
+         *     ``linkedin_url`` from ``candidate.linkedinUrl``, and one identifier per
+         *     entry of ``identities[]``) and stores the full Signal payload in
+         *     ``candidate_source_records`` with ``source='signal'``. Identity confidence
+         *     and bridge tier are preserved in identifier metadata so downstream match
+         *     review can weigh Signal's enrichment quality.
+         */
+        post: operations["resolve_candidate_from_signal_candidates_resolve_signal_candidate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/candidates/search/by-tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Search Candidates By Tags
+         * @description Search for candidates whose Signal source record tags overlap with the query tags.
+         *
+         *     A candidate is returned when at least 70 % of the query tags are present in
+         *     its stored Signal ``job_tags``. Results are ranked by overlap ratio descending.
+         *     At most 100 candidates are returned.
+         */
+        post: operations["search_candidates_by_tags_candidates_search_by_tags_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/candidates/search/private": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Search Tenant Private Candidates
+         * @description Recall only the requesting tenant's applicant/upload candidates.
+         *
+         *     The response is an explicit typed projection. Raw candidate profiles,
+         *     source payloads, resumes, contact data, and recruiting activity never
+         *     cross this boundary. Signal remains the final ranking authority.
+         */
+        post: operations["search_tenant_private_candidates_candidates_search_private_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AccessUpsert */
+        AccessUpsert: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Visibility */
+            visibility: string;
+            /** Consent State */
+            consent_state?: string | null;
+            /** Access Reason */
+            access_reason: string;
+        };
         /**
          * AskRequest
          * @description LLM-powered Q&A request with grounded citations.
@@ -1153,6 +1703,13 @@ export interface components {
              */
             use_weighted_score: boolean;
         };
+        /** AttachedIdentifier */
+        AttachedIdentifier: {
+            /** Identifier Type */
+            identifier_type: string;
+            /** Value Normalized */
+            value_normalized: string;
+        };
         /** BackfillRequest */
         BackfillRequest: {
             /** Tenant Id */
@@ -1178,53 +1735,276 @@ export interface components {
              */
             top_k: number;
         };
+        /** Body_upload_files_upload_post */
+        Body_upload_files_upload_post: {
+            /** Files */
+            files: string[];
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /**
+             * Classes
+             * @default Document,Resume
+             */
+            classes: string;
+        };
+        /** CandidateIdentifierInput */
+        CandidateIdentifierInput: {
+            /**
+             * Identifier Type
+             * @description Type of identifier (email, linkedin_url, ...)
+             */
+            identifier_type: string;
+            /**
+             * Value
+             * @description Raw identifier value as sent by the upstream source
+             */
+            value: string;
+            /**
+             * Confidence
+             * @description Optional per-identifier confidence from the upstream source
+             */
+            confidence?: number | null;
+            /**
+             * Metadata
+             * @description Optional per-identifier metadata (e.g. bridge_tier, identity platform)
+             */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /** CandidateProfileInput */
+        CandidateProfileInput: {
+            /** Display Name */
+            display_name?: string | null;
+            /** Primary Email */
+            primary_email?: string | null;
+            /** Primary Phone */
+            primary_phone?: string | null;
+            /** Props */
+            props?: {
+                [key: string]: unknown;
+            };
+            /** Profile */
+            profile?: {
+                [key: string]: unknown;
+            } | null;
+            /** Headline */
+            headline?: string | null;
+            /** Location Raw */
+            location_raw?: string | null;
+            /** Skills */
+            skills?: string[] | null;
+            /** Seniority Level */
+            seniority_level?: string | null;
+            /** Linkedin Url */
+            linkedin_url?: string | null;
+            /** Linkedin Id */
+            linkedin_id?: string | null;
+            /** Profile Picture Url */
+            profile_picture_url?: string | null;
+        };
+        /** CandidateResolveRequest */
+        CandidateResolveRequest: {
+            /**
+             * Source
+             * @description Upstream source name, e.g. 'vantahire', 'signal'
+             */
+            source: string;
+            /**
+             * Source Record Type
+             * @description Source record type, e.g. 'application', 'profile'
+             */
+            source_record_type: string;
+            /**
+             * Source Record Id
+             * @description Upstream-stable record id
+             */
+            source_record_id: string;
+            /**
+             * Identifiers
+             * @description Identifiers for exact-match resolution
+             */
+            identifiers?: components["schemas"]["CandidateIdentifierInput"][];
+            profile?: components["schemas"]["CandidateProfileInput"] | null;
+            /** Payload */
+            payload?: {
+                [key: string]: unknown;
+            };
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Source Url */
+            source_url?: string | null;
+            /** Fetched At */
+            fetched_at?: string | null;
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /** Org Id */
+            org_id?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Effective Recruiter Id */
+            effective_recruiter_id?: string | null;
+            /** Created By User Id */
+            created_by_user_id?: string | null;
+            /** Resume Source */
+            resume_source?: string | null;
+            /** Job Tags */
+            job_tags?: string[];
+        };
+        /** CandidateResolveResponse */
+        CandidateResolveResponse: {
+            /** Candidate Id */
+            candidate_id: string | null;
+            /** Global Candidate Id */
+            global_candidate_id?: string | null;
+            /** Resolution Status */
+            resolution_status: string;
+            matched_identifier?: components["schemas"]["MatchedIdentifier"] | null;
+            /** Attached Identifiers */
+            attached_identifiers?: components["schemas"]["AttachedIdentifier"][];
+            /** Skipped Identifiers */
+            skipped_identifiers?: components["schemas"]["SkippedIdentifier"][];
+            /** Source Record Id */
+            source_record_id?: string | null;
+            /** Conflicts */
+            conflicts?: components["schemas"]["ResolveConflict"][];
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** CandidateSearchByTagsRequest */
+        CandidateSearchByTagsRequest: {
+            /** Tags */
+            tags: string[];
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+        };
+        /** CandidateSearchByTagsResponse */
+        CandidateSearchByTagsResponse: {
+            /** Results */
+            results: components["schemas"]["CandidateTagSearchResult"][];
+            /** Query Tags */
+            query_tags: string[];
+            /** Total */
+            total: number;
+            /**
+             * Total Matched
+             * @default 0
+             */
+            total_matched: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /**
+             * Applied Limit
+             * @default 0
+             */
+            applied_limit: number;
+        };
+        /** CandidateTagSearchResult */
+        CandidateTagSearchResult: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Display Name */
+            display_name?: string | null;
+            /** Primary Email */
+            primary_email?: string | null;
+            /** Signal Candidate Id */
+            signal_candidate_id: string;
+            /** Stored Tags */
+            stored_tags: string[];
+            /** Matched Tags */
+            matched_tags: string[];
+            /** Overlap Count */
+            overlap_count: number;
+            /** Overlap Ratio */
+            overlap_ratio: number;
+            /** Profile */
+            profile?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** ContactEvidenceLookup */
+        ContactEvidenceLookup: {
+            /** Global Candidate Ids */
+            global_candidate_ids: string[];
+        };
+        /** ContactEvidenceRecord */
+        ContactEvidenceRecord: {
+            /**
+             * Global Candidate Id
+             * Format: uuid
+             */
+            global_candidate_id: string;
+            /** Email */
+            email: string;
+            /**
+             * Provider
+             * @enum {string}
+             */
+            provider: "fullenrich" | "enrichlayer";
+            /** Provider Record Id */
+            provider_record_id?: string | null;
+            /**
+             * Confidence
+             * @default 0
+             */
+            confidence: number;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Validated At */
+            validated_at?: string | null;
+            /**
+             * Status
+             * @default found
+             * @enum {string}
+             */
+            status: "found" | "verified" | "soft_bounce" | "invalid";
+            /** Bounce Reason */
+            bounce_reason?: string | null;
+        };
+        /** ContactSuppressionRecord */
+        ContactSuppressionRecord: {
+            /** Email Hash */
+            email_hash: string;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "hard_bounce" | "complaint";
+            /** Provider Event Id */
+            provider_event_id: string;
+            /** Signal Candidate Id */
+            signal_candidate_id?: string | null;
+        };
         /**
          * DriveConnectorConfig
          * @description Configuration for Google Drive connector.
          */
         DriveConnectorConfig: {
-            /** Credentials */
-            credentials: string;
-            /** Subject Email */
-            subject_email?: string | null;
-            /** Project */
-            project?: string | null;
-            /** Shared Drives */
-            shared_drives?: string[];
-            /** Root Folders */
-            root_folders?: string[];
-            /** Include Folders */
-            include_folders?: string[];
-            /** Exclude Folders */
-            exclude_folders?: string[];
-            /** Include Mime Types */
-            include_mime_types?: string[];
-            /** Export Formats */
-            export_formats?: {
-                [key: string]: string;
-            };
+            /**
+             * Folder Id
+             * @description Google Drive folder ID to watch
+             */
+            folder_id: string;
+            /**
+             * Service Account Json Path
+             * @description Path to service account JSON credentials
+             */
+            service_account_json_path: string;
             /**
              * Poll Interval Seconds
-             * @default 300
+             * @default 900
              */
             poll_interval_seconds: number;
-            /**
-             * Page Size
-             * @default 100
-             */
-            page_size: number;
-            /**
-             * Use Changes Feed
-             * @default true
-             */
-            use_changes_feed: boolean;
-            /**
-             * Max File Size Bytes
-             * @default 104857600
-             */
-            max_file_size_bytes: number;
-            /** Webhook Secret */
-            webhook_secret?: string | null;
             /**
              * Enabled
              * @default true
@@ -1268,14 +2048,118 @@ export interface components {
              */
             tenant_id?: string | null;
         };
+        /**
+         * EmbeddingRequeueRequest
+         * @description Request model to requeue embeddings and backfill statuses.
+         */
+        EmbeddingRequeueRequest: {
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /** Node Ids */
+            node_ids?: string[] | null;
+            /**
+             * Status
+             * @description Filter nodes by status (failed, queued, ready, etc.)
+             * @default failed
+             */
+            status: string | null;
+            /**
+             * Only Missing Embedding
+             * @description Only requeue nodes without embeddings (embedding IS NULL)
+             * @default false
+             */
+            only_missing_embedding: boolean;
+            /**
+             * Backfill Ready
+             * @description Mark nodes with embeddings as 'ready' before requeuing
+             * @default true
+             */
+            backfill_ready: boolean;
+            /**
+             * Limit
+             * @default 2000
+             */
+            limit: number;
+        };
         /** EnableDisableRequest */
         EnableDisableRequest: {
             /** Tenant Id */
             tenant_id: string;
         };
         /**
+         * ExtractionRequeueRequest
+         * @description Request model to requeue extraction jobs.
+         */
+        ExtractionRequeueRequest: {
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /** Node Ids */
+            node_ids?: string[] | null;
+            /**
+             * Status
+             * @description Filter by extraction_status (null, failed, queued, etc.)
+             */
+            status?: string | null;
+            /**
+             * Only Null Status
+             * @description Only requeue nodes with no extraction_status (never queued)
+             * @default true
+             */
+            only_null_status: boolean;
+            /**
+             * Limit
+             * @default 2000
+             */
+            limit: number;
+        };
+        /** FeedbackEvent */
+        FeedbackEvent: {
+            /** Tenant Id */
+            tenant_id: string;
+            /** Job Id */
+            job_id: string;
+            /** Recruiter Id */
+            recruiter_id?: string | null;
+            /** Global Candidate Id */
+            global_candidate_id?: string | null;
+            /** Signal Candidate Id */
+            signal_candidate_id?: string | null;
+            /** Action */
+            action: string;
+            /** Rank At Time */
+            rank_at_time?: number | null;
+            /** Fit Score At Time */
+            fit_score_at_time?: number | null;
+            /** Source Type At Time */
+            source_type_at_time?: string | null;
+            /** Match Tier At Time */
+            match_tier_at_time?: string | null;
+            /** Location Match At Time */
+            location_match_at_time?: string | null;
+            /** Role Family */
+            role_family?: string | null;
+            /** Location Country Code */
+            location_country_code?: string | null;
+            /** Seniority Band */
+            seniority_band?: string | null;
+            /** Event Id */
+            event_id: string;
+        };
+        /** FeedbackEventIngest */
+        FeedbackEventIngest: {
+            /** Events */
+            events: components["schemas"]["FeedbackEvent"][];
+        };
+        /**
          * GCSConnectorConfig
          * @description Configuration for Google Cloud Storage connector.
+         *
+         *     Authentication (checked in order):
+         *     1. credentials_json - Inline JSON string (best for production/PaaS)
+         *     2. service_account_json_path - File path (for local dev)
+         *     3. GOOGLE_CREDENTIALS_JSON env var
+         *     4. GOOGLE_APPLICATION_CREDENTIALS env var
+         *     5. Default credentials (gcloud CLI, workload identity)
          */
         GCSConnectorConfig: {
             /** Bucket */
@@ -1285,10 +2169,21 @@ export interface components {
              * @default
              */
             prefix: string;
-            /** Project */
+            /**
+             * Credentials Json
+             * @description Inline service account JSON string
+             */
+            credentials_json?: string | null;
+            /**
+             * Service Account Json Path
+             * @description Path to service account JSON file
+             */
+            service_account_json_path?: string | null;
+            /**
+             * Project
+             * @description GCP project ID
+             */
             project?: string | null;
-            /** Credentials Path */
-            credentials_path?: string | null;
             /**
              * Poll Interval Seconds
              * @default 900
@@ -1299,6 +2194,68 @@ export interface components {
              * @default true
              */
             enabled: boolean;
+        };
+        /** GlobalCandidateSearchRequest */
+        GlobalCandidateSearchRequest: {
+            /** Query Text */
+            query_text: string;
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Surface
+             * @default legacy_v0
+             * @enum {string}
+             */
+            surface: "legacy_v0" | "public_v1";
+            /** Location City */
+            location_city?: string | null;
+            /** Location Cities */
+            location_cities?: string[] | null;
+            /** Role Family */
+            role_family?: string | null;
+            /** Seniority Band */
+            seniority_band?: string | null;
+            /** Skills Any */
+            skills_any?: string[] | null;
+        };
+        /** GlobalCandidateUpsert */
+        GlobalCandidateUpsert: {
+            /** Linkedin Id */
+            linkedin_id?: string | null;
+            /** Linkedin Url */
+            linkedin_url?: string | null;
+            /** Github Id */
+            github_id?: string | null;
+            /** Email Hash */
+            email_hash?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Headline */
+            headline?: string | null;
+            /** Location City */
+            location_city?: string | null;
+            /** Location Country Code */
+            location_country_code?: string | null;
+            /** Location Confidence */
+            location_confidence?: number | null;
+            /** Location Source */
+            location_source?: string | null;
+            /** Role Family */
+            role_family?: string | null;
+            /** Seniority Band */
+            seniority_band?: string | null;
+            /** Skills Normalized */
+            skills_normalized?: string[] | null;
+            /** Identity Confidence */
+            identity_confidence?: number | null;
+            /**
+             * Merge Status
+             * @default single
+             */
+            merge_status: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1325,6 +2282,37 @@ export interface components {
             llm_backend?: string | null;
             /** Llm Model */
             llm_model?: string | null;
+        };
+        /** IngestRequest */
+        IngestRequest: {
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /**
+             * Max Items
+             * @description Max total items to process
+             * @default 1000
+             */
+            max_items: number;
+            /**
+             * Batch Size
+             * @description Items per batch
+             * @default 100
+             */
+            batch_size: number;
+            /** Cursor */
+            cursor?: string | null;
+            /**
+             * Dry Run
+             * @description Preview only, don't actually queue
+             * @default true
+             */
+            dry_run: boolean;
+            /**
+             * Skip Existing
+             * @description Skip already processed/queued items
+             * @default true
+             */
+            skip_existing: boolean;
         };
         /**
          * KGSearchRequest
@@ -1392,6 +2380,13 @@ export interface components {
              */
             drift_beta: number;
         };
+        /** MatchedIdentifier */
+        MatchedIdentifier: {
+            /** Identifier Type */
+            identifier_type: string;
+            /** Value Normalized */
+            value_normalized: string;
+        };
         /** MetricsResponse */
         MetricsResponse: {
             /** Counters */
@@ -1410,6 +2405,35 @@ export interface components {
             };
             /** Timestamp */
             timestamp: string;
+        };
+        /**
+         * NodeBatchCreate
+         * @description Validated batch node creation request.
+         */
+        NodeBatchCreate: {
+            /** Nodes */
+            nodes: components["schemas"]["NodeCreate"][];
+            /**
+             * Tenant Id
+             * @description Tenant ID (dev mode only, overridden by JWT in production)
+             */
+            tenant_id?: string | null;
+            /**
+             * Continue On Error
+             * @description If false, abort on first error
+             * @default true
+             */
+            continue_on_error: boolean;
+            /**
+             * Extract Before Embed
+             * @description If true, extract structured fields before embedding for all nodes. Overrides per-node setting. Defaults to EXTRACTION_MODE env var.
+             */
+            extract_before_embed?: boolean | null;
+            /**
+             * Extract
+             * @description If false, skip extraction for all nodes in this batch. Per-node extract flag overrides when set.
+             */
+            extract?: boolean | null;
         };
         /**
          * NodeCreate
@@ -1453,58 +2477,60 @@ export interface components {
             };
             /**
              * Triggers
-             * @description Trigger IDs to activate on embedding updates
+             * @description Trigger configs to activate on embedding updates (e.g., [{name, threshold}])
              */
-            triggers?: string[];
+            triggers?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Tenant Id
              * @description Tenant ID (dev mode only, overridden by JWT in production)
              */
             tenant_id?: string | null;
+            /**
+             * Extract Before Embed
+             * @description If true, extract structured fields before embedding. If false, embed immediately and extract async. Defaults to EXTRACTION_MODE env var (async if unset).
+             */
+            extract_before_embed?: boolean | null;
+            /**
+             * Extract
+             * @description If false, skip extraction for this request even when EXTRACTION_ENABLED=true. If true or unset, extraction follows EXTRACTION_MODE.
+             */
+            extract?: boolean | null;
         };
-        /**
-         * NodeUpdate
-         * @description Partial update model for nodes.
-         */
-        NodeUpdate: {
-            /** Classes */
-            classes?: string[] | null;
-            /** Props */
-            props?: {
-                [key: string]: unknown;
-            } | null;
-            /** Payload Ref */
-            payload_ref?: string | null;
-            /** Metadata */
-            metadata?: {
-                [key: string]: unknown;
-            } | null;
-            /** Refresh Policy */
-            refresh_policy?: {
-                [key: string]: unknown;
-            } | null;
-            /** Triggers */
-            triggers?: {
-                [key: string]: unknown;
-            }[] | null;
-        };
-        /**
-         * PurgeDeletedRequest
-         * @description Request model for soft-delete purger endpoint.
-         */
-        PurgeDeletedRequest: {
+        /** ProvenanceCreate */
+        ProvenanceCreate: {
+            /** Source Type */
+            source_type: string;
             /** Tenant Id */
             tenant_id?: string | null;
             /**
-             * Batch Size
-             * @default 500
+             * Source Detail
+             * @default {}
              */
-            batch_size: number;
+            source_detail: {
+                [key: string]: unknown;
+            };
+        };
+        /** PublicIdentityLookupRequest */
+        PublicIdentityLookupRequest: {
+            /** Linkedin Urls */
+            linkedin_urls: string[];
+        };
+        /** PublicMarketExclusionRequest */
+        PublicMarketExclusionRequest: {
+            /** Coarse Market Key */
+            coarse_market_key: string;
             /**
-             * Dry Run
-             * @default false
+             * Fresh Days
+             * @default 14
              */
-            dry_run: boolean;
+            fresh_days: number;
+            /**
+             * Limit
+             * @default 2000
+             */
+            limit: number;
         };
         /** RegisterDriveRequest */
         RegisterDriveRequest: {
@@ -1523,6 +2549,22 @@ export interface components {
             /** Tenant Id */
             tenant_id?: string | null;
             config: components["schemas"]["S3ConnectorConfig"];
+        };
+        /** ResolveConflict */
+        ResolveConflict: {
+            /** Identifier Type */
+            identifier_type: string;
+            /** Value Normalized */
+            value_normalized: string;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** ResumeRefsRequest */
+        ResumeRefsRequest: {
+            /** Linkedin Ids */
+            linkedin_ids: string[];
         };
         /**
          * RotateKeysRequest
@@ -1576,6 +2618,174 @@ export interface components {
              */
             enabled: boolean;
         };
+        /**
+         * SignalCandidateResolveRequest
+         * @description Raw Signal sourced-candidate / profile payload.
+         *
+         *     ActiveKG translates Signal-specific fields below into canonical identifiers
+         *     and profile data, then routes them through the same resolve-or-create flow
+         *     used by :func:`resolve_candidate`. The full payload is preserved verbatim
+         *     in ``candidate_source_records``.
+         */
+        SignalCandidateResolveRequest: {
+            /**
+             * Signal Candidate Id
+             * @description Signal's stable candidate id
+             */
+            signal_candidate_id: string;
+            /**
+             * Source Record Type
+             * @description Signal record type: 'sourced_candidate' or 'profile'
+             * @default sourced_candidate
+             */
+            source_record_type: string;
+            /** Linkedinurl */
+            linkedinUrl?: string | null;
+            /** Identities */
+            identities?: components["schemas"]["SignalIdentityInput"][];
+            /** Display Name */
+            display_name?: string | null;
+            /** Headline */
+            headline?: string | null;
+            /** Identitysummary */
+            identitySummary?: string | null;
+            /** Aisummary */
+            aiSummary?: string | null;
+            /** Rank */
+            rank?: number | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** External Job Id */
+            external_job_id?: string | null;
+            /**
+             * Crustdata
+             * @description Raw Crustdata profile blob
+             */
+            crustdata?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Profile Observed At
+             * @description When the upstream profile was observed, not when this ingest was retried
+             */
+            profile_observed_at?: string | null;
+            /** Tags */
+            tags?: string[];
+            /** Sourcing Context */
+            sourcing_context?: {
+                [key: string]: unknown;
+            };
+            /** Source Metadata */
+            source_metadata?: {
+                [key: string]: unknown;
+            };
+            /** Tenant Id */
+            tenant_id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * SignalIdentityInput
+         * @description A single identity link discovered by Signal (linkedin, github, ...).
+         */
+        SignalIdentityInput: {
+            /** Platform */
+            platform?: string | null;
+            /** Profileurl */
+            profileUrl?: string | null;
+            /** Profile Url */
+            profile_url?: string | null;
+            /** Confidence */
+            confidence?: number | null;
+            /** Bridgetier */
+            bridgeTier?: string | null;
+            /** Bridge Tier */
+            bridge_tier?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** SkippedIdentifier */
+        SkippedIdentifier: {
+            /** Identifier Type */
+            identifier_type?: string | null;
+            /** Value */
+            value?: string | null;
+            /** Reason */
+            reason: string;
+        };
+        /** TenantPrivateCandidateSearchRequest */
+        TenantPrivateCandidateSearchRequest: {
+            /**
+             * Query Text
+             * @default
+             */
+            query_text: string;
+            /** Skills Any */
+            skills_any?: string[];
+            /** Tenant Id */
+            tenant_id?: string | null;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+        };
+        /** TenantPrivateCandidateSearchResponse */
+        TenantPrivateCandidateSearchResponse: {
+            /**
+             * Surface
+             * @default tenant_private_v1
+             * @constant
+             */
+            surface: "tenant_private_v1";
+            /** Results */
+            results: components["schemas"]["TenantPrivateCandidateSearchResult"][];
+            /** Total */
+            total: number;
+            /** Total Available */
+            total_available: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Applied Limit */
+            applied_limit: number;
+        };
+        /** TenantPrivateCandidateSearchResult */
+        TenantPrivateCandidateSearchResult: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Global Candidate Id */
+            global_candidate_id?: string | null;
+            /** Display Name */
+            display_name?: string | null;
+            /** Linkedin Url */
+            linkedin_url?: string | null;
+            /** Linkedin Id */
+            linkedin_id?: string | null;
+            /** Headline */
+            headline?: string | null;
+            /** Location Raw */
+            location_raw?: string | null;
+            /** Skills */
+            skills?: string[];
+            /** Seniority Level */
+            seniority_level?: string | null;
+            /**
+             * Keyword Score
+             * @default 0
+             */
+            keyword_score: number;
+            /**
+             * Skill Overlap Count
+             * @default 0
+             */
+            skill_overlap_count: number;
+            /**
+             * Evidence Surface
+             * @default tenant_private_v1
+             * @constant
+             */
+            evidence_surface: "tenant_private_v1";
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1584,6 +2794,57 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VantahireApplicationResolveRequest
+         * @description Raw VantaHire application payload.
+         *
+         *     ActiveKG translates the VantaHire-specific fields below into canonical
+         *     identifiers and profile data, then routes them through the same resolve-
+         *     or-create flow used by :func:`resolve_candidate`.
+         */
+        VantahireApplicationResolveRequest: {
+            /**
+             * Application Id
+             * @description VantaHire application id
+             */
+            application_id: string;
+            /** Resume Id */
+            resume_id?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Org Id */
+            org_id?: string | null;
+            /** Effective Recruiter Id */
+            effective_recruiter_id?: string | null;
+            /** Created By User Id */
+            created_by_user_id?: string | null;
+            /** Resume Source */
+            resume_source?: string | null;
+            /** Applicant Name */
+            applicant_name?: string | null;
+            /** Email */
+            email?: string | null;
+            /** Phone */
+            phone?: string | null;
+            /** Linkedin Url */
+            linkedin_url?: string | null;
+            /** Github Url */
+            github_url?: string | null;
+            /** Medium Url */
+            medium_url?: string | null;
+            /** Other Links */
+            other_links?: string[];
+            /** Resume Gcp Url */
+            resume_gcp_url?: string | null;
+            /** Skills */
+            skills?: string[];
+            /** Source Metadata */
+            source_metadata?: {
+                [key: string]: unknown;
+            };
+            /** Tenant Id */
+            tenant_id?: string | null;
         };
     };
     responses: never;
@@ -1882,6 +3143,74 @@ export interface operations {
             };
         };
     };
+    ingest__admin_connectors__provider__ingest_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IngestRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queue_status__admin_connectors__provider__queue_status_get: {
+        parameters: {
+            query: {
+                tenant_id: string;
+            };
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     handle_s3_webhook__webhooks_s3_post: {
         parameters: {
             query?: never;
@@ -1922,9 +3251,46 @@ export interface operations {
             };
         };
     };
-    gcs_webhook_health__webhooks_gcs_health_get: {
+    upsert_global_candidate_global_candidates_upsert_post: {
         parameters: {
             query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GlobalCandidateUpsert"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_by_anchor_global_candidates_by_anchor_get: {
+        parameters: {
+            query?: {
+                linkedin_id?: string | null;
+                github_id?: string | null;
+                email_hash?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1940,16 +3306,31 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
-    handle_gcs_pubsub__webhooks_gcs_post: {
+    create_provenance_global_candidates__candidate_id__provenance_post: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                candidate_id: string;
+            };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProvenanceCreate"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -1958,6 +3339,385 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upsert_access_global_candidates__candidate_id__access_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccessUpsert"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingest_feedback_events_feedback_events_ingest_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeedbackEventIngest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_contact_evidence_contact_evidence_record_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactEvidenceRecord"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    lookup_contact_evidence_contact_evidence_lookup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactEvidenceLookup"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suppress_contact_evidence_contact_evidence_suppress_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactSuppressionRecord"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    public_candidate_exclusions_public_candidates_exclusions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicMarketExclusionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_public_identities_global_candidates_public_identities_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicIdentityLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_global_candidates_global_candidates_search_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GlobalCandidateSearchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_refs_global_candidates_resume_refs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumeRefsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_trigger_patterns_triggers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Semantic triggers unavailable */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    register_trigger_pattern_triggers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Semantic triggers unavailable */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    delete_trigger_pattern_triggers__name__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Semantic triggers unavailable */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1982,6 +3742,26 @@ export interface operations {
             };
         };
     };
+    readyz_readyz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     connector_cache_health__admin_connectors_cache_health_get: {
         parameters: {
             query?: never;
@@ -1997,9 +3777,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
         };
@@ -2023,9 +3801,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -2039,18 +3815,14 @@ export interface operations {
             };
         };
     };
-    purge_deleted_nodes__admin_connectors_purge_deleted_post: {
+    get_security_limits__admin_security_limits_get: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PurgeDeletedRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -2058,18 +3830,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": unknown;
                 };
             };
         };
@@ -2241,9 +4002,10 @@ export interface operations {
     list_nodes_nodes_get: {
         parameters: {
             query?: {
-                classes?: string | null;
                 limit?: number;
                 offset?: number;
+                has_embedding?: boolean | null;
+                tenant_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -2304,15 +4066,46 @@ export interface operations {
             };
         };
     };
-    get_node_nodes__node_id__get: {
+    create_nodes_batch_nodes_batch_post: {
         parameters: {
-            query?: {
-                tenant_id?: string | null;
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeBatchCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_node_by_external_id_nodes_by_external_id_get: {
+        parameters: {
+            query: {
+                external_id: string;
             };
             header?: never;
-            path: {
-                node_id: string;
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -2337,45 +4130,10 @@ export interface operations {
             };
         };
     };
-    update_node_nodes__node_id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                node_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["NodeUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_node_nodes__node_id__delete: {
+    get_node_nodes__node_id__get: {
         parameters: {
             query?: {
-                hard?: boolean;
+                tenant_id?: string | null;
             };
             header?: never;
             path: {
@@ -2437,6 +4195,39 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_files_upload_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_files_upload_post"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -2590,92 +4381,6 @@ export interface operations {
             };
         };
     };
-    list_trigger_patterns_triggers_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    register_trigger_pattern_triggers_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_trigger_pattern_triggers__name__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                name: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     list_events_events_get: {
         parameters: {
             query?: {
@@ -2744,46 +4449,6 @@ export interface operations {
             };
         };
     };
-    admin_migrate_admin_migrate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    admin_db_status_admin_db_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
     admin_refresh_admin_refresh_post: {
         parameters: {
             query?: never;
@@ -2794,6 +4459,134 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": unknown | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    embedding_status_admin_embedding_status_get: {
+        parameters: {
+            query?: {
+                tenant_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    extraction_status_admin_extraction_status_get: {
+        parameters: {
+            query?: {
+                tenant_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    extraction_requeue_admin_extraction_requeue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtractionRequeueRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    embedding_requeue_admin_embedding_requeue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmbeddingRequeueRequest"];
             };
         };
         responses: {
@@ -2873,6 +4666,171 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_candidate_candidates_resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CandidateResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateResolveResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_candidate_from_vantahire_application_candidates_resolve_vantahire_application_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VantahireApplicationResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateResolveResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_candidate_from_signal_candidates_resolve_signal_candidate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignalCandidateResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateResolveResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_candidates_by_tags_candidates_search_by_tags_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CandidateSearchByTagsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateSearchByTagsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_tenant_private_candidates_candidates_search_private_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantPrivateCandidateSearchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantPrivateCandidateSearchResponse"];
                 };
             };
             /** @description Validation Error */

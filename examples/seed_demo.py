@@ -15,7 +15,6 @@ Usage:
 Notes:
   - Safe to run multiple times; IDs are randomized (or from file).
   - With --from-file: generates evaluation/datasets/id_map.json mapping external_id → UUID
-  - Tries to register a sample trigger pattern (senior_java).
 """
 
 import argparse
@@ -61,25 +60,6 @@ def post_node(api: str, text: str, classes: list[str], tenant: str | None) -> st
     r = requests.post(f"{api}/nodes", json=payload, timeout=10)
     r.raise_for_status()
     return r.json()["id"]
-
-
-def register_trigger(api: str):
-    try:
-        r = requests.post(
-            f"{api}/triggers",
-            json={
-                "name": "senior_java",
-                "example_text": "senior java engineer spring hibernate aws",
-                "description": "Detects senior java resumes/jobs",
-            },
-            timeout=10,
-        )
-        if r.status_code == 200:
-            print("✓ Registered trigger pattern: senior_java")
-        else:
-            print(f"⚠ Trigger registration returned HTTP {r.status_code}")
-    except Exception as e:
-        print(f"⚠ Could not register trigger: {e}")
 
 
 def load_seed_file(file_path: str) -> list[dict]:
@@ -163,9 +143,6 @@ def main():
     else:
         # Legacy random seeding
         created_ids = seed_random(api, tenant, args.resumes, args.jobs)
-
-    # Register a sample trigger
-    register_trigger(api)
 
     # Force background refresh for quick searchability
     try:

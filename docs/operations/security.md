@@ -118,7 +118,7 @@ def create_node(
 **Protected Endpoints:**
 - `POST /nodes` - Creates node with JWT tenant_id
 - `POST /edges` - Creates edge with JWT tenant_id
-- `POST /triggers` - Requires authentication
+- `POST|GET|DELETE /triggers` - Deliberately unavailable; stable HTTP 410 with no control-plane work
 - `POST /nodes/{id}/refresh` - Requires authentication + scope
 - `POST /admin/refresh` - Requires admin:refresh scope
 

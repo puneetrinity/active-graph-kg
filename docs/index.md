@@ -82,16 +82,16 @@ Active Graph KG is a **self-improving knowledge graph** that combines:
 
 - **Semantic Search** - pgvector-powered vector search with hybrid ranking
 - **LLM Q&A** - Citation-backed answers using retrieval-augmented generation
-- **Self-Improving** - Automatic drift detection, scheduled refreshes, and trigger-based updates
+- **Self-Refreshing** - Automatic drift detection and scheduled refreshes
 - **Multi-Tenant** - Row-level security (RLS) with per-tenant isolation
 - **Production-Ready** - JWT auth, rate limiting, Prometheus metrics, comprehensive testing
 
 ### Key Features
 
-✅ **24 REST API endpoints** - Health, nodes, edges, search, ask, triggers, events, admin  
+✅ **REST API endpoints** - Health, nodes, edges, search, ask, events, admin
 ✅ **Hybrid search** - Vector + text search with RRF (Reciprocal Rank Fusion) reranking  
 ✅ **Strict citations** - LLM answers cite source nodes with [0], [1], [2] references  
-✅ **Triggers & patterns** - Auto-refresh nodes on conditions, schedule-based updates  
+💤 **Triggers & patterns** - Dormant design; CRUD and evaluation are unavailable for launch
 ✅ **Row-Level Security** - PostgreSQL RLS policies for tenant isolation  
 ✅ **Comprehensive testing** - 50+ tests covering unit, integration, E2E, security  
 ✅ **Observability** - Prometheus metrics, Grafana dashboards, debug endpoints
@@ -209,13 +209,13 @@ See the repository root for these additional documents.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         FastAPI REST API                     │
-│  /health /nodes /search /ask /triggers /events /admin /_prom │
+│     /health /nodes /search /ask /events /admin /_prom        │
 └────────────┬────────────────────────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────────┐
 │                      Graph Repository                        │
 │  • Nodes & Edges CRUD    • Vector Search    • Hybrid Search │
-│  • Triggers & Patterns   • Events & Lineage • RLS Isolation │
+│  • Dormant rule schema   • Events & Lineage • RLS Isolation │
 └────────────┬────────────────────────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────────┐

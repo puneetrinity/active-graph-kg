@@ -45,7 +45,7 @@ ANN_HYB=$(curl -sS -X POST "${API_URL}/debug/search_explain" \
 # Class coverage (admin)
 CLASS_COV=$(curl -sS "${API_URL}/_admin/embed_class_coverage" "${hdr_auth[@]}" || echo '{}')
 
-# Metrics summary (scheduler/triggers)
+# Metrics summary (scheduler)
 MET_SUM=$(curl -sS "${API_URL}/_admin/metrics_summary" "${hdr_auth[@]}" || echo '{}')
 
 # Helpers to extract numbers from Prometheus exposition
@@ -145,9 +145,6 @@ ANN_TOPSIM_HYB=$(echo "$ANN_HYB" | jq -r '.threshold_info.top_similarity // empt
 # Format class coverage (top 5)
 CLASS_TOP5=$(echo "$CLASS_COV" | jq -r '.classes[:5][] | "- \(.class): total=\(.total), with_embedding=\(.with_embedding), coverage=\(.coverage_pct)%"' 2>/dev/null || true)
 SCHED_SUM=$(echo "$MET_SUM" | jq -r '.scheduler.jobs // {}' 2>/dev/null || true)
-
-# Extract trigger metrics from Prometheus
-TRIGGERS_FIRED=$(awk '/^activekg_triggers_fired_total/ {s+=$NF} END {if(s=="")s=0; print s}' <<< "$METRICS" 2>/dev/null || echo 0)
 
 # Extract scheduler metrics from Prometheus
 SCHED_RUNS=$(awk '/^activekg_schedule_runs_total/ {s+=$NF} END {if(s=="")s=0; print s}' <<< "$METRICS" 2>/dev/null || echo 0)
@@ -290,9 +287,8 @@ $(
   fi
 )
 
-## Trigger Effectiveness
-- Total triggers fired: ${TRIGGERS_FIRED}
-- Pattern matching: Enabled via /triggers endpoint
+## Semantic Triggers
+- Unavailable for launch; the compatibility routes return HTTP 410 and no evaluation job is scheduled.
 
 ## Proof Metrics (live tests)
 EOF

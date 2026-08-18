@@ -417,7 +417,6 @@ Add Prometheus data source:
 Create dashboard with key metrics:
 - `rate(activekg_refresh_cycles_total[5m])` - Refresh rate
 - `activekg_search_latency{quantile="0.95"}` - p95 search latency
-- `rate(activekg_trigger_fired_total[1h])` - Trigger fire rate
 - `activekg_active_nodes` - Active node count
 
 ### 3. Alerts Configuration
@@ -435,15 +434,6 @@ groups:
         annotations:
           summary: "High drift rate detected"
           description: "Drift rate is {{ $value }} per second"
-
-      - alert: TriggerStorm
-        expr: rate(activekg_trigger_fired_total[1m]) > 100
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Trigger storm detected"
-          description: "Trigger fire rate is {{ $value }} per second"
 
       - alert: SlowSearchQueries
         expr: activekg_search_latency{quantile="0.95"} > 1.0

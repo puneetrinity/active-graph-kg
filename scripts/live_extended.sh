@@ -65,13 +65,6 @@ curl -sS -X POST "${API_URL}/search" "${HDR[@]}" -H 'Content-Type: application/j
 echo "== Ask stream (short run) =="
 curl -N -m 20 -X POST "${API_URL}/ask/stream" "${HDR[@]}" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' --data '{"question":"Summarize the lineage of B","stream":true}' | head -n 10 || true
 
-echo "== Triggers: register -> list -> delete =="
-TRG_NAME="live_trg_$RANDOM"
-curl -sS -X POST "${API_URL}/triggers" "${HDR[@]}" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$TRG_NAME\",\"example_text\":\"Find lineage docs\",\"description\":\"Live test trigger\"}" | jq .
-curl -sS "${API_URL}/triggers" "${HDR[@]}" | jq '.count'
-curl -sS -X DELETE "${API_URL}/triggers/${TRG_NAME}" "${HDR[@]}" | jq .
-
 if [[ -n "${SECOND_TOKEN}" ]]; then
   echo "== Optional RLS test with SECOND_TOKEN =="
   HDR2=( -H "Authorization: Bearer ${SECOND_TOKEN}" )
