@@ -80,6 +80,7 @@ jobs:
             tests/test_signal_global_observation_order.py \
             tests/test_jwt_scopes.py \
             tests/test_contact_suppression_authority.py \
+            tests/test_public_observability_boundary.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 

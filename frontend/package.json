@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "generate-api": "openapi-typescript http://localhost:8000/openapi.json -o src/lib/types/api.d.ts"
+    "generate-api": "ACTIVEKG_TEST_NO_DB=true JWT_ENABLED=false python ../scripts/export_openapi.py | openapi-typescript /dev/stdin -o src/lib/types/api.d.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.18",

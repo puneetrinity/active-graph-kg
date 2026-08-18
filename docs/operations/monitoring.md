@@ -11,7 +11,10 @@
 
 ## Overview
 
-Active Graph KG exposes comprehensive Prometheus metrics for production monitoring across all critical endpoints and system health indicators.
+Active Graph KG exposes bounded private telemetry. `/metrics` and `/prometheus` require the API service's
+`ACTIVEKG_CONTROL_PLANE_TOKEN` bearer, allow only one serialization at a time, cap output at 1 MiB and omit every
+tenant/organization-labelled entry or sample. Public `/health` is liveness only; protected `/readyz` is the
+separate dependency signal.
 
 **Key Features:**
 - Request counters and latency histograms
@@ -59,10 +62,11 @@ uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 # Check /prometheus endpoint
-curl http://localhost:8000/prometheus
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus
 
-# Legacy /metrics endpoint (JSON)
-curl http://localhost:8000/metrics | jq .
+# JSON metrics
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/metrics | jq .
 ```
 
 ### 5. Configure Prometheus Scraping
@@ -74,6 +78,8 @@ scrape_configs:
   - job_name: 'activekg'
     scrape_interval: 15s
     metrics_path: '/prometheus'
+    authorization:
+      credentials_file: /run/secrets/activekg_control_plane_token
     static_configs:
       - targets: ['localhost:8000']
 ```
@@ -633,6 +639,8 @@ scrape_configs:
     scrape_interval: 15s
     scrape_timeout: 10s
     metrics_path: '/prometheus'
+    authorization:
+      credentials_file: /run/secrets/activekg_control_plane_token
     static_configs:
       - targets:
           - 'activekg-api-1:8000'
@@ -665,37 +673,13 @@ datasources:
       timeInterval: "15s"
 ```
 
-### Security Considerations
+### Security contract
 
-**Option 1: Internal-only metrics**
-```yaml
-# In docker-compose.yml
-services:
-  activekg:
-    networks:
-      - internal  # Metrics only on internal network
-```
-
-**Option 2: Basic Auth**
-```python
-# Add middleware to /prometheus endpoint
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-
-security = HTTPBasic()
-
-def verify_metrics_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    if credentials.username != "prometheus" or credentials.password != os.getenv("METRICS_PASSWORD"):
-        raise HTTPException(401, "Invalid credentials")
-    return credentials
-
-if METRICS_ENABLED:
-    app.add_route("/prometheus", get_metrics_handler(), dependencies=[Depends(verify_metrics_auth)])
-```
-
-**Option 3: Separate Metrics Port**
-- Run separate HTTP server on different port (e.g., 9090)
-- Expose only internally or via VPN
+- Store `ACTIVEKG_CONTROL_PLANE_TOKEN` in the API and scraper secret stores; never in a scrape URL or checked-in
+  config. The extraction worker has a different value.
+- Prometheus uses `authorization.credentials_file` as shown above. Anonymous compatibility is not supported.
+- Missing server configuration returns 503; missing/wrong bearer returns 401. Both fail before registry work.
+- The exporter removes raw tenant/org-labelled samples even for an authenticated scraper.
 
 ---
 
@@ -706,7 +690,7 @@ if METRICS_ENABLED:
 #### 1. Start Server with Metrics
 ```bash
 export METRICS_ENABLED=true
-export JWT_ENABLED=false  # For testing
+export JWT_ENABLED=true
 export RATE_LIMIT_ENABLED=false
 ./scripts/dev_up.sh
 ```
@@ -730,12 +714,11 @@ curl -s http://localhost:8000/debug/embed_info | jq .
 #### 3. Check Metrics
 ```bash
 # View all metrics
-curl -s http://localhost:8000/prometheus
+curl -s -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus
 
-# Filter specific metric
-curl -s http://localhost:8000/prometheus | grep activekg_ask_requests_total
-curl -s http://localhost:8000/prometheus | grep activekg_gating_score
-curl -s http://localhost:8000/prometheus | grep activekg_embedding
+# Filter active metrics
+curl -s -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus | grep activekg_search_requests_total
+curl -s -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus | grep activekg_embedding
 ```
 
 ### Automated Validation Script
@@ -797,7 +780,7 @@ bash scripts/test_prometheus_integration.sh
 echo $METRICS_ENABLED
 
 # Verify active search metrics are being tracked
-curl -s http://localhost:8000/prometheus | grep activekg_search_requests_total
+curl -s -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus | grep activekg_search_requests_total
 ```
 
 ### Issue: Missing metrics
@@ -813,7 +796,7 @@ curl -X POST http://localhost:8000/search -d '{"query":"test"}'
 curl http://localhost:8000/debug/embed_info
 
 # Check metrics again
-curl -s http://localhost:8000/prometheus | grep activekg_
+curl -s -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://localhost:8000/prometheus | grep activekg_
 ```
 
 ### Issue: prometheus_client not found
@@ -856,7 +839,7 @@ pip show prometheus-client
 
 1. **Use 15s scrape interval** (balance between freshness and load)
 2. **Increase to 30s if needed** (for very high-traffic APIs)
-3. **Use /prometheus endpoint** (optimized format, not JSON)
+3. **Use authenticated /prometheus** (optimized format, not JSON)
 4. **Monitor Prometheus itself** (ensure scrape success rate >99%)
 
 ---

@@ -144,23 +144,6 @@ class IndexBuildRequest(BaseModel):
             raise ValueError("Invalid data source path")
 
 
-class HealthCheckResponse(BaseModel):
-    status: str
-    timestamp: str
-    version: str
-    uptime_seconds: float
-    components: dict[str, dict[str, Any]]
-    llm_backend: str | None = None
-    llm_model: str | None = None
-
-
-class MetricsResponse(BaseModel):
-    counters: dict[str, float]
-    gauges: dict[str, float]
-    histograms: dict[str, dict[str, float]]
-    timestamp: str
-
-
 class ErrorResponse(BaseModel):
     error: str
     message: str

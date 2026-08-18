@@ -212,7 +212,7 @@ See the repository root for these additional documents.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         FastAPI REST API                     │
-│       /health /nodes /search /events /admin /_prom           │
+│  /health · private /readyz + metrics · /nodes /search /events│
 └────────────┬────────────────────────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────────┐

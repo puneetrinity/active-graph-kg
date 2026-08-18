@@ -9,6 +9,12 @@ API_URL=${API_URL:-${API:-http://localhost:8000}}
 TOKEN=${TOKEN:-${E2E_ADMIN_TOKEN:-}}
 SECOND_TOKEN=${SECOND_TOKEN:-}
 TOKEN_NO_ADMIN=${TOKEN_NO_ADMIN:-}
+CONTROL_PLANE_TOKEN=${ACTIVEKG_CONTROL_PLANE_TOKEN:-}
+
+if [[ -z "${CONTROL_PLANE_TOKEN}" ]]; then
+  echo "ERROR: ACTIVEKG_CONTROL_PLANE_TOKEN must be set before metrics access." >&2
+  exit 1
+fi
 
 echo "== Governance Demo =="
 
@@ -34,9 +40,10 @@ else
 fi
 
 echo "-- Scrape governance metrics"
-curl -s "$API_URL/prometheus" | grep '^activekg_access_violations_total' || true
+curl -s -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" \
+  "$API_URL/prometheus" | grep '^activekg_access_violations_total' || true
 
 echo "-- Rebuilding proof report"
-API=$API_URL TOKEN=$TOKEN bash scripts/proof_points_report.sh || true
+API=$API_URL TOKEN=$TOKEN ACTIVEKG_CONTROL_PLANE_TOKEN=$CONTROL_PLANE_TOKEN \
+  bash scripts/proof_points_report.sh || true
 echo "✓ Governance demo complete. See evaluation/PROOF_POINTS_REPORT.md"
-

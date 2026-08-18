@@ -21,12 +21,14 @@ from fastapi import (
     FastAPI,
     File,
     Form,
+    Header,
     HTTPException,
     Request,
     Response,
     UploadFile,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -46,24 +48,34 @@ from activekg.api.global_memory import (
     router as global_memory_router,
 )
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
+from activekg.api.operational import (
+    MetricsBoundary,
+    OperationalBusy,
+    OperationalPayloadTooLarge,
+    ReadinessCoordinator,
+    bounded_readiness_check,
+)
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
 from activekg.api.retirement import (
     connector_retirement_router,
     grounded_qa_retirement_router,
+    public_observability_retirement_router,
     semantic_triggers_router,
+)
+from activekg.common.control_plane import (
+    ControlPlaneUnauthorized,
+    ControlPlaneUnavailable,
+    verify_control_plane_authorization,
 )
 from activekg.common.env import env_str
 from activekg.common.logger import clear_log_context, get_enhanced_logger, set_log_context
 from activekg.common.metrics import get_redis_client, metrics
 from activekg.common.validation import (
     EdgeCreate,
-    HealthCheckResponse,
     KGSearchRequest,
-    MetricsResponse,
     NodeBatchCreate,
     NodeCreate,
 )
-from activekg.embedding.global_candidates import PUBLIC_EMBED_VERSION
 from activekg.embedding.queue import (
     enqueue_embedding_job,
     get_pending_count,
@@ -87,11 +99,7 @@ from activekg.graph.models import Candidate, CandidateSourceRecord, Edge, Node
 from activekg.graph.repository import GraphRepository
 
 # Prometheus observability
-from activekg.observability import (
-    get_metrics_handler,
-    track_embedding_health,
-    track_search_request,
-)
+from activekg.observability import track_embedding_health, track_search_request
 from activekg.observability.metrics import record_api_error
 from activekg.refresh.scheduler import RefreshScheduler
 
@@ -238,7 +246,13 @@ class CorrelationIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = FastAPI(title="Active Graph KG", version=APP_VERSION)
+app = FastAPI(
+    title="Active Graph KG",
+    version=APP_VERSION,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(CorrelationIDMiddleware)
 
@@ -335,6 +349,7 @@ app.include_router(global_memory_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
 app.include_router(grounded_qa_retirement_router)
+app.include_router(public_observability_retirement_router)
 
 # Global-candidate vector search reuses the process-wide embedding model.
 if embedder is not None:
@@ -421,864 +436,78 @@ def shutdown_event():
         logger.error("Scheduler shutdown error", extra_fields={"error": str(e)})
 
 
-@app.get("/health", response_model=HealthCheckResponse)
-def health() -> HealthCheckResponse:
-    now = datetime.now(timezone.utc).isoformat()
-    return HealthCheckResponse(
-        status="ok",
-        timestamp=now,
-        version=APP_VERSION,
-        uptime_seconds=0.0,
-        components={"db": {"status": "unknown"}},
-        llm_backend=None,
-        llm_model=None,
+@app.get("/health", response_model=None)
+def health() -> JSONResponse:
+    """Constant-cost process liveness; deliberately performs no dependency I/O."""
+
+    return JSONResponse(
+        content={"status": "alive", "service": "activekg-api"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
-_READINESS_CANDIDATE_TABLES = (
-    "candidates",
-    "candidate_identifiers",
-    "candidate_source_records",
-    "candidate_contact_evidence",
-)
-_READINESS_SHARED_TABLES = (
-    "contact_suppression_tombstones",
-    "contact_person_suppressions",
-    "contact_suppression_receipts",
-    "public_candidate_market_memberships",
-)
-_READINESS_PUBLIC_COLUMNS = (
-    "public_profile",
-    "public_profile_observed_at",
-    "public_crustdata_person_id",
-    "public_headline",
-    "public_location_city",
-    "public_location_country_code",
-    "public_role_family",
-    "public_seniority_band",
-    "public_skills_normalized",
-    "public_embedding",
-    "public_embedding_status",
-    "public_embed_version",
-)
-_READINESS_TABLE_COLUMNS = {
-    "candidate_contact_evidence": (
-        "global_candidate_id",
-        "tenant_id",
-        "email",
-        "email_hash",
-        "provider",
-        "provider_record_id",
-        "confidence",
-        "observed_at",
-        "validated_at",
-        "status",
-        "suppressed_at",
-        "bounce_reason",
-        "is_primary",
-    ),
-    "contact_suppression_tombstones": (
-        "email_hash",
-        "global_candidate_id",
-        "reason",
-        "source_evidence_id",
-        "provider_event_id",
-    ),
-    "contact_person_suppressions": (
-        "global_candidate_id",
-        "reason",
-        "first_observed_at",
-        "last_observed_at",
-        "provider_event_id",
-    ),
-    "contact_suppression_receipts": (
-        "id",
-        "email_hash",
-        "global_candidate_id",
-        "signal_candidate_id",
-        "reason",
-        "scope",
-        "evidence_present",
-        "tenant_id",
-        "issuer",
-        "actor_id",
-        "actor_type",
-        "provider_event_id",
-        "created_at",
-    ),
-    "public_candidate_market_memberships": (
-        "global_candidate_id",
-        "coarse_market_key",
-        "role_family",
-        "location_city",
-        "location_country_code",
-        "seniority_band",
-        "last_observed_at",
-    ),
-}
-_READINESS_REQUIRED_INDEXES = (
-    "idx_gc_public_crustdata_person_id",
-    "idx_gc_public_embedding_status",
-    "idx_cce_one_primary",
-    "idx_cce_email_hash",
-    "idx_contact_suppression_provider_event",
-    "idx_contact_suppression_receipts_email_hash",
-    "idx_contact_suppression_receipts_candidate",
-    "idx_contact_suppression_receipts_tenant_created",
-    "idx_pcmm_market_last_observed",
-)
-_READINESS_REQUIRED_CONSTRAINTS = {
-    "global_candidates": (
-        "global_candidates_public_embedding_status_check",
-        "global_candidates_public_headline_from_profile",
-    ),
-    "candidate_contact_evidence": (
-        "candidate_contact_evidence_unique",
-        "candidate_contact_evidence_primary_usable",
-    ),
-    "contact_suppression_tombstones": (
-        "contact_suppression_reason_check",
-        "contact_suppression_provider_event_hash",
-    ),
-    "contact_person_suppressions": (
-        "contact_person_suppressions_pkey",
-        "contact_person_suppressions_global_candidate_fkey",
-        "contact_person_suppression_reason_check",
-        "contact_person_suppression_provider_event_hash",
-    ),
-    "contact_suppression_receipts": (
-        "contact_suppression_receipts_pkey",
-        "contact_suppression_receipt_email_hash_check",
-        "contact_suppression_receipt_signal_candidate_nonblank",
-        "contact_suppression_receipt_tenant_nonblank",
-        "contact_suppression_receipt_provider_event_hash",
-        "contact_suppression_receipt_authority_check",
-        "contact_suppression_receipt_scope_reason_check",
-        "contact_suppression_receipts_provider_event_unique",
-    ),
-    "public_candidate_market_memberships": (
-        "public_candidate_market_country_code_check",
-        "public_candidate_market_memberships_pkey",
-    ),
-}
-_READINESS_EXPECTED_CHECK_DEFINITIONS = {
-    (
-        "contact_suppression_tombstones",
-        "contact_suppression_reason_check",
-    ): "check((reason=any(array['hard_bounce','complaint'])))",
-    (
-        "contact_suppression_tombstones",
-        "contact_suppression_provider_event_hash",
-    ): "check(((provider_event_idisnull)or(provider_event_id~'^[0-9a-f]{64}$')))",
-    (
-        "contact_person_suppressions",
-        "contact_person_suppression_reason_check",
-    ): "check((reason='complaint'))",
-    (
-        "contact_person_suppressions",
-        "contact_person_suppression_provider_event_hash",
-    ): "check((provider_event_id~'^[0-9a-f]{64}$'))",
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_email_hash_check",
-    ): "check((email_hash~'^[0-9a-f]{64}$'))",
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_signal_candidate_nonblank",
-    ): "check(((signal_candidate_idisnull)or(btrim(signal_candidate_id)<>'')))",
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_tenant_nonblank",
-    ): "check(((btrim(tenant_id)<>'')and(tenant_id<>'__quarantine__')))",
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_provider_event_hash",
-    ): "check((provider_event_id~'^[0-9a-f]{64}$'))",
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_authority_check",
-    ): ("check(((btrim(issuer)<>'')and(btrim(actor_id)<>'')and(actor_type='service')))"),
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipt_scope_reason_check",
-    ): (
-        "check((((reason='hard_bounce')and(scope='address'))or"
-        "((reason='complaint')and(scope='person')and(global_candidate_idisnotnull)"
-        "and(signal_candidate_idisnotnull))))"
-    ),
-}
-_READINESS_EXPECTED_STRUCTURAL_DEFINITIONS = {
-    (
-        "contact_person_suppressions",
-        "contact_person_suppressions_pkey",
-    ): ("p", "primarykey(global_candidate_id)"),
-    (
-        "contact_person_suppressions",
-        "contact_person_suppressions_global_candidate_fkey",
-    ): (
-        "f",
-        "foreignkey(global_candidate_id)referencesglobal_candidates(id)ondeleterestrict",
-    ),
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipts_pkey",
-    ): ("p", "primarykey(id)"),
-}
-_READINESS_PUBLIC_FUNCTIONS = (
-    "activekg_pick_public_fields",
-    "activekg_pick_public_rows",
-    "activekg_public_crustdata_projection",
-    "activekg_assert_public_crustdata_backfill_safe",
-)
-
-_READINESS_REQUIRED_NOT_NULL = {
-    "contact_person_suppressions": (
-        "global_candidate_id",
-        "reason",
-        "first_observed_at",
-        "last_observed_at",
-        "provider_event_id",
-    ),
-    "contact_suppression_receipts": (
-        "id",
-        "email_hash",
-        "reason",
-        "scope",
-        "evidence_present",
-        "tenant_id",
-        "issuer",
-        "actor_id",
-        "actor_type",
-        "provider_event_id",
-        "created_at",
-    ),
-}
-_READINESS_REQUIRED_COLUMN_TYPES = {
-    "contact_person_suppressions": {
-        "global_candidate_id": "uuid",
-        "reason": "text",
-        "first_observed_at": "timestamp with time zone",
-        "last_observed_at": "timestamp with time zone",
-        "provider_event_id": "text",
-    },
-    "contact_suppression_receipts": {
-        "id": "bigint",
-        "email_hash": "text",
-        "global_candidate_id": "uuid",
-        "signal_candidate_id": "text",
-        "reason": "text",
-        "scope": "text",
-        "evidence_present": "boolean",
-        "tenant_id": "text",
-        "issuer": "text",
-        "actor_id": "text",
-        "actor_type": "text",
-        "provider_event_id": "text",
-        "created_at": "timestamp with time zone",
-    },
-}
-_READINESS_REQUIRED_DEFAULTS = {
-    ("contact_person_suppressions", "first_observed_at"): "now()",
-    ("contact_person_suppressions", "last_observed_at"): "now()",
-    ("contact_suppression_receipts", "created_at"): "now()",
-}
-_READINESS_SUPPRESSION_FUNCTION = "contact_suppression_receipts_append_only"
-_READINESS_SUPPRESSION_FUNCTION_BODY = (
-    "beginraiseexception'contact_suppression_receiptsisappend-only(attempted%)',tg_op;end;"
-)
-_READINESS_SUPPRESSION_TRIGGERS = (
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipts_no_mutation",
-        _READINESS_SUPPRESSION_FUNCTION,
-        27,
-    ),
-    (
-        "contact_suppression_receipts",
-        "contact_suppression_receipts_no_truncate",
-        _READINESS_SUPPRESSION_FUNCTION,
-        34,
-    ),
-)
-_READINESS_SUPPRESSION_SEQUENCE = "contact_suppression_receipts_id_seq"
-_READINESS_SUPPRESSION_TABLES = (
-    "contact_suppression_tombstones",
-    "contact_person_suppressions",
-    "contact_suppression_receipts",
-)
-
-# Transitional escape hatch for single-DSN dev environments where the runtime
-# role still owns the tables (RLS nominal). Production must NOT set this.
-_READYZ_ALLOW_OWNER = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
-
-# Development-only: lets /readyz pass with JWT authentication disabled.
-_READYZ_ALLOW_NO_JWT = os.getenv("ACTIVEKG_READYZ_ALLOW_NO_JWT", "false").lower() == "true"
+_readiness_coordinator = ReadinessCoordinator()
+_metrics_boundary = MetricsBoundary()
 
 
-def _normalize_sql_definition(value: str) -> str:
-    return re.sub(r"\s+", "", value.lower()).replace("::text", "")
+def _require_control_plane(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> None:
+    """Fail closed before an operational endpoint touches a dependency."""
 
-
-def _tenant_policy_expression_ok(expr: str) -> bool:
-    normalized = "".join(expr.lower().split()).replace("::text", "")
-    tenant_clause = "(tenant_id=current_setting('app.current_tenant_id',true))"
-    quarantine_clause = "(tenant_id<>'__quarantine__')"
-    return normalized in {
-        f"({tenant_clause}and{quarantine_clause})",
-        f"({quarantine_clause}and{tenant_clause})",
-    }
+    try:
+        verify_control_plane_authorization(authorization)
+    except ControlPlaneUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CONTROL_PLANE_AUTH_UNAVAILABLE",
+                "message": "Operational authentication is unavailable.",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    except ControlPlaneUnauthorized as exc:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "CONTROL_PLANE_AUTH_REQUIRED",
+                "message": "Operational authentication is required.",
+            },
+            headers={"Cache-Control": "no-store", "WWW-Authenticate": "Bearer"},
+        ) from exc
 
 
 @app.get("/readyz", response_model=None)
-def readyz() -> JSONResponse:
-    """Readiness probe: schema, migrations, RLS and runtime-role posture.
+def readyz(_control_plane: None = Depends(_require_control_plane)) -> JSONResponse:
+    """Return one cached, single-flight, bounded readiness snapshot."""
 
-    Checks, in order: DB reachable; migration ledger contains every manifest
-    entry; candidate tables exist with RLS enabled and tenant policies
-    installed; the connected runtime role is NOSUPERUSER/NOBYPASSRLS and does
-    not own the candidate tables (owners bypass ordinary RLS). /health stays
-    a liveness probe with no schema dependency. Raw database errors are
-    logged, never returned.
-    """
-    problems: list[str] = []
-    if PUBLIC_PROFILE_SEARCH_ENABLED and LEGACY_GLOBAL_SEARCH_ENABLED:
-        problems.append("unsafe search configuration: public_v1 requires legacy_v0 to be disabled")
-    if candidate_repo is None:
-        problems.append("candidate repository not initialized (TEST_MODE)")
-    else:
-        try:
-            from activekg.common.migration_manifest import MIGRATIONS
-
-            with candidate_repo.pool.connection() as conn:
-                with conn.cursor() as cur:
-                    # 1. Migration ledger completeness
-                    cur.execute(
-                        "SELECT 1 FROM information_schema.tables WHERE table_name = 'schema_migrations'"
-                    )
-                    if cur.fetchone() is None:
-                        problems.append("migration ledger missing")
-                    else:
-                        cur.execute("SELECT filename, checksum FROM schema_migrations")
-                        applied = dict(cur.fetchall())
-                        missing = [m for m in MIGRATIONS if m not in applied]
-                        if missing:
-                            problems.append(f"migrations not applied: {', '.join(missing)}")
-                        # Recorded checksums must match the files this build
-                        # ships (NULLs are backfilled at boot and tolerated).
-                        drifted = []
-                        migrations_dir = os.path.join(
-                            os.path.dirname(__file__), "..", "..", "db", "migrations"
-                        )
-                        for m in MIGRATIONS:
-                            if m not in applied:
-                                continue  # already reported under "not applied"
-                            recorded = applied.get(m)
-                            if not recorded:
-                                # Init backfills NULLs at boot; a NULL here means
-                                # the ledger was not written by this build's script.
-                                drifted.append(f"{m} (checksum not recorded)")
-                                continue
-                            path = os.path.join(migrations_dir, m)
-                            try:
-                                with open(path, "rb") as fh:
-                                    on_disk = hashlib.sha256(fh.read()).hexdigest()
-                            except OSError:
-                                drifted.append(f"{m} (file missing)")
-                                continue
-                            if on_disk != recorded:
-                                drifted.append(m)
-                        if drifted:
-                            problems.append(f"migration checksum drift: {', '.join(drifted)}")
-
-                    # 2. Candidate tables exist, RLS enabled, owner recorded
-                    cur.execute(
-                        """
-                        SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
-                               pg_get_userbyid(c.relowner)
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'public' AND c.relname = ANY(%s)
-                        """,
-                        (list(_READINESS_CANDIDATE_TABLES),),
-                    )
-                    found = {
-                        name: (bool(rls), bool(force_rls), owner)
-                        for name, rls, force_rls, owner in cur.fetchall()
-                    }
-                    for table in _READINESS_CANDIDATE_TABLES:
-                        if table not in found:
-                            problems.append(f"missing table: {table}")
-                        elif not found[table][0]:
-                            problems.append(f"rls disabled: {table}")
-                        elif table == "candidate_contact_evidence" and not found[table][1]:
-                            problems.append(f"force rls disabled: {table}")
-
-                    cur.execute(
-                        """
-                        SELECT table_name
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public' AND table_name = ANY(%s)
-                        """,
-                        (list(_READINESS_SHARED_TABLES),),
-                    )
-                    shared_found = {row[0] for row in cur.fetchall()}
-                    for table in _READINESS_SHARED_TABLES:
-                        if table not in shared_found:
-                            problems.append(f"missing table: {table}")
-
-                    for table, required_columns in _READINESS_TABLE_COLUMNS.items():
-                        cur.execute(
-                            """
-                            SELECT column_name, is_nullable, data_type, column_default
-                            FROM information_schema.columns
-                            WHERE table_schema = 'public'
-                              AND table_name = %s
-                              AND column_name = ANY(%s)
-                            """,
-                            (table, list(required_columns)),
-                        )
-                        table_columns = {
-                            row[0]: {
-                                "nullable": row[1],
-                                "type": row[2],
-                                "default": row[3],
-                            }
-                            for row in cur.fetchall()
-                        }
-                        for column in required_columns:
-                            if column not in table_columns:
-                                problems.append(f"missing {table} column: {column}")
-                                continue
-                            if (
-                                column in _READINESS_REQUIRED_NOT_NULL.get(table, ())
-                                and table_columns[column]["nullable"] != "NO"
-                            ):
-                                problems.append(f"nullable required column: {table}.{column}")
-                            expected_type = _READINESS_REQUIRED_COLUMN_TYPES.get(table, {}).get(
-                                column
-                            )
-                            if expected_type and table_columns[column]["type"] != expected_type:
-                                problems.append(f"unexpected column type: {table}.{column}")
-                            expected_default = _READINESS_REQUIRED_DEFAULTS.get((table, column))
-                            if expected_default:
-                                actual_default = (table_columns[column]["default"] or "").replace(
-                                    " ", ""
-                                )
-                                if actual_default.lower() != expected_default.replace(" ", ""):
-                                    problems.append(f"unexpected column default: {table}.{column}")
-                        if table == "contact_suppression_receipts":
-                            receipt_id_default = table_columns.get("id", {}).get("default")
-                            if not (
-                                receipt_id_default
-                                and receipt_id_default.lower().startswith("nextval(")
-                                and (
-                                    f"'{_READINESS_SUPPRESSION_SEQUENCE}'::regclass"
-                                    in receipt_id_default
-                                )
-                            ):
-                                problems.append(
-                                    "unexpected column default: contact_suppression_receipts.id"
-                                )
-
-                    cur.execute(
-                        """
-                        SELECT column_name
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'global_candidates'
-                          AND column_name = ANY(%s)
-                        """,
-                        (list(_READINESS_PUBLIC_COLUMNS),),
-                    )
-                    public_columns = {row[0] for row in cur.fetchall()}
-                    for column in _READINESS_PUBLIC_COLUMNS:
-                        if column not in public_columns:
-                            problems.append(f"missing global_candidates column: {column}")
-
-                    cur.execute(
-                        """
-                        SELECT p.proname
-                        FROM pg_proc p
-                        JOIN pg_namespace n ON n.oid = p.pronamespace
-                        WHERE n.nspname = 'public' AND p.proname = ANY(%s)
-                        """,
-                        (list(_READINESS_PUBLIC_FUNCTIONS),),
-                    )
-                    public_functions = {row[0] for row in cur.fetchall()}
-                    for function in _READINESS_PUBLIC_FUNCTIONS:
-                        if function not in public_functions:
-                            problems.append(f"missing function: {function}")
-                    if not (set(_READINESS_PUBLIC_FUNCTIONS) - public_functions):
-                        # Exercise the deployed projection, not only its name:
-                        # a CREATE OR REPLACE that reintroduces type-confusion
-                        # passthrough must make the service unready.
-                        cur.execute(
-                            """
-                            SELECT activekg_public_crustdata_projection(
-                                %s::jsonb
-                            )
-                            """,
-                            (
-                                json.dumps(
-                                    {
-                                        "basic_profile": {
-                                            "name": "Readiness Person",
-                                            "summary": {"email": "READINESS_PRIVATE_SENTINEL"},
-                                            "languages": [
-                                                "English",
-                                                {"email": ("READINESS_LIST_PRIVATE_SENTINEL")},
-                                            ],
-                                        },
-                                        "skills": {
-                                            "professional_network_skills": [
-                                                "Python",
-                                                {"email": ("READINESS_SKILL_PRIVATE_SENTINEL")},
-                                            ]
-                                        },
-                                    }
-                                ),
-                            ),
-                        )
-                        projected = cur.fetchone()[0]
-                        rendered_projection = json.dumps(projected, sort_keys=True)
-                        if (
-                            "PRIVATE_SENTINEL" in rendered_projection
-                            or projected.get("basic_profile", {}).get("name") != "Readiness Person"
-                            or projected.get("basic_profile", {}).get("languages") != ["English"]
-                            or projected.get("skills", {}).get("professional_network_skills")
-                            != ["Python"]
-                        ):
-                            problems.append("public projection behavior unexpected")
-
-                    cur.execute(
-                        """
-                        SELECT p.pronargs, p.prorettype = 'trigger'::regtype,
-                               l.lanname, p.prosecdef, p.prosrc,
-                               pg_get_userbyid(p.proowner)
-                        FROM pg_proc p
-                        JOIN pg_namespace n ON n.oid = p.pronamespace
-                        JOIN pg_language l ON l.oid = p.prolang
-                        WHERE n.nspname = 'public' AND p.proname = %s
-                        """,
-                        (_READINESS_SUPPRESSION_FUNCTION,),
-                    )
-                    suppression_function = cur.fetchone()
-                    if not suppression_function:
-                        problems.append(f"missing function: {_READINESS_SUPPRESSION_FUNCTION}")
-                    elif (
-                        suppression_function[0] != 0
-                        or not suppression_function[1]
-                        or suppression_function[2] != "plpgsql"
-                        or suppression_function[3]
-                        or _normalize_sql_definition(suppression_function[4])
-                        != _READINESS_SUPPRESSION_FUNCTION_BODY
-                    ):
-                        problems.append("append-only receipt function definition unexpected")
-
-                    cur.execute(
-                        """
-                        SELECT c.relname, t.tgname, p.proname, t.tgtype, t.tgenabled
-                        FROM pg_trigger t
-                        JOIN pg_class c ON c.oid = t.tgrelid
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_proc p ON p.oid = t.tgfoid
-                        WHERE n.nspname = 'public' AND NOT t.tgisinternal
-                          AND t.tgname = ANY(%s)
-                        """,
-                        ([trigger[1] for trigger in _READINESS_SUPPRESSION_TRIGGERS],),
-                    )
-                    found_triggers = {
-                        (row[0], row[1]): (row[2], int(row[3]), row[4]) for row in cur.fetchall()
-                    }
-                    for table, trigger, function, trigger_type in _READINESS_SUPPRESSION_TRIGGERS:
-                        actual = found_triggers.get((table, trigger))
-                        if actual is None:
-                            problems.append(f"missing trigger: {table}.{trigger}")
-                        elif actual not in {
-                            (function, trigger_type, "O"),
-                            (function, trigger_type, "A"),
-                        }:
-                            problems.append(f"trigger definition unexpected: {table}.{trigger}")
-
-                    cur.execute(
-                        """
-                        SELECT c.relkind,
-                               has_sequence_privilege(
-                                   current_user,
-                                   quote_ident(n.nspname) || '.' || quote_ident(c.relname),
-                                   'USAGE'
-                               ),
-                               pg_get_userbyid(c.relowner)
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'public' AND c.relname = %s
-                        """,
-                        (_READINESS_SUPPRESSION_SEQUENCE,),
-                    )
-                    sequence_row = cur.fetchone()
-                    if sequence_row is None or sequence_row[0] != "S":
-                        problems.append(f"missing sequence: {_READINESS_SUPPRESSION_SEQUENCE}")
-                    elif not sequence_row[1]:
-                        problems.append(f"sequence usage denied: {_READINESS_SUPPRESSION_SEQUENCE}")
-
-                    cur.execute(
-                        """
-                        SELECT c.relname, pg_get_userbyid(c.relowner)
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'public' AND c.relname = ANY(%s)
-                        """,
-                        (list(_READINESS_SUPPRESSION_TABLES),),
-                    )
-                    suppression_owners: dict[str, str] = dict(cur.fetchall())
-
-                    cur.execute(
-                        """
-                        SELECT
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_receipts', 'SELECT'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_receipts', 'INSERT'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_receipts', 'UPDATE'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_receipts', 'DELETE'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_receipts', 'TRUNCATE'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_tombstones', 'DELETE'),
-                            has_table_privilege(current_user,
-                                'public.contact_suppression_tombstones', 'TRUNCATE'),
-                            has_table_privilege(current_user,
-                                'public.contact_person_suppressions', 'DELETE'),
-                            has_table_privilege(current_user,
-                                'public.contact_person_suppressions', 'TRUNCATE')
-                        """
-                    )
-                    receipt_privileges = cur.fetchone()
-                    if receipt_privileges and (
-                        not receipt_privileges[0]
-                        or not receipt_privileges[1]
-                        or any(receipt_privileges[2:])
-                    ):
-                        problems.append("runtime suppression-table privileges are unsafe")
-
-                    cur.execute(
-                        """
-                        SELECT i.relname
-                        FROM pg_class i
-                        JOIN pg_namespace n ON n.oid = i.relnamespace
-                        JOIN pg_index ix ON ix.indexrelid = i.oid
-                        WHERE n.nspname = 'public' AND i.relname = ANY(%s)
-                          AND ix.indisvalid AND ix.indisready
-                        """,
-                        (list(_READINESS_REQUIRED_INDEXES),),
-                    )
-                    found_indexes = {row[0] for row in cur.fetchall()}
-                    for index in _READINESS_REQUIRED_INDEXES:
-                        if index not in found_indexes:
-                            problems.append(f"missing index: {index}")
-
-                    expected_constraint_names = [
-                        constraint
-                        for constraints in _READINESS_REQUIRED_CONSTRAINTS.values()
-                        for constraint in constraints
-                    ]
-                    cur.execute(
-                        """
-                        SELECT c.relname, con.conname, con.contype,
-                               con.confdeltype, con.convalidated,
-                               pg_get_constraintdef(con.oid)
-                        FROM pg_constraint con
-                        JOIN pg_class c ON c.oid = con.conrelid
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'public' AND con.conname = ANY(%s)
-                        """,
-                        (expected_constraint_names,),
-                    )
-                    found_constraints = {
-                        (row[0], row[1]): {
-                            "type": row[2],
-                            "delete": row[3],
-                            "validated": row[4],
-                            "definition": _normalize_sql_definition(row[5]),
-                        }
-                        for row in cur.fetchall()
-                    }
-                    for table, constraints in _READINESS_REQUIRED_CONSTRAINTS.items():
-                        for constraint in constraints:
-                            found_constraint = found_constraints.get((table, constraint))
-                            if not found_constraint or not found_constraint["validated"]:
-                                problems.append(f"missing constraint: {table}.{constraint}")
-
-                    for key, expected_definition in _READINESS_EXPECTED_CHECK_DEFINITIONS.items():
-                        found_constraint = found_constraints.get(key)
-                        if found_constraint and (
-                            found_constraint["type"] != "c"
-                            or found_constraint["definition"] != expected_definition
-                        ):
-                            problems.append("constraint definition unexpected: " + ".".join(key))
-
-                    for key, expected in _READINESS_EXPECTED_STRUCTURAL_DEFINITIONS.items():
-                        expected_type, expected_definition = expected
-                        found_constraint = found_constraints.get(key)
-                        if found_constraint and (
-                            found_constraint["type"] != expected_type
-                            or found_constraint["definition"] != expected_definition
-                        ):
-                            problems.append("constraint definition unexpected: " + ".".join(key))
-
-                    person_fk = found_constraints.get(
-                        (
-                            "contact_person_suppressions",
-                            "contact_person_suppressions_global_candidate_fkey",
-                        )
-                    )
-                    if person_fk and (person_fk["type"] != "f" or person_fk["delete"] != "r"):
-                        problems.append(
-                            "constraint definition unexpected: "
-                            "contact_person_suppressions."
-                            "contact_person_suppressions_global_candidate_fkey"
-                        )
-                    receipt_event_unique = found_constraints.get(
-                        (
-                            "contact_suppression_receipts",
-                            "contact_suppression_receipts_provider_event_unique",
-                        )
-                    )
-                    if receipt_event_unique and (
-                        receipt_event_unique["type"] != "u"
-                        or receipt_event_unique["definition"] != "unique(issuer,provider_event_id)"
-                    ):
-                        problems.append(
-                            "constraint definition unexpected: "
-                            "contact_suppression_receipts."
-                            "contact_suppression_receipts_provider_event_unique"
-                        )
-
-                    if PUBLIC_PROFILE_SEARCH_ENABLED and not (
-                        set(_READINESS_PUBLIC_COLUMNS) - public_columns
-                    ):
-                        # The public flag must never expose the pre-v1 vector
-                        # or an indefinitely stuck queue. A ten-minute grace
-                        # prevents normal incremental ingest from flapping
-                        # readiness while still detecting a dead embed worker.
-                        cur.execute(
-                            """
-                            SELECT count(*)
-                            FROM global_candidates
-                            WHERE public_profile <> '{}'::jsonb
-                              AND public_profile_observed_at < now() - interval '10 minutes'
-                              AND (
-                                  public_embed_version < %s
-                                  OR public_embedding_status NOT IN ('ready', 'skipped_empty')
-                              )
-                            """,
-                            (PUBLIC_EMBED_VERSION,),
-                        )
-                        stale_public_embeddings = int(cur.fetchone()[0])
-                        if stale_public_embeddings:
-                            problems.append(
-                                "public embedding drain incomplete: "
-                                f"{stale_public_embeddings} stale rows"
-                            )
-
-                    # 3. Tenant policies verified across every dimension:
-                    # identity, permissiveness, command, roles, and both the
-                    # USING and WITH CHECK expressions (GUC binding + the
-                    # __quarantine__ exclusion). The admin policy's definition
-                    # is verified too, not just its existence.
-                    cur.execute(
-                        "SELECT schemaname, tablename, policyname, permissive, roles::text, "
-                        "cmd, COALESCE(qual::text, ''), COALESCE(with_check::text, '') "
-                        "FROM pg_policies WHERE schemaname = 'public' AND tablename = ANY(%s)",
-                        (list(_READINESS_CANDIDATE_TABLES),),
-                    )
-                    policies = {(r[1], r[2]): r for r in cur.fetchall()}
-
-                    for table in _READINESS_CANDIDATE_TABLES:
-                        row = policies.get((table, f"tenant_isolation_{table}"))
-                        if row is None:
-                            problems.append(f"tenant policy missing: {table}")
-                        else:
-                            _s, _t, _p, permissive, roles, cmd, qual, with_check = row
-                            if permissive != "PERMISSIVE" or cmd != "ALL" or "public" not in roles:
-                                problems.append(f"tenant policy attributes unexpected: {table}")
-                            if not _tenant_policy_expression_ok(
-                                qual
-                            ) or not _tenant_policy_expression_ok(with_check):
-                                problems.append(f"tenant policy definition unexpected: {table}")
-                        arow = policies.get((table, f"admin_all_{table}"))
-                        if arow is None:
-                            problems.append(f"admin policy missing: {table}")
-                        else:
-                            _s, _t, _p, _perm, aroles, _cmd, aqual, acheck = arow
-                            if "admin_role" not in aroles or aqual != "true" or acheck != "true":
-                                problems.append(f"admin policy definition unexpected: {table}")
-
-                    # 4. Runtime role posture: RLS must actually apply to it
-                    cur.execute(
-                        "SELECT current_user, rolsuper, rolbypassrls "
-                        "FROM pg_roles WHERE rolname = current_user"
-                    )
-                    role_row = cur.fetchone()
-                    if role_row:
-                        role_name, is_super, bypasses = role_row
-                        if is_super:
-                            problems.append("runtime role is superuser (bypasses RLS)")
-                        if bypasses:
-                            problems.append("runtime role has BYPASSRLS")
-                        if not _READYZ_ALLOW_OWNER:
-                            owned = [
-                                t
-                                for t, (_rls, _force_rls, owner) in found.items()
-                                if owner == role_name
-                            ]
-                            if owned:
-                                problems.append(
-                                    "runtime role owns candidate tables (RLS not effective): "
-                                    + ", ".join(sorted(owned))
-                                )
-                            owned_suppression = sorted(
-                                table
-                                for table, owner in suppression_owners.items()
-                                if owner == role_name
-                            )
-                            if owned_suppression:
-                                problems.append(
-                                    "runtime role owns suppression tables: "
-                                    + ", ".join(owned_suppression)
-                                )
-                            if sequence_row and sequence_row[2] == role_name:
-                                problems.append("runtime role owns suppression receipt sequence")
-                            if suppression_function and suppression_function[5] == role_name:
-                                problems.append("runtime role owns append-only receipt function")
-
-                        # 5. The runtime role must not hold admin_role, even
-                        # through inherited (indirect) membership
-                        cur.execute(
-                            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin_role') "
-                            "AND pg_has_role(current_user, 'admin_role', 'MEMBER')"
-                        )
-                        if cur.fetchone()[0]:
-                            problems.append("runtime role is a member of admin_role (RLS bypass)")
-        except Exception:
-            logger.exception("readyz database check failed")
-            problems.append("database check failed (see logs)")
-
-        # 6. Auth must be on outside development — and actually usable:
-        # algorithm/key compatibility, PEM parseability, Signal issuer key.
-        if not JWT_ENABLED and not _READYZ_ALLOW_NO_JWT:
-            problems.append(
-                "JWT authentication disabled "
-                "(set ACTIVEKG_READYZ_ALLOW_NO_JWT=true only in development)"
+    del _control_plane
+    try:
+        result = _readiness_coordinator.run(
+            lambda: bounded_readiness_check(
+                candidate_repo,
+                unsafe_search_configuration=(
+                    PUBLIC_PROFILE_SEARCH_ENABLED and LEGACY_GLOBAL_SEARCH_ENABLED
+                ),
+                jwt_enabled=JWT_ENABLED,
+                jwt_problems=verification_key_problems(),
             )
-        else:
-            problems.extend(verification_key_problems())
+        )
+    except OperationalBusy:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "reasons": ["readiness_busy"]},
+            headers={"Cache-Control": "no-store"},
+        )
 
-    if problems:
-        return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})
-    return JSONResponse(content={"status": "ready"})
+    return JSONResponse(
+        status_code=200 if result.ready else 503,
+        content={
+            "status": "ready" if result.ready else "not_ready",
+            **({"reasons": list(result.reasons)} if result.reasons else {}),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/_admin/security/limits", response_model=None)
@@ -1628,7 +857,11 @@ def debug_embed_info(claims: JWTClaims | None = Depends(get_jwt_claims)):
 
 
 @app.get("/debug/intent", response_model=None)
-def debug_intent(q: str):
+def debug_intent(
+    q: str,
+    _rl: None = Depends(require_rate_limit("default")),
+    claims: JWTClaims | None = Depends(get_jwt_claims),
+):
     """Debug endpoint to test intent detection without running full /ask.
 
     Example: GET /debug/intent?q=What%20ML%20frameworks%20does%20the%20position%20require
@@ -1640,6 +873,15 @@ def debug_intent(q: str):
         "params": dict | None
     }
     """
+    del _rl
+    if JWT_ENABLED:
+        if not claims:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if "admin:refresh" not in (claims.scopes or []):
+            raise HTTPException(
+                status_code=403, detail="Insufficient permissions. Required scope: admin:refresh"
+            )
+
     try:
         import re
 
@@ -1658,37 +900,64 @@ def debug_intent(q: str):
             "params": params,
         }
     except Exception as e:
-        logger.error("/debug/intent failed", extra_fields={"error": str(e), "query": q})
-        raise HTTPException(status_code=500, detail=f"intent detection error: {str(e)}")
+        logger.error(
+            "/debug/intent failed",
+            extra_fields={"error_type": type(e).__name__},
+        )
+        raise HTTPException(status_code=500, detail="intent detection failed") from e
 
 
-@app.get("/metrics", response_model=MetricsResponse)
-def get_metrics():
-    """Get metrics in JSON format."""
-    assert repo is not None, "GraphRepository not initialized"
-    assert embedder is not None, "EmbeddingProvider not initialized"
-    return metrics.get_all_metrics()
+def _metrics_unavailable(code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": code, "message": message}},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/metrics", response_model=None)
+def get_metrics(_control_plane: None = Depends(_require_control_plane)) -> Response:
+    """Return a private, tenant-label-free, bounded JSON metrics snapshot."""
+
+    del _control_plane
+    if not METRICS_ENABLED:
+        return _metrics_unavailable("METRICS_DISABLED", "Metrics are disabled.")
+    try:
+        payload = _metrics_boundary.json_bytes(metrics.get_all_metrics)
+    except OperationalBusy:
+        return _metrics_unavailable("METRICS_BUSY", "Metrics snapshot is busy.")
+    except OperationalPayloadTooLarge:
+        return _metrics_unavailable(
+            "METRICS_RESPONSE_TOO_LARGE", "Metrics snapshot exceeds its response budget."
+        )
+    return Response(
+        content=payload,
+        status_code=200,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/prometheus")
-async def prometheus_metrics():
-    """Get metrics in Prometheus exposition format using prometheus_client.
+def prometheus_metrics(_control_plane: None = Depends(_require_control_plane)) -> Response:
+    """Return private, tenant-label-free, bounded Prometheus exposition."""
 
-    Provides detailed metrics for observability:
-    - Request counters by score_type and rejection status
-    - Gating score histograms
-    - Citation quality metrics
-    - Latency histograms
-    - Embedding health gauges
-
-    Format: https://prometheus.io/docs/instrumenting/exposition_formats/
-    """
+    del _control_plane
     if not METRICS_ENABLED:
-        return PlainTextResponse(content="# Metrics disabled\n", status_code=503)
-
-    # Use the dedicated Prometheus handler from activekg.observability
-    handler = get_metrics_handler()
-    return await handler()
+        return _metrics_unavailable("METRICS_DISABLED", "Metrics are disabled.")
+    try:
+        payload = _metrics_boundary.prometheus_bytes(generate_latest)
+    except OperationalBusy:
+        return _metrics_unavailable("METRICS_BUSY", "Metrics snapshot is busy.")
+    except OperationalPayloadTooLarge:
+        return _metrics_unavailable(
+            "METRICS_RESPONSE_TOO_LARGE", "Metrics snapshot exceeds its response budget."
+        )
+    return Response(
+        content=payload,
+        status_code=200,
+        headers={"Cache-Control": "no-store", "Content-Type": CONTENT_TYPE_LATEST},
+    )
 
 
 def _background_embed(node_id: str, tenant_id: str | None = None):
@@ -2202,132 +1471,6 @@ def get_node(
         if n.embedding_updated_at
         else None,
     }
-
-
-@app.get("/demo", response_class=HTMLResponse)
-def demo_page():
-    """Minimal self-serve console for demo and testing."""
-    return """
-<!doctype html>
-<html>
-  <head>
-    <meta charset='utf-8' />
-    <meta name='viewport' content='width=device-width, initial-scale=1' />
-    <title>actvgraph-kg Demo Console</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
-      .row { display: flex; gap: 16px; flex-wrap: wrap; }
-      .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; width: 360px; }
-      h2 { margin: 8px 0; font-size: 18px; }
-      input, textarea, select, button { font: inherit; padding: 6px 8px; }
-      ul { padding-left: 20px; }
-      code { background: #f3f4f6; padding: 2px 4px; border-radius: 4px; }
-      small { color: #6b7280; }
-      .res { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; max-height: 200px; overflow: auto; background: #f9fafb; padding: 8px; border-radius: 6px; }
-    </style>
-  </head>
-  <body>
-    <h1>actvgraph-kg Demo Console</h1>
-    <p><small>Postgres + pgvector · Drift-aware refresh · Lineage</small></p>
-    <div class="row">
-      <div class="card">
-        <h2>Search</h2>
-        <input id="q" placeholder="query" style="width: 100%" />
-        <label><input type="checkbox" id="weighted" checked /> weighted</label>
-        <button onclick="doSearch()">Search</button>
-        <div class="res" id="searchRes"></div>
-      </div>
-
-      <div class="card">
-        <h2>Events</h2>
-        <button onclick="listEvents()">List recent</button>
-        <div class="res" id="eventsRes"></div>
-      </div>
-
-      <div class="card">
-        <h2>Lineage & Refresh</h2>
-        <input id="nodeId" placeholder="node id" style="width:100%" />
-        <button onclick="showLineage()">Show Lineage</button>
-        <button onclick="refreshNode()">Manual Refresh</button>
-        <div class="res" id="lineageRes"></div>
-      </div>
-
-      <div class="card">
-        <h2>Anomalies</h2>
-        <button onclick="listAnomalies()">Detect</button>
-        <div class="res" id="anRes"></div>
-      </div>
-    </div>
-
-    <script>
-      async function doSearch() {
-        const q = document.getElementById('q').value;
-        const weighted = document.getElementById('weighted').checked;
-        const resEl = document.getElementById('searchRes');
-        resEl.textContent = 'Searching...';
-        try {
-          const r = await fetch('/search', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ query: q, top_k: 10, use_weighted_score: weighted }) });
-          const data = await r.json();
-          const lines = (data.results || []).map((it, idx) => `${idx+1}. ${it.id}  sim=${it.similarity}`);
-          resEl.textContent = lines.join('\n') || 'No results';
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function listEvents() {
-        const resEl = document.getElementById('eventsRes');
-        resEl.textContent = 'Loading...';
-        try {
-          const r = await fetch('/events?limit=50');
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function showLineage() {
-        const id = document.getElementById('nodeId').value;
-        const resEl = document.getElementById('lineageRes');
-        resEl.textContent = 'Loading...';
-        try {
-          const r = await fetch('/lineage/' + encodeURIComponent(id));
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function refreshNode() {
-        const id = document.getElementById('nodeId').value;
-        const resEl = document.getElementById('lineageRes');
-        resEl.textContent = 'Refreshing...';
-        try {
-          const r = await fetch('/nodes/' + encodeURIComponent(id) + '/refresh', { method: 'POST' });
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function listAnomalies() {
-        const resEl = document.getElementById('anRes');
-        resEl.textContent = 'Detecting...';
-        try {
-          const r = await fetch('/admin/anomalies');
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-    </script>
-  </body>
-</html>
-    """
 
 
 @app.post("/nodes/{node_id}/refresh", response_model=None)

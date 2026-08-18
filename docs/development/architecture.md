@@ -110,9 +110,11 @@ FastAPI-based REST API with JWT authentication and rate limiting.
 
 | Endpoint | Method | Purpose | Code Location |
 |----------|--------|---------|---------------|
-| `/health` | GET | Health check with system status | `main.py:180-195` |
-| `/metrics` | GET | JSON metrics (request counts, latencies) | `main.py:197-210` |
-| `/prometheus` | GET | Prometheus exposition format | `main.py:212-230` |
+| `/health` | GET | Public constant-cost process liveness | `activekg/api/main.py` |
+| `/readyz` | GET | Control-plane-authenticated bounded dependency readiness | `activekg/api/main.py` |
+| `/metrics` | GET | Authenticated, bounded, tenant-label-free JSON metrics | `activekg/api/main.py` |
+| `/prometheus` | GET | Authenticated, bounded, tenant-label-free Prometheus exposition | `activekg/api/main.py` |
+| `/demo`, API docs defaults | GET | Dependency-free HTTP 410 tombstones | `activekg/api/retirement.py` |
 | `/nodes` | POST | Create node with auto-embedding | `main.py:250-290` |
 | `/nodes/{id}` | GET | Retrieve node by ID | `main.py:292-310` |
 | `/search` | POST | Semantic search (vector/hybrid) | `main.py:312-380` |

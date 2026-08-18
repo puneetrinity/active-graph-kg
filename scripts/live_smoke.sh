@@ -8,9 +8,14 @@ set -euo pipefail
 
 API_URL=${API_URL:-${API:-http://localhost:8000}}
 TOKEN=${TOKEN:-${E2E_ADMIN_TOKEN:-}}
+CONTROL_PLANE_TOKEN=${ACTIVEKG_CONTROL_PLANE_TOKEN:-}
 
 if [[ -z "${TOKEN}" ]]; then
   echo "ERROR: TOKEN env var not set. Export a single-line JWT into TOKEN." >&2
+  exit 1
+fi
+if [[ -z "${CONTROL_PLANE_TOKEN}" ]]; then
+  echo "ERROR: ACTIVEKG_CONTROL_PLANE_TOKEN env var not set." >&2
   exit 1
 fi
 
@@ -72,6 +77,7 @@ for i in $(seq 1 30); do
 done
 
 echo "== Prometheus scrape (key lines) =="
-curl -sS "${API_URL}/prometheus" | grep -E 'activekg_(search|embedding|latency)' || true
+curl -sS -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" \
+  "${API_URL}/prometheus" | grep -E 'activekg_(search|embedding|latency)' || true
 
 echo "✓ Live smoke complete"

@@ -13,6 +13,7 @@ from datetime import datetime
 import requests
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+CONTROL_PLANE_TOKEN = os.getenv("ACTIVEKG_CONTROL_PLANE_TOKEN")
 ADMIN_TOKEN = None
 USER_TOKEN = None
 
@@ -49,7 +50,10 @@ def test_health():
     try:
         resp = requests.get(f"{API_URL}/health", timeout=5)
         data = resp.json()
-        passed = resp.status_code == 200 and data.get("status") == "ok"
+        passed = resp.status_code == 200 and data == {
+            "status": "alive",
+            "service": "activekg-api",
+        }
         print_test("Health endpoint", passed, json.dumps(data, indent=2))
         return passed
     except Exception as e:
@@ -60,7 +64,11 @@ def test_health():
 def test_prometheus():
     """Test Prometheus metrics endpoint."""
     try:
-        resp = requests.get(f"{API_URL}/prometheus", timeout=5)
+        resp = requests.get(
+            f"{API_URL}/prometheus",
+            headers={"Authorization": f"Bearer {CONTROL_PLANE_TOKEN}"},
+            timeout=5,
+        )
         passed = resp.status_code == 200 and "python_gc" in resp.text
         print_test("Prometheus metrics", passed, f"Got {len(resp.text)} bytes")
         return passed
@@ -72,7 +80,11 @@ def test_prometheus():
 def test_json_metrics():
     """Test JSON metrics endpoint."""
     try:
-        resp = requests.get(f"{API_URL}/metrics", timeout=5)
+        resp = requests.get(
+            f"{API_URL}/metrics",
+            headers={"Authorization": f"Bearer {CONTROL_PLANE_TOKEN}"},
+            timeout=5,
+        )
         data = resp.json()
         passed = resp.status_code == 200 and "counters" in data
         print_test("JSON metrics", passed, f"Counters: {len(data.get('counters', {}))}")
@@ -529,6 +541,12 @@ def run_regression_tests():
 
 def main():
     global ADMIN_TOKEN, USER_TOKEN
+
+    if not CONTROL_PLANE_TOKEN:
+        print(
+            "ACTIVEKG_CONTROL_PLANE_TOKEN must be set before any readiness checks.", file=sys.stderr
+        )
+        return 1
 
     print(f"{Colors.BOLD}{Colors.BLUE}")
     print("=" * 60)

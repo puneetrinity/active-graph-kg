@@ -368,6 +368,8 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:8000']
     metrics_path: '/prometheus'
+    authorization:
+      credentials_file: /run/secrets/activekg_control_plane_token
 
   - job_name: 'postgres'
     static_configs:
@@ -676,8 +678,10 @@ ACTIVEKG_DSN='postgresql://activekg:PASSWORD@localhost:6432/activekg'
 # API health
 curl https://activekg.example.com/health
 
-# Prometheus metrics
-curl https://activekg.example.com/prometheus | grep activekg_
+# Prometheus metrics (private control plane)
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  https://activekg.example.com/prometheus | grep activekg_
 
 # Database connectivity
 psql $ACTIVEKG_DSN -c "SELECT count(*) FROM nodes;"

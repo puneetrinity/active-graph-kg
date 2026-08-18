@@ -51,18 +51,6 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/metrics': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/prometheus': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/openapi.json': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
       '/debug': {
         target: 'http://localhost:8000',
         changeOrigin: true,

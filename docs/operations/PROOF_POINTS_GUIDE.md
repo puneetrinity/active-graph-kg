@@ -4,6 +4,9 @@
 
 This guide covers the Active Graph KG proof points framework and observability stack, including automated validation scripts, metrics collection, and visualization.
 
+> Current boundary: metrics require `ACTIVEKG_CONTROL_PLANE_TOKEN`; raw tenant/org-labelled samples are omitted.
+> Ask, trigger and connector series are dormant definitions and are not launch-product evidence.
+
 ## Proof Points Report
 
 ### Quick Start
@@ -13,6 +16,8 @@ Generate a comprehensive proof points report:
 ```bash
 export TOKEN='<your-admin-jwt>'
 export API=http://localhost:8000
+# Load ACTIVEKG_CONTROL_PLANE_TOKEN into the environment from your secret store.
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
 
 # Basic report (metrics only)
 make proof-report
@@ -242,18 +247,13 @@ The **Active Graph KG - Operations Dashboard** includes:
 
 ### Prometheus Queries
 
-Key metrics exposed at `/prometheus`:
+Key non-tenant-labelled metrics exposed at authenticated `/prometheus`:
 
 - `activekg_search_requests_total{mode, score_type}`
 - `activekg_search_latency_seconds_bucket{mode, score_type}`
-- `activekg_embedding_coverage_ratio{tenant_id}`
-- `activekg_embedding_max_staleness_seconds{tenant_id}`
-- `activekg_triggers_fired_total{pattern, mode}`
-- `activekg_trigger_run_latency_seconds_bucket{mode}`
 - `activekg_schedule_runs_total{job_id, kind}`
 - `activekg_schedule_inter_run_seconds_bucket{job_id}`
 - `activekg_node_refresh_latency_seconds_bucket{result}`
-- `activekg_ask_requests_total{score_type, rejected}`
 
 ### Custom Alerting Rules
 
@@ -411,7 +411,7 @@ Recommended validation frequency:
 
 **"Proof report shows zero metrics"**
 - Run `make live-smoke` first to populate metrics
-- Check Prometheus endpoint: `curl http://localhost:8000/prometheus`
+- Check authenticated Prometheus access with `scripts/metrics_probe.sh`
 - Verify scheduler is running if checking `schedule_runs_total`
 
 **"RUN_PROOFS=1 doesn't execute tests"**
@@ -422,7 +422,7 @@ Recommended validation frequency:
 **"Grafana dashboard shows no data"**
 - Verify Prometheus datasource is configured
 - Check time range (default: last 1 hour)
-- Ensure metrics are being scraped: `/prometheus` endpoint accessible
+- Ensure the scraper sends the API control-plane bearer from its secret store
 
 ## Next Steps
 

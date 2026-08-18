@@ -28,6 +28,7 @@ from activekg.triggers.trigger_engine import TriggerEngine
 
 BASE_URL = "http://localhost:8000"
 DSN = os.getenv("ACTIVEKG_DSN", "postgresql://activekg:activekg@localhost:5432/activekg")
+CONTROL_PLANE_TOKEN = os.getenv("ACTIVEKG_CONTROL_PLANE_TOKEN")
 
 
 def test_jsonb_compound_filter():
@@ -431,8 +432,12 @@ def test_prometheus_endpoint():
         print(f"⚠ API not running, skipping endpoint test: {e}")
         return
 
+    if not CONTROL_PLANE_TOKEN:
+        raise RuntimeError("ACTIVEKG_CONTROL_PLANE_TOKEN must be set before metrics access")
+    control_headers = {"Authorization": f"Bearer {CONTROL_PLANE_TOKEN}"}
+
     # Test /metrics (JSON format)
-    resp = requests.get(f"{BASE_URL}/metrics")
+    resp = requests.get(f"{BASE_URL}/metrics", headers=control_headers)
     assert resp.status_code == 200, f"/metrics failed: {resp.text}"
 
     metrics_json = resp.json()
@@ -442,7 +447,7 @@ def test_prometheus_endpoint():
     print(f"  - Histograms: {len(metrics_json.get('histograms', {}))} metrics")
 
     # Test /prometheus (Prometheus format)
-    resp = requests.get(f"{BASE_URL}/prometheus")
+    resp = requests.get(f"{BASE_URL}/prometheus", headers=control_headers)
     assert resp.status_code == 200, f"/prometheus failed: {resp.text}"
 
     prometheus_text = resp.text

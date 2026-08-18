@@ -23,6 +23,11 @@
 
 > Security: Weekly Safety scans on dependencies (see Security Scan badge) with reports archived per run.
 
+> **Launch operational boundary:** anonymous `GET /health` is process liveness only. `GET /readyz`, `/metrics`
+> and `/prometheus` require a service-specific `ACTIVEKG_CONTROL_PLANE_TOKEN` bearer. The production demo and
+> interactive HTTP API documentation are unavailable (HTTP 410); generate the OpenAPI client offline with
+> `cd frontend && npm run generate-api`.
+
 ---
 
 ## Security
@@ -210,7 +215,9 @@ curl -X POST http://localhost:8000/search \
   }'
 
 # Prometheus metrics
-curl http://localhost:8000/prometheus
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  http://localhost:8000/prometheus
 ```
 
 ### 6. Postman Collection
@@ -483,7 +490,9 @@ Events are tagged with `actor_type='user'` and `manual_trigger=true`.
 Standard exposition format for monitoring:
 
 ```bash
-curl http://localhost:8000/prometheus
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  http://localhost:8000/prometheus
 ```
 
 Returns:
@@ -505,10 +514,11 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 ## API Endpoints (30+ Total)
 
 ### Core
-- `GET /health` - Health check with version
-- `GET /metrics` - Metrics in JSON format
-- `GET /prometheus` - Metrics in Prometheus format
-- `GET /demo` - Demo page with sample data
+- `GET /health` - public, constant-cost process liveness
+- `GET /readyz` - private bounded readiness (`ACTIVEKG_CONTROL_PLANE_TOKEN` bearer)
+- `GET /metrics` - private, bounded and tenant-label-free JSON metrics
+- `GET /prometheus` - private, bounded and tenant-label-free Prometheus metrics
+- `GET /demo`, `/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc` - HTTP 410 tombstones
 
 ### Nodes & Search
 - `POST /nodes` - Create node
@@ -619,10 +629,9 @@ active-graph-kg/
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?templateUrl=https://github.com/puneetrinity/active-graph-kg)
 
-After deploy, set variables in Railway → Variables. The service healthcheck is
-`/readyz`, which requires a **restricted runtime role** (non-owner, NOSUPERUSER,
-NOBYPASSRLS) and JWT auth enabled — a single owner DSN will hold the deployment
-permanently not-ready.
+After deploy, set variables in Railway → Variables. Railway uses public `/health`
+for process liveness. Operators check the dependency boundary separately through
+authenticated `/readyz`; a non-ready dependency does not create a restart loop.
 
 Required (split-DSN model):
 - `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (e.g. the Railway Postgres
@@ -633,6 +642,8 @@ Required (split-DSN model):
 - `ACTIVEKG_DSN` — the runtime DSN using that restricted role, e.g.
   `postgresql://activekg_app:<secret>@<host>:5432/<db>`.
 - `JWT_ENABLED=true` + key config (see `.env.example`).
+- `ACTIVEKG_CONTROL_PLANE_TOKEN` — a different high-entropy secret on the API and
+  extraction-worker services; never place it in a URL or log.
 - `EMBEDDING_BACKEND=sentence-transformers`
 - `EMBEDDING_MODEL=all-MiniLM-L6-v2` (or larger, e.g., all-mpnet-base-v2)
 - `SEARCH_DISTANCE=cosine`
@@ -847,6 +858,8 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:8000']
     metrics_path: '/prometheus'
+    authorization:
+      credentials_file: /run/secrets/activekg_control_plane_token
 ```
 
 ### 4. Set Up Alerts
@@ -1156,7 +1169,7 @@ Before deploying to production, ensure:
 - [ ] Content Admission: Keep node content inline or use the bounded authenticated multipart upload; remote/local
       `payload_ref` loading is unavailable.
 - [ ] Request Limits: Configure reverse proxy and/or `MAX_REQUEST_SIZE_BYTES` (defaults to 10MB).
-- [ ] Monitoring: Scrape `/prometheus` and import Grafana dashboard.
+- [ ] Monitoring: scrape `/prometheus` with the API control-plane bearer from a secret store; never anonymously.
 - [ ] Secrets Management: Use env vars / secret store; never commit credentials.
 
 See PRODUCTION_HARDENING_GUIDE.md for details.

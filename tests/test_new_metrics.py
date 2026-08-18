@@ -10,6 +10,7 @@ Tests:
 """
 
 import json
+import os
 import time
 
 import requests
@@ -17,8 +18,15 @@ import requests
 
 def get_prometheus_metrics() -> str:
     """Fetch all metrics from /prometheus endpoint."""
+    token = os.getenv("ACTIVEKG_CONTROL_PLANE_TOKEN")
+    if not token:
+        raise RuntimeError("ACTIVEKG_CONTROL_PLANE_TOKEN must be set before metrics access")
     try:
-        response = requests.get("http://localhost:8000/prometheus", timeout=10)
+        response = requests.get(
+            "http://localhost:8000/prometheus",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
         response.raise_for_status()
         return response.text
     except Exception as e:

@@ -750,7 +750,8 @@ curl http://$HOST/health
 curl http://$HOST/_webhooks/gcs/health
 
 # Metrics
-curl http://$HOST/metrics
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://$HOST/metrics
 ```
 
 ---
