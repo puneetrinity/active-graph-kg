@@ -1,6 +1,6 @@
 # actvgraph-kg - Quick Start
 
-**One-Line Definition:** A self-refreshing knowledge graph where nodes auto-refresh, track drift, and emit semantic triggers.
+**One-Line Definition:** A self-refreshing knowledge graph where nodes auto-refresh, track drift, and emit auditable events.
 
 **Status:** ✅ Production Ready (Dual ANN, RLS, JWT auth, rate limiting, metrics)
 **Last Updated:** 2025-11-17
@@ -82,7 +82,7 @@ python scripts/smoke_test.py
 === Test 1: Refresh Cycle ===
 ✓ Created node: <uuid>
 ...
-=== Test 4: Semantic Search ===
+=== Test 3: Semantic Search ===
 ✓ Search returned N results
 ✅ SMOKE TEST PASSED
 ```
@@ -105,20 +105,7 @@ The smoke test validates these critical flows:
 - Events gated by threshold
 - History persisted
 
-### **Test 2: Pattern Registration & Trigger Firing**
-1. Registers fraud detection pattern via `POST /triggers`
-2. Verifies pattern persisted in DB (not in-memory)
-3. Creates node with matching content + trigger
-4. Waits 125 seconds for trigger cycle
-5. Checks for `trigger_fired` events
-
-**What this proves:**
-- Patterns stored in database
-- Trigger engine runs periodically
-- Similarity thresholds work
-- Events emitted correctly
-
-### **Test 3: Lineage Chain Traversal**
+### **Test 2: Lineage Chain Traversal**
 1. Creates 3 nodes: A (child), B (intermediate), C (parent)
 2. Creates edges: A→B→C with `rel='DERIVED_FROM'`
 3. Calls `GET /lineage/A?max_depth=5`
@@ -130,7 +117,7 @@ The smoke test validates these critical flows:
 - Edge metadata preserved
 - Depth limiting works
 
-### **Test 4: Semantic Search**
+### **Test 3: Semantic Search**
 1. Searches for "machine learning neural networks research"
 2. Verifies results returned with similarity scores
 3. Checks scores are in range [0, 1]
@@ -211,25 +198,16 @@ curl -X POST http://localhost:8000/search \
 # Formula: weighted_score = similarity * exp(-decay_lambda * age_days) * (1 - drift_beta * drift_score)
 ```
 
-### **Register Trigger Pattern**
+### **Semantic Triggers (Unavailable)**
 ```bash
 curl -X POST http://localhost:8000/triggers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "fraud_alert",
-    "example_text": "suspicious wire transfer to offshore account",
-    "description": "Detects potential fraud patterns"
-  }'
+  -H "Content-Type: application/json" -d '{}'
 
-# Response: {"status": "registered", "name": "fraud_alert"}
+# HTTP 410:
+# {"detail":{"code":"MEMORY_SEMANTIC_TRIGGERS_UNAVAILABLE","message":"Semantic triggers are not available."}}
 ```
 
-### **List Patterns (Verify DB Persistence)**
-```bash
-curl http://localhost:8000/triggers
-
-# Response: {"patterns": [{"name": "fraud_alert", "description": "...", ...}], "count": 1}
-```
+The compatibility routes do not parse the request body or run model, database, scheduler, or event work.
 
 ### **Create Lineage Edge**
 ```bash
@@ -337,8 +315,6 @@ psql -h localhost -U activekg -d activekg -f db/init.sql
 ```python
 # scheduler_runner.py
 from activekg.refresh.scheduler import RefreshScheduler
-from activekg.triggers.trigger_engine import TriggerEngine
-from activekg.triggers.pattern_store import PatternStore
 from activekg.graph.repository import GraphRepository
 from activekg.engine.embedding_provider import EmbeddingProvider
 import os
@@ -347,10 +323,7 @@ DSN = os.getenv("ACTIVEKG_DSN", "postgresql://activekg:activekg@localhost:5432/a
 
 repo = GraphRepository(DSN)
 embedder = EmbeddingProvider()
-pattern_store = PatternStore(DSN)
-trigger_engine = TriggerEngine(pattern_store, repo)
-
-scheduler = RefreshScheduler(repo, embedder, trigger_engine)
+scheduler = RefreshScheduler(repo, embedder, trigger_engine=None)
 scheduler.start()
 
 print("Scheduler running... Press Ctrl+C to stop")
@@ -385,8 +358,8 @@ python scheduler_runner.py
 |------|---------|-------|
 | `db/init.sql` | Schema with explicit columns, patterns table, indexes | 93 |
 | `activekg/graph/repository.py` | CRUD, vector_search, lineage, payload loaders | ~417 |
-| `activekg/refresh/scheduler.py` | Refresh cycle with drift gating, trigger integration | 94 |
-| `activekg/triggers/pattern_store.py` | DB-backed pattern persistence | 78 |
+| `activekg/refresh/scheduler.py` | Refresh cycle with drift gating | 94 |
+| `activekg/triggers/pattern_store.py` | Dormant pattern persistence design (not launch-wired) | 78 |
 | `activekg/api/main.py` | All 11 API endpoints | 249 |
 | `scripts/smoke_test.py` | E2E validation | 233 |
 | `enable_vector_index.sql` | Vector index creation | 17 |
@@ -413,7 +386,6 @@ python scheduler_runner.py
 4. **Monitor KPIs** (See `IMPLEMENTATION_STATUS.md`):
    - Refresh coverage
    - Drift distribution (p50, p95)
-   - Trigger precision
    - Search latency
 
 ---

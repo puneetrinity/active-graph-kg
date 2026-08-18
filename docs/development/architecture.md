@@ -112,7 +112,7 @@ FastAPI-based REST API with JWT authentication and rate limiting.
 | `/search` | POST | Semantic search (vector/hybrid) | `main.py:312-380` |
 | `/ask` | POST | Q&A with citations | `main.py:382-520` |
 | `/edges` | POST | Create relationship | `main.py:522-550` |
-| `/triggers` | POST/GET/DELETE | Pattern CRUD | `main.py:552-610` |
+| `/triggers` | POST/GET/DELETE | Unavailable compatibility tombstones (HTTP 410) | `api/retirement.py` |
 | `/events` | GET | Query event log | `main.py:612-640` |
 | `/lineage/{id}` | GET | Traverse ancestry | `main.py:642-670` |
 | `/admin/refresh` | POST | Manual refresh trigger | `main.py:672-720` |
@@ -360,7 +360,10 @@ def compute_drift(old_emb: np.ndarray, new_emb: np.ndarray) -> float:
 - `0.05-0.15` → Moderate change (new paragraph, edits)
 - `> 0.15` → Significant change (rewrite, topic shift)
 
-#### Efficient Trigger Scanning (`scheduler.py:76-90`)
+#### Dormant Trigger Scanning Design (`scheduler.py`)
+
+> **Unavailable for launch:** the API does not construct or pass a trigger engine to the scheduler. The following
+> is retained design reference only; it is not a deployed workflow or performance claim.
 
 After refresh cycle, only scan refreshed nodes (not entire graph):
 
@@ -375,9 +378,10 @@ self.trigger_engine.run_for(refreshed_ids)  # O(K) instead of O(N)
 - New: Scan only K refreshed nodes (e.g., 50 nodes)
 - Speedup: 2000x in this example
 
-### 5. Trigger Engine (`activekg/triggers/`)
+### 5. Dormant Trigger Engine Design (`activekg/triggers/`)
 
-Semantic pattern matching with configurable thresholds.
+Semantic pattern matching code/schema retained for a future separately approved product. HTTP CRUD returns 410
+and production startup provides no execution wiring. This design is unrelated to connector synchronization.
 
 #### Pattern Storage (`triggers/pattern_store.py`)
 
@@ -493,11 +497,6 @@ There are two embedding modes:
 │ Event Log          │ INSERT INTO events (type='node_created', ...)
 └────────┬───────────┘
          ↓
-┌────────────────────┐
-│ Initial Trigger    │ trigger_engine.run_for([node.id])
-│ Check              │
-└────────────────────┘
-
 ... Time passes ...
 
 ┌─────────────────┐
@@ -669,9 +668,10 @@ ORDER BY drift_score DESC LIMIT 10;
 
 **Implementation:** `activekg/refresh/scheduler.py:60-75` (drift computation)
 
-### 3. Semantic Triggers
+### 3. Semantic Triggers — Dormant Design Reference
 
-**What it does:** Pattern matching against node embeddings, fires events when similarity exceeds threshold.
+**Launch status:** unavailable. The three HTTP compatibility routes return 410 and no trigger engine is passed to
+the scheduler. The examples below describe retained design code, not active product behavior.
 
 **Pattern Definition:**
 ```json
@@ -866,9 +866,11 @@ db/
 | Refresh cycle | 40-90 | Due node detection, re-embedding, drift |
 | Policy evaluation | 60-75 | Cron > interval precedence |
 | Drift computation | 70-75 | Cosine distance calculation |
-| Efficient trigger scan | 76-90 | Scoped to refreshed nodes |
+| Dormant trigger hook | 76-90 | Not wired by the launch API |
 
 #### Trigger Engine (`activekg/triggers/trigger_engine.py`)
+
+**Launch status:** dormant implementation only; no API CRUD or scheduler caller.
 
 | Feature | Line Range | Description |
 |---------|-----------|-------------|

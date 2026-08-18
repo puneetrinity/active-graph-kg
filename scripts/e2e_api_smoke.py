@@ -171,35 +171,6 @@ def main():
     version_count = versions_data.get("count", 0)
     print(f"   ✓ Retrieved {version_count} version(s)")
 
-    # 10) Triggers endpoint
-    print("\n10. Testing /triggers endpoint...")
-    trig_name = "e2e_test_trigger"
-
-    # Register trigger
-    r = req(
-        "POST",
-        "/triggers",
-        token=user_token,
-        json={"name": trig_name, "example_text": "senior java spring boot engineer"},
-    )
-    if r.status_code == 200:
-        print(f"   ✓ Registered trigger: {trig_name}")
-    elif r.status_code == 401:
-        print("   ⚠ Trigger registration requires auth (JWT disabled?)")
-    else:
-        print(f"   ⚠ Trigger registration returned: {r.status_code}")
-
-    # List triggers
-    r = req("GET", "/triggers", token=user_token)
-    assert r.status_code == 200, f"Trigger list failed: {r.text}"
-    triggers = r.json()
-    print(f"   ✓ Listed {len(triggers)} trigger(s)")
-
-    # Delete trigger (cleanup)
-    r = req("DELETE", f"/triggers/{trig_name}", token=user_token)
-    if r.status_code in (200, 404):
-        print("   ✓ Cleaned up trigger")
-
     print("\n" + "=" * 60)
     print("✅ E2E smoke test completed successfully!")
     print("=" * 60)

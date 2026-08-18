@@ -42,14 +42,6 @@ export default defineConfig({
           });
         },
       },
-      '/triggers': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/patterns': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
       '/events': {
         target: 'http://localhost:8000',
         changeOrigin: true,

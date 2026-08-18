@@ -97,34 +97,23 @@ This comprehensive checklist validates all systems before marketing launch and p
 
 ---
 
-### 1.3 Triggers
+### 1.3 Semantic-Trigger Quarantine
 
-**Objective:** Validate semantic pattern matching and trigger execution
+**Objective:** Validate that semantic-trigger CRUD and execution remain unavailable
 
 #### Test Cases
-- [ ] Register trigger pattern:
+- [ ] Verify the compatibility POST returns the stable tombstone without executing work:
   ```bash
   curl -X POST http://localhost:8000/triggers \
     -H "Authorization: Bearer $ADMIN_JWT" \
-    -d '{
-      "name": "fraud_detection",
-      "example_text": "suspicious wire transfer to offshore account",
-      "description": "Detects potential fraud"
-    }'
+    -H "Content-Type: application/json" \
+    -d '{}'
   ```
-- [ ] Create node with trigger:
-  ```json
-  {
-    "classes": ["Transaction"],
-    "props": {"text": "large wire transfer flagged by system"},
-    "triggers": [{"name": "fraud_detection", "threshold": 0.8}]
-  }
-  ```
-- [ ] Verify `trigger_fired` event created when similarity ≥ threshold
-- [ ] Confirm trigger runs on refreshed nodes (after drift update)
-- [ ] Test trigger with low similarity (below threshold) - no event expected
+- [ ] Verify `POST /triggers`, `GET /triggers`, and `DELETE /triggers/{name}` each return HTTP 410,
+  `Cache-Control: no-store`, and `MEMORY_SEMANTIC_TRIGGERS_UNAVAILABLE`.
+- [ ] Verify the scheduler starts refresh, purge, Drive, and GCS jobs without a trigger engine.
 
-**Pass Criteria:** Triggers fire correctly on node creation and after refresh when threshold met
+**Pass Criteria:** Trigger compatibility routes are stable no-I/O tombstones and no trigger job is scheduled
 
 ---
 
@@ -859,7 +848,7 @@ This comprehensive checklist validates all systems before marketing launch and p
 
 **Phase 3: Features (1.5 hours)**
 8. Refresh cycle with drift-triggered events (30 min)
-9. Trigger engine pattern matching (20 min)
+9. Semantic-trigger quarantine response (5 min)
 10. Search/hybrid queries with filters and reranker (30 min)
 11. LLM Q&A (streaming and non-streaming) (10 min)
 

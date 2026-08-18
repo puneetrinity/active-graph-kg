@@ -51,6 +51,7 @@ from activekg.api.global_memory import (
 )
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
+from activekg.api.retirement import semantic_triggers_router
 from activekg.common.env import env_str
 from activekg.common.logger import clear_log_context, get_enhanced_logger, set_log_context
 from activekg.common.metrics import get_redis_client, metrics
@@ -105,8 +106,6 @@ from activekg.observability import (
 )
 from activekg.observability.metrics import record_api_error
 from activekg.refresh.scheduler import RefreshScheduler
-from activekg.triggers.pattern_store import PatternStore
-from activekg.triggers.trigger_engine import TriggerEngine
 
 # Metrics enabled flag
 METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
@@ -385,8 +384,6 @@ if TEST_MODE:
     # Test mode: defer initialization, use None/mocks
     repo = None
     embedder = None
-    pattern_store = None
-    trigger_engine = None
     scheduler: RefreshScheduler | None = None
     candidate_repo: CandidateRepository | None = None
     logger.warning("Running in TEST_MODE - DB connections deferred")
@@ -394,8 +391,6 @@ else:
     # Normal mode: eager initialization
     repo = GraphRepository(DSN, candidate_factor=WEIGHTED_SEARCH_CANDIDATE_FACTOR)
     embedder = EmbeddingProvider(backend=EMBEDDING_BACKEND, model_name=EMBEDDING_MODEL)
-    pattern_store = PatternStore(DSN)
-    trigger_engine = TriggerEngine(pattern_store, repo)
     scheduler = None
     candidate_repo = CandidateRepository(DSN)
 
@@ -403,6 +398,7 @@ else:
 app.include_router(connectors_admin_router)
 app.include_router(connectors_webhook_router)
 app.include_router(global_memory_router)
+app.include_router(semantic_triggers_router)
 
 # Global-candidate vector search reuses the process-wide embedding model.
 if embedder is not None:
@@ -566,7 +562,7 @@ def startup_event():
     if RUN_SCHEDULER:
         try:
             scheduler = RefreshScheduler(
-                repo, embedder, trigger_engine=trigger_engine, gcs_poller_enabled=RUN_GCS_POLLER
+                repo, embedder, trigger_engine=None, gcs_poller_enabled=RUN_GCS_POLLER
             )
             scheduler.start()
             logger.info("RefreshScheduler started on startup")
@@ -2666,7 +2662,7 @@ def demo_page():
   </head>
   <body>
     <h1>actvgraph-kg Demo Console</h1>
-    <p><small>Postgres + pgvector · Drift-aware refresh · Lineage · Semantic triggers</small></p>
+    <p><small>Postgres + pgvector · Drift-aware refresh · Lineage</small></p>
     <div class="row">
       <div class="card">
         <h2>Search</h2>
@@ -2674,15 +2670,6 @@ def demo_page():
         <label><input type="checkbox" id="weighted" checked /> weighted</label>
         <button onclick="doSearch()">Search</button>
         <div class="res" id="searchRes"></div>
-      </div>
-
-      <div class="card">
-        <h2>Triggers</h2>
-        <input id="tname" placeholder="name (e.g., senior_java)" style="width:100%" />
-        <textarea id="texample" rows="3" placeholder="example text" style="width:100%"></textarea>
-        <button onclick="addTrigger()">Register</button>
-        <button onclick="listTriggers()">List</button>
-        <div class="res" id="trigRes"></div>
       </div>
 
       <div class="card">
@@ -2717,32 +2704,6 @@ def demo_page():
           const data = await r.json();
           const lines = (data.results || []).map((it, idx) => `${idx+1}. ${it.id}  sim=${it.similarity}`);
           resEl.textContent = lines.join('\n') || 'No results';
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function addTrigger() {
-        const name = document.getElementById('tname').value;
-        const example = document.getElementById('texample').value;
-        const resEl = document.getElementById('trigRes');
-        resEl.textContent = 'Registering...';
-        try {
-          const r = await fetch('/triggers', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name: name, example_text: example }) });
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-          resEl.textContent = 'Error: ' + e;
-        }
-      }
-
-      async function listTriggers() {
-        const resEl = document.getElementById('trigRes');
-        resEl.textContent = 'Loading...';
-        try {
-          const r = await fetch('/triggers');
-          const data = await r.json();
-          resEl.textContent = JSON.stringify(data, null, 2);
         } catch (e) {
           resEl.textContent = 'Error: ' + e;
         }
@@ -4192,97 +4153,6 @@ def create_edge(
     except Exception as ex:
         logger.error("Edge creation failed", extra_fields={"error": str(ex)})
         raise HTTPException(status_code=500, detail=f"Edge creation failed: {str(ex)}")
-
-
-@app.post("/triggers", response_model=None)
-def register_trigger_pattern(
-    pattern: dict[str, Any],
-    _rl: None = Depends(require_rate_limit("default")),
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """Register a semantic trigger pattern.
-
-    Expects: {"name": "pattern_name", "example_text": "...", "description": "..."}
-
-    Security:
-        Requires JWT authentication when JWT_ENABLED=true.
-        Triggers are global resources (not tenant-scoped).
-    """
-    assert embedder is not None, "EmbeddingProvider not initialized"
-    assert pattern_store is not None, "PatternStore not initialized"
-    # Require authentication for trigger management
-    if JWT_ENABLED and not claims:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if "name" not in pattern or "example_text" not in pattern:
-        raise HTTPException(status_code=400, detail="Missing required fields: name, example_text")
-
-    try:
-        name = pattern["name"]
-        example_text = pattern["example_text"]
-        description = pattern.get("description")
-
-        # Embed the example text to create the pattern
-        embedding = embedder.encode([example_text])[0]
-
-        # Store pattern
-        pattern_store.set(name, embedding, description)
-
-        return {
-            "status": "registered",
-            "name": name,
-            "description": description,
-        }
-    except Exception as e:
-        logger.error("Pattern registration failed", extra_fields={"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Pattern registration failed: {str(e)}")
-
-
-@app.get("/triggers", response_model=None)
-def list_trigger_patterns(
-    _rl: None = Depends(require_rate_limit("default")),
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """List all registered trigger patterns.
-
-    Security:
-        Returns all patterns (no tenant filtering for system-level triggers).
-        Rate limited for read protection.
-    """
-    assert pattern_store is not None, "PatternStore not initialized"
-    try:
-        patterns = pattern_store.list_patterns()
-        return {"patterns": patterns, "count": len(patterns)}
-    except Exception as e:
-        logger.error("Pattern listing failed", extra_fields={"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Pattern listing failed: {str(e)}")
-
-
-@app.delete("/triggers/{name}", response_model=None)
-def delete_trigger_pattern(
-    name: str,
-    _rl: None = Depends(require_rate_limit("default")),
-    claims: JWTClaims | None = Depends(get_jwt_claims),
-):
-    """Delete a trigger pattern by name.
-
-    Security:
-        Requires JWT authentication when JWT_ENABLED=true.
-    """
-    assert repo is not None, "GraphRepository not initialized"
-    assert pattern_store is not None, "PatternStore not initialized"
-    # Require authentication for trigger management
-    if JWT_ENABLED and not claims:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    try:
-        deleted = pattern_store.delete(name)
-        if not deleted:
-            raise HTTPException(status_code=404, detail=f"Pattern not found: {name}")
-        return {"status": "deleted", "name": name}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Pattern deletion failed", extra_fields={"error": str(e), "name": name})
-        raise HTTPException(status_code=500, detail=f"Pattern deletion failed: {str(e)}")
 
 
 @app.get("/events", response_model=None)

@@ -37,7 +37,7 @@ Active Graph KG is a **self-refreshing knowledge graph** built on PostgreSQL + p
 
 - 🔄 **Refreshes embeddings** based on configurable policies (interval-based, cron-based)
 - 📊 **Detects semantic drift** and emits events when content changes significantly
-- 🎯 **Fires semantic triggers** when nodes match registered patterns
+- 💤 **Preserves dormant semantic-trigger design** without exposing trigger CRUD or execution at launch
 - 🔗 **Tracks lineage** through DERIVED_FROM edges with recursive queries
 - 🌐 **Loads polyglot payloads** from S3, HTTP, local files, or inline text
 - 🔍 **Searches with compound filters** using JSONB containment for complex queries
@@ -260,7 +260,8 @@ Import the Postman collection to try endpoints quickly:
 active-graph-kg/postman/actvgraph-kg.postman_collection.json
 ```
 
-Set `{{base_url}}` (default `http://localhost:8000`) and run requests for /health, /nodes, /search, /triggers, /lineage, /events, and /ask.
+Set `{{base_url}}` (default `http://localhost:8000`) and run requests for `/health`, `/nodes`, `/search`,
+`/lineage`, `/events`, and `/ask`. Any trigger requests in older collections now receive HTTP 410.
 
 ---
 
@@ -355,30 +356,11 @@ drift = 1.0 - cosine_similarity(old_embedding, new_embedding)
 
 Events are emitted **only** when drift exceeds the configured threshold (default: 0.1).
 
-#### 3. **Semantic Triggers**
-Register patterns and fire events when nodes match:
+#### 3. **Semantic Triggers — Unavailable for Launch**
 
-```bash
-# Register pattern
-curl -X POST http://localhost:8000/triggers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "fraud_detection",
-    "example_text": "suspicious wire transfer to offshore account",
-    "description": "Detects potential fraud"
-  }'
-
-# Create node with trigger
-curl -X POST http://localhost:8000/nodes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "classes": ["Transaction"],
-    "props": {"text": "large wire transfer flagged by system"},
-    "triggers": [{"name": "fraud_detection", "threshold": 0.8}]
-  }'
-```
-
-When similarity ≥ 0.8, a `trigger_fired` event is created.
+Semantic-trigger CRUD and scheduler execution are quarantined. `POST /triggers`, `GET /triggers`, and
+`DELETE /triggers/{name}` return HTTP 410 without model, database, or event work. The dormant implementation and
+schema are retained for a future separately authorized semantic-alert design; this is unrelated to connector sync.
 
 #### 4. **Lineage Tracking**
 Track provenance through DERIVED_FROM edges:
@@ -590,9 +572,9 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 - `GET /lineage/{node_id}` - Traverse DERIVED_FROM chain
 
 ### Triggers
-- `POST /triggers` - Register semantic pattern
-- `GET /triggers` - List all patterns
-- `DELETE /triggers/{name}` - Delete pattern
+- `POST /triggers` - HTTP 410 compatibility tombstone
+- `GET /triggers` - HTTP 410 compatibility tombstone
+- `DELETE /triggers/{name}` - HTTP 410 compatibility tombstone
 
 ### Events
 - `GET /events` - List events with filters
@@ -944,15 +926,14 @@ groups:
 
 ---
 
-## Production Readiness: 100%
+## Production Readiness
 
 ### ✅ Complete
 - Self-refreshing nodes with drift detection
-- Semantic triggers with DB-backed patterns
+- Semantic-trigger code/schema retained but deliberately unavailable for launch
 - Lineage tracking (recursive CTEs)
 - Polyglot payload loaders (S3, HTTP, file)
 - Vector search with compound filters
-- Efficient trigger scanning
 - Multi-tenant audit trail
 - Row-Level Security policies (database-level isolation)
 - JWT authentication middleware (HS256/RS256)

@@ -316,7 +316,7 @@ def test_qa():
 
 def test_events_lineage():
     """Test events and lineage."""
-    print_section("Events, Lineage & Triggers")
+    print_section("Events & Lineage")
 
     # List events
     try:
@@ -379,54 +379,6 @@ def test_events_lineage():
             )
     except Exception as e:
         print_test("Lineage test", False, str(e))
-
-
-def test_triggers():
-    """Test trigger endpoints."""
-    try:
-        # List triggers
-        resp = requests.get(
-            f"{API_URL}/triggers", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, timeout=10
-        )
-        passed = resp.status_code == 200
-        print_test(
-            "GET /triggers (list)",
-            passed,
-            f"Status: {resp.status_code}, Found: {len(resp.json().get('triggers', []))}",
-        )
-
-        # Create trigger
-        resp2 = requests.post(
-            f"{API_URL}/triggers",
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"},
-            json={
-                "name": "test_trigger_readiness",
-                "example_text": "This is a test document for trigger matching",
-                "description": "Test trigger for readiness check",
-            },
-            timeout=10,
-        )
-        passed = resp2.status_code == 200
-        trigger_name = resp2.json().get("name") if resp2.status_code == 200 else None
-        print_test(
-            "POST /triggers (create)", passed, f"Status: {resp2.status_code}, Name: {trigger_name}"
-        )
-
-        # Check for trigger_fired events
-        if passed:
-            time.sleep(2)  # Wait for potential trigger
-            resp3 = requests.get(
-                f"{API_URL}/events?event_type=trigger_fired&limit=10",
-                headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
-                timeout=10,
-            )
-            if resp3.status_code == 200:
-                events = resp3.json().get("events", [])
-                print_test(
-                    "Trigger events check", True, f"Found {len(events)} trigger_fired events"
-                )
-    except Exception as e:
-        print_test("Triggers test", False, str(e))
 
 
 def test_admin_refresh():
@@ -673,7 +625,6 @@ def main():
     results.append(("Search", lambda: (test_search(), True)[1] or True))
     results.append(("Q&A", lambda: (test_qa(), True)[1] or True))
     results.append(("Events & Lineage", lambda: (test_events_lineage(), True)[1] or True))
-    results.append(("Triggers", lambda: (test_triggers(), True)[1] or True))
     results.append(("Admin Refresh", lambda: (test_admin_refresh(), True)[1] or True))
     results.append(("Connectors Admin", lambda: (test_connectors_admin(), True)[1] or True))
 

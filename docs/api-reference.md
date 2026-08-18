@@ -5,7 +5,7 @@
 
 ## Overview
 
-Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgvector. It provides semantic search, LLM-powered Q&A with citations, automatic embedding refresh, lineage tracking, and semantic triggers.
+Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgvector. It provides semantic search, LLM-powered Q&A with citations, automatic embedding refresh, lineage tracking, and a tenant-scoped event reader. Semantic triggers are unavailable for launch.
 
 **Key Features:**
 - Semantic search with hybrid BM25+vector fusion and cross-encoder reranking
@@ -14,7 +14,7 @@ Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgv
 - Multi-tenant support with Row-Level Security (RLS)
 - JWT authentication and rate limiting
 - Lineage tracking with provenance chains
-- Semantic trigger patterns
+- Dormant semantic-trigger code/schema with HTTP-410 compatibility routes
 - Prometheus metrics integration
 - Dual ANN indexing (IVFFLAT/HNSW)
 - DSN fallback for PaaS (DATABASE_URL for Railway/Heroku)
@@ -1003,129 +1003,25 @@ curl -X POST http://localhost:8000/ask/stream \
 
 ### Triggers & Patterns
 
-#### POST /triggers
+Semantic triggers are deliberately unavailable for launch. These compatibility registrations all return
+HTTP 410 with `Cache-Control: no-store` and perform no authentication, rate-limit, request-body, model, database,
+Redis, repository, scheduler, or event work:
 
-Register a semantic trigger pattern.
+- `POST /triggers`
+- `GET /triggers`
+- `DELETE /triggers/{name}`
 
-**Authentication:** Required when JWT enabled
-
-**Request Body:**
 ```json
 {
-  "name": "ml_engineer_pattern",
-  "example_text": "machine learning engineer position requiring PyTorch and TensorFlow",
-  "description": "Trigger for ML engineer job postings"
+  "detail": {
+    "code": "MEMORY_SEMANTIC_TRIGGERS_UNAVAILABLE",
+    "message": "Semantic triggers are not available."
+  }
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Pattern name (unique identifier) |
-| `example_text` | string | Yes | Example text to embed as pattern |
-| `description` | string | No | Human-readable description |
-
-**Response:**
-```json
-{
-  "status": "registered",
-  "name": "ml_engineer_pattern",
-  "description": "Trigger for ML engineer job postings"
-}
-```
-
-**Status Codes:**
-- `200 OK`: Pattern registered
-- `400 Bad Request`: Missing required fields
-- `401 Unauthorized`: Missing/invalid JWT
-- `429 Too Many Requests`: Rate limit exceeded
-- `500 Internal Server Error`: Registration failed
-
-**Example:**
-```bash
-curl -X POST http://localhost:8000/triggers \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "name": "ml_engineer_pattern",
-    "example_text": "machine learning engineer position",
-    "description": "ML engineer jobs"
-  }'
-```
-
-**Notes:**
-- Pattern embedding generated from `example_text`
-- Patterns are global (not tenant-scoped)
-- Triggers fire when node embeddings are similar to pattern
-
----
-
-#### GET /triggers
-
-List all registered trigger patterns.
-
-**Authentication:** Optional (rate limited)
-
-**Parameters:** None
-
-**Response:**
-```json
-{
-  "patterns": [
-    {
-      "name": "ml_engineer_pattern",
-      "description": "ML engineer jobs",
-      "created_at": "2025-11-10T12:00:00Z"
-    }
-  ],
-  "count": 1
-}
-```
-
-**Status Codes:**
-- `200 OK`: Patterns listed
-- `429 Too Many Requests`: Rate limit exceeded
-- `500 Internal Server Error`: Listing failed
-
-**Example:**
-```bash
-curl http://localhost:8000/triggers \
-  -H "Authorization: Bearer <token>"
-```
-
----
-
-#### DELETE /triggers/{name}
-
-Delete a trigger pattern by name.
-
-**Authentication:** Required when JWT enabled
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Pattern name to delete |
-
-**Response:**
-```json
-{
-  "status": "deleted",
-  "name": "ml_engineer_pattern"
-}
-```
-
-**Status Codes:**
-- `200 OK`: Pattern deleted
-- `401 Unauthorized`: Missing/invalid JWT
-- `404 Not Found`: Pattern not found
-- `429 Too Many Requests`: Rate limit exceeded
-- `500 Internal Server Error`: Deletion failed
-
-**Example:**
-```bash
-curl -X DELETE http://localhost:8000/triggers/ml_engineer_pattern \
-  -H "Authorization: Bearer <token>"
-```
+The dormant implementation and schema are retained for future separately approved semantic-alert design. These
+routes are unrelated to S3/Drive/GCS/ATS connector synchronization.
 
 ---
 
@@ -1148,7 +1044,7 @@ List events with optional filtering.
 
 **Event Types:**
 - `refreshed`: Node embedding refreshed (drift > threshold)
-- `trigger_fired`: Semantic trigger matched
+- `trigger_fired`: Historical semantic-trigger event (no new launch-time producer)
 - `created`: Node created
 - `updated`: Node updated
 
@@ -2119,7 +2015,6 @@ Default rate limits per tenant (when `RATE_LIMIT_ENABLED=true`):
 | `/ask/stream` | 10 req | 1 min | 2 concurrent |
 | `/nodes` | 50 req | 1 min | - |
 | `/edges` | 50 req | 1 min | - |
-| `/triggers` | 20 req | 1 min | - |
 | `/admin/refresh` | 10 req | 1 min | - |
 | default | 100 req | 1 min | - |
 
@@ -2196,7 +2091,7 @@ Use `/ask` metadata to diagnose quality issues:
 - Rate limiting with Redis
 - Prometheus metrics
 - Drift-aware refresh scheduler
-- Semantic triggers
+- Dormant semantic-trigger code/schema; launch routes return HTTP 410
 - Lineage tracking
 
 ---

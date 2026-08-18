@@ -2,7 +2,7 @@
   "info": {
     "name": "actvgraph-kg API",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Postman collection for actvgraph-kg (health, nodes, search, triggers, lineage, events, ask)."
+    "description": "Postman collection for actvgraph-kg (health, nodes, search, lineage, events, ask). Semantic triggers are unavailable for launch."
   },
   "item": [
     {
@@ -58,22 +58,6 @@
       }
     },
     {
-      "name": "Register Trigger",
-      "request": {
-        "method": "POST",
-        "header": [{"key": "Content-Type", "value": "application/json"}],
-        "url": "{{base_url}}/triggers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"name\": \"fraud_alert\",\n  \"example_text\": \"suspicious wire transfer to offshore account\",\n  \"description\": \"Detects potential fraud patterns\"\n}"
-        }
-      }
-    },
-    {
-      "name": "List Triggers",
-      "request": {"method": "GET", "url": "{{base_url}}/triggers"}
-    },
-    {
       "name": "Create Edge (DERIVED_FROM)",
       "request": {
         "method": "POST",
@@ -99,4 +83,3 @@
     {"key": "node_id", "value": "<node-id>"}
   ]
 }
-
