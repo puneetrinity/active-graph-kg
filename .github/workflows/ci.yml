@@ -254,6 +254,7 @@ jobs:
       - name: Start API under the restricted runtime DSN
         env:
           ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
+          ACTIVEKG_CONTROL_PLANE_TOKEN: "ci-control-plane-token-for-deploy-path-verification"
           JWT_ENABLED: "true"
           JWT_ALGORITHM: HS256
           JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
@@ -270,7 +271,7 @@ jobs:
 
       - name: Readiness must pass under the restricted role
         run: |
-          body=$(curl -s -w '\n%{http_code}' http://localhost:8000/readyz)
+          body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer ci-control-plane-token-for-deploy-path-verification" http://localhost:8000/readyz)
           code=$(echo "$body" | tail -1)
           echo "$body"
           if [ "$code" != "200" ]; then
@@ -345,7 +346,7 @@ jobs:
           ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
         run: |
           check_readyz() {
-            curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/readyz
+            curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ci-control-plane-token-for-deploy-path-verification" http://localhost:8000/readyz
           }
           # The two global #12 tables are readiness dependencies even though
           # only tenant contact evidence itself is RLS-scoped.
