@@ -1,5 +1,8 @@
 # Google Cloud Storage (GCS) Connector
 
+> **DORMANT FUTURE DESIGN — NOT AVAILABLE.** Do not follow the commands in this document. The API accepts no GCS
+> configuration, runs no GCS poller/worker and returns HTTP 410 on every connector compatibility route.
+
 Complete guide for integrating ActiveKG with Google Cloud Storage to automatically sync and embed documents.
 
 ## Overview
@@ -549,5 +552,5 @@ resource "google_service_account_key" "activekg_key" {
 
 ---
 
-**Status:** ✅ Production Ready
+**Status:** Dormant future design; unavailable.
 **Last Updated:** 2025-11-24

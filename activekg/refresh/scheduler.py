@@ -43,13 +43,10 @@ class RefreshScheduler:
     - Optionally runs trigger engine after refreshes
     """
 
-    def __init__(
-        self, repository, embedding_provider, trigger_engine=None, gcs_poller_enabled=True
-    ):
+    def __init__(self, repository, embedding_provider, trigger_engine=None):
         self.repo = repository
         self.embedder = embedding_provider
         self.trigger_engine = trigger_engine
-        self.gcs_poller_enabled = gcs_poller_enabled
         self.scheduler = BackgroundScheduler()
         self.logger = get_enhanced_logger(__name__)
         # Track last run timestamps per job for inter-run observations
@@ -67,21 +64,12 @@ class RefreshScheduler:
         # Run daily purge of soft-deleted nodes at 02:00 UTC
         self.scheduler.add_job(self.run_purge, "cron", hour=2, minute=0, id="purge_deleted_cycle")
 
-        # Run Drive poller (connector changes feed) every 60s
-        # Uses per-tenant Redis lock to honor tenant-specific poll_interval_seconds
-        self.scheduler.add_job(self.run_drive_poller, "interval", seconds=60, id="drive_poller")
-
-        # Run GCS poller every 60s (mirrors Drive poller)
-        if self.gcs_poller_enabled:
-            self.scheduler.add_job(self.run_gcs_poller, "interval", seconds=60, id="gcs_poller")
-
         self.scheduler.start()
         self.logger.info(
             "RefreshScheduler started",
             extra_fields={
                 "has_triggers": self.trigger_engine is not None,
                 "purge_enabled": True,
-                "gcs_poller_enabled": self.gcs_poller_enabled,
             },
         )
 

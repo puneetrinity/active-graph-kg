@@ -7,6 +7,11 @@
 
 Active Graph KG is a drift-aware knowledge graph API built on PostgreSQL and pgvector. It provides semantic search, LLM-powered Q&A with citations, automatic embedding refresh, lineage tracking, and a tenant-scoped event reader. Semantic triggers are unavailable for launch.
 
+S3/GCS/Drive/ATS connectors are also unavailable. Their 15 connector administration/webhook compatibility
+methods return HTTP 410 with `MEMORY_CONNECTORS_UNAVAILABLE`, perform no request parsing or I/O, and start no
+poller/worker. Any detailed connector request/response examples retained later in this reference are historical
+future-design material and must not be used as operating instructions.
+
 **Key Features:**
 - Semantic search with hybrid BM25+vector fusion and cross-encoder reranking
 - LLM-powered Q&A with grounded citations and confidence scoring
@@ -1370,6 +1375,9 @@ curl -X POST http://localhost:8000/admin/extraction/requeue \
 ---
 
 ### Connector Admin API
+
+> **Unavailable compatibility surface.** Every route in this section returns HTTP 410, `Cache-Control: no-store`
+> and `MEMORY_CONNECTORS_UNAVAILABLE`. Historical schemas/examples below are dormant design only.
 
 #### GET /_admin/connectors/cache/health
 

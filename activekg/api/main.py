@@ -32,8 +32,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from activekg.api.admin_connectors import router as connectors_admin_router
-
 # JWT authentication and rate limiting
 from activekg.api.auth import (
     JWT_ENABLED,
@@ -51,7 +49,7 @@ from activekg.api.global_memory import (
 )
 from activekg.api.middleware import apply_rate_limit, get_tenant_context, require_rate_limit
 from activekg.api.rate_limiter import RATE_LIMIT_ENABLED, get_identifier, rate_limiter
-from activekg.api.retirement import semantic_triggers_router
+from activekg.api.retirement import connector_retirement_router, semantic_triggers_router
 from activekg.common.env import env_str
 from activekg.common.logger import clear_log_context, get_enhanced_logger, set_log_context
 from activekg.common.metrics import get_redis_client, metrics
@@ -64,8 +62,6 @@ from activekg.common.validation import (
     NodeBatchCreate,
     NodeCreate,
 )
-from activekg.connectors.cache_subscriber import get_subscriber_health
-from activekg.connectors.webhooks import router as connectors_webhook_router
 from activekg.embedding.global_candidates import PUBLIC_EMBED_VERSION
 from activekg.embedding.queue import (
     enqueue_embedding_job,
@@ -141,16 +137,6 @@ def _check_embedding_queue_capacity(redis_client, tenant_id: str | None, request
             )
 
 
-# Request models
-class RotateKeysRequest(BaseModel):
-    """Request model for connector key rotation endpoint."""
-
-    providers: list[str] | None = None
-    tenants: list[str] | None = None
-    batch_size: int = 100
-    dry_run: bool = False
-
-
 class EmbeddingRequeueRequest(BaseModel):
     """Request model to requeue embeddings and backfill statuses."""
 
@@ -211,7 +197,6 @@ NODE_BATCH_MAX = int(os.getenv("NODE_BATCH_MAX", "200"))
 EXTRACTION_ENABLED = os.getenv("EXTRACTION_ENABLED", "false").lower() == "true"
 EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "async")  # "async" or "sync"
 RUN_SCHEDULER = os.getenv("RUN_SCHEDULER", "true").lower() == "true"
-RUN_GCS_POLLER = os.getenv("RUN_GCS_POLLER", "true").lower() == "true"
 
 # Hybrid routing: fast model for simple queries, fallback for complex/low-confidence
 HYBRID_ROUTING_ENABLED = os.getenv("HYBRID_ROUTING_ENABLED", "false").lower() == "true"
@@ -394,11 +379,9 @@ else:
     scheduler = None
     candidate_repo = CandidateRepository(DSN)
 
-# Mount admin connectors router (minimal MVP)
-app.include_router(connectors_admin_router)
-app.include_router(connectors_webhook_router)
 app.include_router(global_memory_router)
 app.include_router(semantic_triggers_router)
+app.include_router(connector_retirement_router)
 
 # Global-candidate vector search reuses the process-wide embedding model.
 if embedder is not None:
@@ -485,7 +468,6 @@ def startup_event():
             "version": APP_VERSION,
             "weighted_search_candidate_factor": WEIGHTED_SEARCH_CANDIDATE_FACTOR,
             "run_scheduler": RUN_SCHEDULER,
-            "run_gcs_poller": RUN_GCS_POLLER,
             "rrf_low_sim_threshold": RRF_LOW_SIM_THRESHOLD,
             "raw_low_sim_threshold": RAW_LOW_SIM_THRESHOLD,
         },
@@ -513,47 +495,6 @@ def startup_event():
     except ImportError as e:
         logger.warning(f"ML dependencies check failed: {e}")
 
-    # Quick Win 1: Fail-fast KEK validation
-    try:
-        from activekg.connectors.encryption import get_encryption
-
-        enc = get_encryption()
-        logger.info(f"KEK validation passed (active version: {enc.active_version})")
-    except Exception as e:
-        logger.error(f"KEK validation failed: {e}")
-        raise RuntimeError(f"Failed to load connector encryption keys: {e}")
-
-    # Quick Win 3: Cache warmup for connector configs
-    try:
-        import os
-
-        from activekg.connectors.config_store import get_config_store
-
-        if os.getenv("ACTIVEKG_DSN"):
-            store = get_config_store()
-            configs = store.list_all()
-            logger.info(f"Connector config cache warmup: {len(configs)} configs preloaded")
-    except Exception as e:
-        logger.warning(f"Connector config cache warmup failed (non-critical): {e}")
-
-    # Phase 2: Start cache subscriber for multi-worker cache invalidation
-    try:
-        import os
-
-        from activekg.connectors.cache_subscriber import start_subscriber
-        from activekg.connectors.config_store import get_config_store
-
-        redis_url = os.getenv("REDIS_URL")
-        activekg_dsn = os.getenv("ACTIVEKG_DSN")
-        if redis_url and activekg_dsn:
-            store = get_config_store()
-            start_subscriber(redis_url, store)
-            logger.info("Cache subscriber started for multi-worker cache invalidation")
-        else:
-            logger.info("Cache subscriber disabled (REDIS_URL or ACTIVEKG_DSN not set)")
-    except Exception as e:
-        logger.warning(f"Cache subscriber failed to start (non-critical): {e}")
-
     # Auto-enable vector index if not present
     repo.ensure_vector_index()
 
@@ -561,9 +502,7 @@ def startup_event():
     global scheduler
     if RUN_SCHEDULER:
         try:
-            scheduler = RefreshScheduler(
-                repo, embedder, trigger_engine=None, gcs_poller_enabled=RUN_GCS_POLLER
-            )
+            scheduler = RefreshScheduler(repo, embedder, trigger_engine=None)
             scheduler.start()
             logger.info("RefreshScheduler started on startup")
         except Exception as e:
@@ -1458,69 +1397,6 @@ def readyz() -> JSONResponse:
     if problems:
         return JSONResponse(status_code=503, content={"status": "not_ready", "problems": problems})
     return JSONResponse(content={"status": "ready"})
-
-
-@app.get("/_admin/connectors/cache/health", response_model=None)
-def connector_cache_health(claims: JWTClaims | None = Depends(get_jwt_claims)) -> dict[str, Any]:
-    """Health endpoint for connector cache subscriber.
-
-    Security:
-        - When JWT is enabled, require authenticated token (no specific scope required for health check)
-        - When JWT is disabled (dev mode), allow access
-
-    Returns:
-        Status dict with subscriber health information
-    """
-    subscriber_health = get_subscriber_health()
-
-    if subscriber_health is None:
-        # Subscriber not running
-        return {"status": "degraded", "subscriber": None}
-
-    # Subscriber is running - check if connected
-    connected = subscriber_health.get("connected", False)
-    status = "ok" if connected else "degraded"
-
-    return {"status": status, "subscriber": subscriber_health}
-
-
-@app.post("/_admin/connectors/rotate_keys", response_model=None)
-def connector_rotate_keys(
-    request: RotateKeysRequest, claims: JWTClaims | None = Depends(get_jwt_claims)
-) -> dict[str, Any]:
-    """Rotate encryption keys for connector configs.
-
-    Selects rows where key_version != ACTIVE_VERSION, decrypts with old key,
-    re-encrypts with active key, and updates key_version.
-
-    Security:
-        - When JWT is enabled, require authenticated token
-        - When JWT is disabled (dev mode), allow access
-
-    Args:
-        request: Rotation parameters (providers, tenants, batch_size, dry_run)
-
-    Returns:
-        Summary dict with rotation results
-    """
-    try:
-        from activekg.connectors.config_store import get_config_store
-
-        store = get_config_store()
-
-        # Call rotate_keys method
-        result = store.rotate_keys(
-            providers=request.providers,
-            tenants=request.tenants,
-            batch_size=request.batch_size,
-            dry_run=request.dry_run,
-        )
-
-        return cast("dict[str, Any]", result)
-
-    except Exception as e:
-        logger.error(f"Key rotation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Key rotation failed: {str(e)}")
 
 
 @app.get("/_admin/security/limits", response_model=None)

@@ -1,5 +1,8 @@
 # Google Drive Connector
 
+> **DORMANT FUTURE DESIGN — NOT AVAILABLE.** Do not follow the commands in this document. The API accepts no Drive
+> configuration, runs no Drive poller/worker and returns HTTP 410 on every connector compatibility route.
+
 Complete guide for integrating ActiveKG with Google Drive to automatically sync and embed documents from My Drive and Shared Drives.
 
 ## Table of Contents

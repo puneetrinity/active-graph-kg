@@ -1,5 +1,9 @@
 # Security Policy
 
+> **Connector scope:** S3/GCS/Drive/ATS connectors are unavailable. Connector credentials are not accepted by the
+> API, connector pollers/workers are not started, and retained connector security text is dormant design—not a
+> claim that the product is active.
+
 ## Supported Versions
 
 We release patches for security vulnerabilities in the following versions:

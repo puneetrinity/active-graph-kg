@@ -18,7 +18,14 @@ Requirements:
 import json
 import os
 
+import pytest
 import requests
+
+if __name__ == "__main__":
+    print("MEMORY_CONNECTORS_UNAVAILABLE: S3 integration proof is archived.")
+    raise SystemExit(1)
+
+pytest.skip("connector product unavailable", allow_module_level=True)
 
 # Base URL
 BASE_URL = "http://localhost:8000"

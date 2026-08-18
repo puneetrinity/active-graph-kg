@@ -1,5 +1,9 @@
 # Production Readiness Validation Checklist
 
+> **Connector sections are archived and must not be executed.** S3/GCS/Drive/ATS connectors are unavailable; all
+> connector administration/webhook compatibility routes return HTTP 410 and no poller/worker runs. The connector
+> checks below are retained only as future-design history and are excluded from current release validation.
+
 **Version:** 1.0
 **Date:** 2025-11-24
 **Status:** Pre-Launch Validation

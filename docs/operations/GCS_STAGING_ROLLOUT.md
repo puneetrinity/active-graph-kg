@@ -1,5 +1,8 @@
 # GCS Connector Staging Rollout Guide
 
+> **ARCHIVED — DO NOT RUN.** GCS connectors are unavailable. This rollout plan is retained as future-design
+> history and does not describe a deployable staging or production capability.
+
 Complete validation and rollout procedure for GCS connector infrastructure in staging environment before production deployment.
 
 ## Prerequisites

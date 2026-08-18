@@ -1,5 +1,8 @@
 # Connectors – Idempotency, Cursors, and Rotation
 
+> **DORMANT FUTURE DESIGN — NOT AN OPERATIONS RUNBOOK.** Connectors are unavailable; do not execute the procedures
+> below. The API accepts no connector configuration/credential and all compatibility routes return HTTP 410.
+
 This document explains how connector ingest achieves idempotency and how to operate cursors and key rotation safely.
 
 ## Idempotency Keys
@@ -36,4 +39,3 @@ Metrics:
 - Dedup windows: Keep change windows modest (5–15 minutes) to minimize duplicates.
 - DLQ: When enabled, inspect queue depths and DLQ metrics for spikes.
 - Idempotency logging: Look for “Skipping … ETag unchanged” or “content hash unchanged”.
-

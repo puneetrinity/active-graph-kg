@@ -260,10 +260,8 @@ jobs:
           JWT_ISSUER: vantahire
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
-          RUN_GCS_POLLER: "false"
           RATE_LIMIT_ENABLED: "false"
           REDIS_URL: redis://localhost:6379/0
-          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid
@@ -497,7 +495,6 @@ jobs:
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
           RATE_LIMIT_ENABLED: "false"
-          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
         run: |
           pytest tests/test_candidate_*.py --ignore=tests/test_candidate_rls_enforcement.py -v --tb=short --timeout=60
 
@@ -594,7 +591,6 @@ jobs:
           RUN_SCHEDULER: "false"
           EMBEDDING_BACKEND: sentence-transformers
           EMBEDDING_MODEL: all-MiniLM-L6-v2
-          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid
@@ -709,7 +705,6 @@ jobs:
           JWT_ENABLED: "false"
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
-          CONNECTOR_KEK_V1: "YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA="
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid

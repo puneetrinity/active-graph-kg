@@ -41,6 +41,13 @@ theme:
 # README/index conflict warning.
 exclude_docs: |
   README.md
+  S3_CONNECTOR.md
+  GCS_CONNECTOR.md
+  DRIVE_CONNECTOR.md
+  DRIVE_E2E_CHECKLIST.md
+  operations/connectors.md
+  operations/GCS_STAGING_ROLLOUT.md
+  operations/OPERATIONS.md
 
 plugins:
   - search
@@ -89,11 +96,6 @@ nav:
   - Development Guides:
       - Testing Guide: development/testing.md
       - Architecture: development/architecture.md
-  - Connectors:
-      - Overview: operations/connectors.md
-      - S3 Connector: S3_CONNECTOR.md
-      - GCS Connector: GCS_CONNECTOR.md
-      - Drive Connector: DRIVE_CONNECTOR.md
       - ANN Indexing Guide: ANN_INDEXING_GUIDE.md
 
 extra:

@@ -1,5 +1,8 @@
 # Self‑Serve Demo on Railway (One‑Click Friendly)
 
+> **Connector deployment is unavailable.** Current deployments may run the API plus embedding/extraction workers,
+> but no S3/GCS/Drive connector service, poller or credential path.
+
 This guide packages Active Graph KG for Railway deployment. Choose your deployment model:
 
 **Basic Deployment (API Only):**
@@ -7,11 +10,10 @@ This guide packages Active Graph KG for Railway deployment. Choose your deployme
 - Manual node creation via `/nodes` and `/upload` endpoints
 - Synchronous embedding generation
 
-**Full Deployment (API + Workers):**
-- API server + Connector Worker + Embedding Worker
-- Automatic GCS/S3/Drive ingestion with polling
+**Full Deployment (API + Supported Workers):**
+- API server + Embedding Worker + Extraction Worker
 - Async embedding generation via Redis queues
-- Production-ready for high-volume document processing
+- No connector worker, provider polling or connector credential setup
 
 **Database Options:**
 - Option A (Recommended): Neon/Aiven Postgres (pgvector supported)
@@ -24,7 +26,7 @@ All options support "near one‑click" via the Deploy button with minimal env se
 ## Prerequisites
 - Railway account (paid 32 GB plan recommended for larger embedding models)
 - Postgres with pgvector (`CREATE EXTENSION vector;`). Neon or Aiven support this.
-- Redis (required for connector workers and async embeddings, optional for rate limiting only)
+- Redis (required for async embedding/extraction queues; optional for rate limiting)
 
 ---
 
@@ -146,30 +148,10 @@ Schema, RLS and migrations run automatically at boot; build ANN indexes via
 
 ---
 
-## Multi-Service Architecture (Connectors & Workers)
+## Multi-Service Architecture (Supported Workers)
 
-For production deployments with **automatic connector ingestion** (GCS/S3/Drive) and **async embedding generation**, deploy multiple Railway services:
-
-### Architecture Overview
-
-```
-┌─────────────────┐     ┌──────────────────┐     ┌────────────────────┐
-│   API Server    │────▶│  Connector Worker │────▶│  Embedding Worker  │
-│  (railway.json) │     │(railway.connector│     │ (railway.worker    │
-│                 │     │  -worker.json)   │     │     .json)         │
-│ - REST API      │     │                  │     │                    │
-│ - Scheduler     │     │ - Polls GCS/S3   │     │ - Generates        │
-│ - Queue jobs    │     │ - Extracts text  │     │   embeddings       │
-│                 │     │ - Creates chunks │     │ - Updates vectors  │
-└─────────────────┘     └──────────────────┘     └────────────────────┘
-         │                       │                         │
-         └───────────────────────┴─────────────────────────┘
-                                 │
-                         ┌───────▼────────┐
-                         │  Redis (Queue) │
-                         │  PostgreSQL    │
-                         └────────────────┘
-```
+Connector ingestion is unavailable. Deploy only the API and the supported embedding/extraction workers; do not
+create a connector-worker service or configure storage-provider credentials.
 
 ### Service 1: API Server
 
@@ -188,13 +170,12 @@ ACTIVEKG_DSN=postgresql://activekg_app:...    # restricted runtime role
 EMBEDDING_BACKEND=sentence-transformers
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 
-# Scheduler (IMPORTANT: Set true on EXACTLY ONE instance)
+# Refresh/purge scheduler (set true on exactly one instance)
 RUN_SCHEDULER=true
-RUN_GCS_POLLER=true  # Enable GCS auto-polling
 
 # Async embeddings (recommended for production)
 EMBEDDING_ASYNC=true
-REDIS_URL=redis://...  # Required for workers
+REDIS_URL=redis://...  # Required for supported queue workers
 
 # Workers
 WORKERS=2  # API server worker processes
@@ -202,39 +183,11 @@ WORKERS=2  # API server worker processes
 
 **Responsibilities:**
 - REST API endpoints (`/search`, `/ask`, `/upload`, `/nodes`, etc.)
-- Admin endpoints (`/_admin/connectors/*/ingest`, `/queue-status`)
-- Background scheduler (polls GCS/S3/Drive, enqueues jobs)
+- Connector compatibility routes return HTTP 410 without work
+- Background scheduler runs refresh and purge only
 - Health checks and metrics
 
-### Service 2: Connector Worker
-
-**Config:** `railway.connector-worker.json`
-**Start Command:** `python -m activekg.connectors.worker`
-
-**Environment Variables:**
-```bash
-# Same database and Redis as API
-ACTIVEKG_DSN=postgresql://...
-REDIS_URL=redis://...
-
-# Worker-specific
-CONNECTOR_WORKER_BATCH_SIZE=10
-CONNECTOR_WORKER_POLL_INTERVAL=5  # seconds
-```
-
-**Responsibilities:**
-- Polls Redis queues: `connector:{provider}:{tenant}:queue`
-- Fetches files from GCS/S3/Drive
-- Extracts text (PDF, DOCX, HTML, TXT)
-- Creates parent + chunk nodes in database
-- Enqueues embedding jobs for chunks
-
-**When to deploy:**
-- ✅ If using GCS/S3/Drive connectors with automatic polling
-- ✅ If using manual `/ingest` endpoints for bulk operations
-- ❌ Not needed if only using `/upload` or manual node creation
-
-### Service 3: Embedding Worker
+### Service 2: Embedding Worker
 
 **Config:** `railway.worker.json`
 **Start Command:** `python -m activekg.embedding.worker`
@@ -283,66 +236,15 @@ Add Redis plugin in Railway:
    - Use Railway's "Reference Variables" feature
 
 **Redis is used for:**
-- Connector ingestion queues (`connector:{provider}:{tenant}:queue`)
-- Embedding job queues (`embedding:{tenant}:queue`)
-- Scheduler locks (prevent duplicate polling)
+- Embedding and extraction job queues
 - Rate limiting (if `RATE_LIMIT_ENABLED=true`)
 
 ---
 
-## GCS Connector Credentials on Railway
+## Connector Credentials
 
-### Option 1: File-Based Credentials (Recommended)
-
-**Step 1:** Upload credentials to Railway secrets
-```bash
-# In Railway dashboard
-Settings → Secrets → Upload File
-# Upload your gcs-credentials.json
-```
-
-**Step 2:** Set environment variable
-```bash
-GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcs-credentials.json
-# Or
-service_account_json_path=/secrets/gcs-credentials.json  # In connector config
-```
-
-**Advantages:**
-- ✅ More secure (not visible in env var UI)
-- ✅ No truncation issues with large JSON
-- ✅ Easier to rotate
-
-### Option 2: Inline JSON (Fallback)
-
-**Use only for small service account keys:**
-```bash
-GOOGLE_CREDENTIALS_JSON='{"type":"service_account","project_id":"...",...}'
-```
-
-**Or in connector config:**
-```json
-{
-  "config": {
-    "credentials_json": "{\"type\":\"service_account\",...}",
-    "bucket": "my-bucket"
-  }
-}
-```
-
-**Limitations:**
-- ⚠️ Visible in Railway UI (less secure)
-- ⚠️ May be truncated if very large
-- ⚠️ Escaping issues with nested JSON
-
-### Authentication Priority Order
-
-The connector tries credentials in this order:
-1. `credentials_json` (inline JSON in config)
-2. `service_account_json_path` (file path in config)
-3. `GOOGLE_CREDENTIALS_JSON` (env var - inline JSON)
-4. `GOOGLE_APPLICATION_CREDENTIALS` (env var - file path)
-5. Default credentials (gcloud, workload identity)
+Do not configure storage-provider credentials. The connector product is unavailable and the API does not read
+connector credentials during import or startup.
 
 ---
 
@@ -356,20 +258,15 @@ The connector tries credentials in this order:
 - [ ] ANN indexes created via `/admin/indexes`
 - [ ] Readiness passes (`/readyz` returns `{"status":"ready"}`)
 
-### Full Deployment (With Connectors)
+### Full Deployment (Supported Workers)
 - [ ] **API service** deployed with `RUN_SCHEDULER=true`
-- [ ] **Connector worker** deployed with `railway.connector-worker.json`
 - [ ] **Embedding worker** deployed with `railway.worker.json`
+- [ ] **Extraction worker** deployed where extraction queues are enabled
 - [ ] **Redis** plugin added and `REDIS_URL` shared across services
-- [ ] **GCS credentials** uploaded and configured
-- [ ] GCS connector registered via `POST /_admin/connectors/gcs/register`
-- [ ] Test ingestion: `POST /_admin/connectors/gcs/ingest` (dry_run=true)
-- [ ] Monitor queues: `GET /_admin/connectors/gcs/queue-status`
-- [ ] Verify chunks created and embeddings generated
+- [ ] Connector compatibility routes return HTTP 410
 
 ### Monitoring
 - [ ] Check API logs for scheduler runs
-- [ ] Check connector worker logs for file processing
 - [ ] Check embedding worker logs for vector generation
 - [ ] Monitor Redis queue depths
 - [ ] Verify Prometheus metrics (if enabled)
@@ -386,15 +283,13 @@ The connector tries credentials in this order:
 ### Scheduler
 - **CRITICAL:** Run `RUN_SCHEDULER=true` on exactly ONE API instance
 - If you scale API horizontally, set `RUN_SCHEDULER=false` on replica instances
-- Scheduler uses Redis locks to prevent duplicate work per tenant
+- Scheduler runs only node refresh and purge work
 
 ### Workers
-- Connector worker and embedding worker can scale horizontally (multiple instances OK)
-- Workers use Redis queues for coordination (no duplicate processing)
-- If a worker crashes, jobs remain in queue for retry
+- Follow the embedding/extraction worker runbooks for their independent scaling and retry behavior
 
 ### Cost Optimization
-- Start with 1 instance each (API + Connector Worker + Embedding Worker)
+- Start with the API and only the supported workers required by the deployment
 - Scale workers horizontally based on queue depth
 - Use smaller embedding models for cost savings (`all-MiniLM-L6-v2` vs `all-mpnet-base-v2`)
 
@@ -402,21 +297,7 @@ The connector tries credentials in this order:
 
 ## Troubleshooting
 
-### "No workers processing files"
-- Check connector worker logs for errors
-- Verify `REDIS_URL` is set and accessible
-- Check Redis queue: `redis-cli LLEN connector:gcs:default:queue`
-
 ### "Embeddings not generated"
 - Check embedding worker logs
 - Verify `EMBEDDING_ASYNC=true` in API
 - Check Redis queue: `redis-cli LLEN embedding:default:queue`
-
-### "Duplicate polling"
-- Verify only ONE API instance has `RUN_SCHEDULER=true`
-- Check for stale Redis locks: `redis-cli KEYS connector:*:poll_lock`
-
-### "GCS authentication failed"
-- Verify credentials file path or inline JSON
-- Check Railway secrets are mounted correctly
-- Test with `gsutil ls gs://your-bucket` using same credentials

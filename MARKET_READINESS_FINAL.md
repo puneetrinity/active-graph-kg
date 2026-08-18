@@ -1,5 +1,8 @@
 # Active Graph KG - Market Readiness Final Report
 
+> **Historical report.** Connector readiness claims in this document are superseded. S3/GCS/Drive connectors are
+> unavailable, their compatibility routes return HTTP 410, and no connector poller/worker runs.
+
 **Date:** 2025-11-24  
 **Status:** ✅ **READY FOR MARKETING LAUNCH**  
 **Confidence:** High  

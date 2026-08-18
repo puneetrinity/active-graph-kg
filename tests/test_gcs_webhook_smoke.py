@@ -1,13 +1,17 @@
-"""Smoke test for GCS Pub/Sub webhook: enqueues one item to Redis queue.
+"""Archived smoke test for the unavailable GCS connector design.
 
-This test uses FastAPI's TestClient and a FakeRedis to avoid external deps.
+The connector product has no GCS webhook registration. This historical test is
+retained as future-design evidence and must not exercise an API.
 """
 
 import base64
 import json
 import os
 
+import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.skip(reason="connector product unavailable")
 
 
 class FakeRedis:

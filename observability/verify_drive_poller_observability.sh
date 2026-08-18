@@ -1,13 +1,10 @@
 #!/bin/bash
-# Staging Checklist: Drive Connector Observability
-# Verifies metrics, alert queries, and dashboard queries
+# Historical verification entrypoint retained for future connector design.
 
 set -e
 
-echo "=================================================="
-echo "Drive Connector Observability Verification"
-echo "=================================================="
-echo ""
+echo "MEMORY_CONNECTORS_UNAVAILABLE: connector observability is dormant."
+exit 1
 
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
 METRICS_URL="${METRICS_URL:-http://localhost:8000/metrics}"

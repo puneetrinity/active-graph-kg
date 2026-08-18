@@ -110,7 +110,6 @@ jobs:
           echo "AUTO_EMBED_ON_CREATE=true" >> $GITHUB_ENV
           echo "ACTIVEKG_DEV_TENANT=default" >> $GITHUB_ENV
           echo "PYTHONDONTWRITEBYTECODE=1" >> $GITHUB_ENV
-          echo "CONNECTOR_KEK_V1=YAC4_BiOPM5oC5GdeZ4cOucTRgiDTLob6FqSD7rNKdA=" >> $GITHUB_ENV
           echo "EMBEDDING_BACKEND=sentence-transformers" >> $GITHUB_ENV
           echo "EMBEDDING_MODEL=all-MiniLM-L6-v2" >> $GITHUB_ENV
 

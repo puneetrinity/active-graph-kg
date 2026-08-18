@@ -20,7 +20,6 @@ export JWT_SECRET_KEY="test-secret-key-min-32-chars-long-for-testing-purposes"
 export JWT_ALGORITHM=HS256
 export JWT_AUDIENCE=activekg
 export JWT_ISSUER="https://test-auth.activekg.local"
-export CONNECTOR_KEK_V1="C1Aywwm_JhB53LbPCoqyyX0kiz_MrQyzLetzbGrrNks="
 export REDIS_URL="redis://localhost:6379/0"
 export RATE_LIMIT_ENABLED=false
 export RUN_SCHEDULER=false  # Set to true for production
