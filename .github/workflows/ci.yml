@@ -150,6 +150,8 @@ jobs:
   deploy-path-db:
     name: Deploy Path (clean DB + candidate schema)
     runs-on: ubuntu-latest
+    env:
+      ACTIVEKG_CONTROL_PLANE_TOKEN: "ci-control-plane-token-for-deploy-path-verification"
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -270,7 +272,10 @@ jobs:
 
       - name: Readiness must pass under the restricted role
         run: |
-          body=$(curl -s -w '\n%{http_code}' http://localhost:8000/readyz)
+          body=$(curl -s -w '\n%{http_code}' \
+            -H "Authorization: Bearer ${ACTIVEKG_CONTROL_PLANE_TOKEN}" \
+            -H "Cache-Control: no-cache" \
+            http://localhost:8000/readyz)
           code=$(echo "$body" | tail -1)
           echo "$body"
           if [ "$code" != "200" ]; then
@@ -345,7 +350,10 @@ jobs:
           ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
         run: |
           check_readyz() {
-            curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/readyz
+            curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${ACTIVEKG_CONTROL_PLANE_TOKEN}" \
+              -H "Cache-Control: no-cache" \
+              http://localhost:8000/readyz
           }
           # The two global #12 tables are readiness dependencies even though
           # only tenant contact evidence itself is RLS-scoped.

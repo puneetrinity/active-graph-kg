@@ -3419,6 +3419,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
+                "Cache-Control"?: string | null;
                 Authorization?: string | null;
             };
             path?: never;
