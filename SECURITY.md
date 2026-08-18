@@ -4,6 +4,11 @@
 > API, connector pollers/workers are not started, and retained connector security text is dormant design—not a
 > claim that the product is active.
 
+> **Operational HTTP boundary:** only constant-cost `GET /health` is anonymously live. `/readyz`, `/metrics` and
+> `/prometheus` accept only the service-specific `ACTIVEKG_CONTROL_PLANE_TOKEN` bearer and fail closed before
+> dependency work. API and extraction-worker tokens must differ. `/demo` and interactive API documentation are
+> unavailable compatibility tombstones. Ordinary product routes continue to use JWT and scopes.
+
 ## Supported Versions
 
 We release patches for security vulnerabilities in the following versions:

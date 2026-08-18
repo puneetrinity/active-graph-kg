@@ -207,7 +207,10 @@ Update `EXTRACTION_VERSION` env var on both API and worker. Nodes with older `ex
 
 ### Health Checks
 - Worker exposes `/health` on `EXTRACTION_HEALTHCHECK_PORT` (default 8080)
-- Returns `{"status":"healthy","service":"extraction-worker"}`
+- Public `/health` performs no dependency/provider work and returns
+  `{"status":"alive","service":"extraction-worker"}`.
+- `/readyz` requires the extraction service's own `ACTIVEKG_CONTROL_PLANE_TOKEN` bearer and returns only the
+  recent in-memory `loop`, `redis`, `database` and `provider` state classes. It never calls a model for health.
 
 ### Log Patterns
 ```

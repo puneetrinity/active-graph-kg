@@ -7,6 +7,7 @@ set -euo pipefail
 
 API_URL=${API_URL:-${API:-http://localhost:8000}}
 TOKEN=${TOKEN:-${E2E_ADMIN_TOKEN:-}}
+CONTROL_PLANE_TOKEN=${ACTIVEKG_CONTROL_PLANE_TOKEN:-}
 OUT=${OUT:-evaluation/PROOF_POINTS_REPORT.md}
 RUN_PROOFS=${RUN_PROOFS:-0}
 
@@ -14,10 +15,15 @@ if [[ -z "${TOKEN}" ]]; then
   echo "ERROR: TOKEN env var not set. Export a single-line JWT into TOKEN." >&2
   exit 1
 fi
+if [[ -z "${CONTROL_PLANE_TOKEN}" ]]; then
+  echo "ERROR: ACTIVEKG_CONTROL_PLANE_TOKEN must be set before metrics access." >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname "$OUT")"
 
 hdr_auth=( -H "Authorization: Bearer ${TOKEN}" )
+hdr_control=( -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
@@ -32,7 +38,7 @@ if [[ "${_status}" == "200" ]]; then
 else
   EMBED=$(curl -sS "${API_URL}/debug/embed_info" "${hdr_auth[@]}" || echo '{}')
 fi
-METRICS=$(curl -sS "${API_URL}/prometheus" || echo '')
+METRICS=$(curl -sS "${API_URL}/prometheus" "${hdr_control[@]}" || echo '')
 
 # Class coverage (admin)
 CLASS_COV=$(curl -sS "${API_URL}/_admin/embed_class_coverage" "${hdr_auth[@]}" || echo '{}')
@@ -227,7 +233,7 @@ $(
 
 ## Governance (access violations)
 $(
-  PROM=$(curl -sS "${API_URL}/prometheus" || echo '')
+  PROM=$(curl -sS "${API_URL}/prometheus" "${hdr_control[@]}" || echo '')
   if [[ -n "$PROM" ]]; then
     echo "$PROM" | awk '/^activekg_access_violations_total/ { \
       if (match($0, /type=\"([^\"]+)\"/, a)) { printf("- %s: %s\n", a[1], $NF) } \

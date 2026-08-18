@@ -177,9 +177,9 @@ def test_api_import_ignores_stale_q_and_a_model_configuration() -> None:
             sys.executable,
             "-c",
             (
-                "from activekg.api.main import app, health; "
+                "import json; from activekg.api.main import app, health; "
                 "h=health(); assert len(app.routes)==70; "
-                "assert h.llm_backend is None and h.llm_model is None; "
+                "assert json.loads(h.body)=={'status':'alive','service':'activekg-api'}; "
                 "print('Q_AND_A_WIRING_INERT')"
             ),
         ],

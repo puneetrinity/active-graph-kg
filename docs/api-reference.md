@@ -101,27 +101,20 @@ Header: `Retry-After: <seconds>`
 
 #### GET /health
 
-Health check endpoint with system status.
+Public constant-cost process liveness. It does not query a database, Redis or a model provider.
 
 **Parameters:** None
 
 **Response:**
 ```json
 {
-  "status": "ok",
-  "timestamp": "2025-11-24T12:00:00Z",
-  "version": "1.0.0",
-  "uptime_seconds": 3600.0,
-  "components": {
-    "db": {"status": "unknown"}
-  },
-  "llm_backend": "groq",
-  "llm_model": "openai/gpt-oss-20b"
+  "status": "alive",
+  "service": "activekg-api"
 }
 ```
 
 **Status Codes:**
-- `200 OK`: Service healthy
+- `200 OK`: Process/listener alive
 
 **Example:**
 ```bash
@@ -130,9 +123,25 @@ curl http://localhost:8000/health
 
 ---
 
+#### GET /readyz
+
+Bounded dependency, migration, RLS, role and JWT readiness. Requires the API service's dedicated
+`ACTIVEKG_CONTROL_PLANE_TOKEN` bearer before any pool or database work.
+
+```bash
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  http://localhost:8000/readyz
+```
+
+Returns `200` when ready; `503` for a bounded dependency/configuration failure; `401` without authority.
+Responses are `no-store` and contain stable reason codes rather than raw database details.
+
+---
+
 #### GET /metrics
 
-Get metrics in JSON format.
+Get bounded JSON metrics. Requires the API control-plane bearer and omits tenant/organization-labelled entries.
 
 **Parameters:** None
 
@@ -161,17 +170,21 @@ Get metrics in JSON format.
 
 **Status Codes:**
 - `200 OK`: Metrics retrieved
+- `401 Unauthorized`: Missing/wrong control-plane bearer
+- `503 Service Unavailable`: Configuration missing, busy, disabled or response budget exceeded
 
 **Example:**
 ```bash
-curl http://localhost:8000/metrics
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  http://localhost:8000/metrics
 ```
 
 ---
 
 #### GET /prometheus
 
-Get metrics in Prometheus exposition format.
+Get bounded Prometheus exposition. Requires the API control-plane bearer and omits every tenant/org-labelled sample.
 
 **Parameters:** None
 
@@ -179,11 +192,14 @@ Get metrics in Prometheus exposition format.
 
 **Status Codes:**
 - `200 OK`: Metrics retrieved
-- `503 Service Unavailable`: Metrics disabled
+- `401 Unauthorized`: Missing/wrong control-plane bearer
+- `503 Service Unavailable`: Configuration missing, busy, disabled or response budget exceeded
 
 **Example:**
 ```bash
-curl http://localhost:8000/prometheus
+test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+  http://localhost:8000/prometheus
 ```
 
 ---
@@ -1623,21 +1639,17 @@ curl "http://localhost:8000/debug/intent?q=What%20ML%20frameworks%20does%20the%2
 
 #### GET /demo
 
-HTML demo console for testing API functionality.
+The production demo console is unavailable.
 
-**Authentication:** None
-
-**Response:** HTML page with interactive forms for:
-- Search
-- Trigger management
-- Event listing
-- Lineage exploration
-- Anomaly detection
+**Response:** HTTP 410/no-store with `MEMORY_DEMO_UNAVAILABLE`.
 
 **Example:**
 ```bash
-open http://localhost:8000/demo
+curl -i http://localhost:8000/demo
 ```
+
+`GET /openapi.json`, `/docs`, `/docs/oauth2-redirect` and `/redoc` likewise return HTTP 410/no-store with
+`MEMORY_API_DOCS_UNAVAILABLE`. Generate the client contract offline with `cd frontend && npm run generate-api`.
 
 ---
 

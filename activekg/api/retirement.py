@@ -18,9 +18,20 @@ MEMORY_GROUNDED_QA_UNAVAILABLE_DETAIL = {
     "message": "Grounded Q&A and search explanation are not available.",
 }
 
+MEMORY_DEMO_UNAVAILABLE_DETAIL = {
+    "code": "MEMORY_DEMO_UNAVAILABLE",
+    "message": "The production demo is not available.",
+}
+
+MEMORY_API_DOCS_UNAVAILABLE_DETAIL = {
+    "code": "MEMORY_API_DOCS_UNAVAILABLE",
+    "message": "Interactive Memory API documentation is not available.",
+}
+
 semantic_triggers_router = APIRouter()
 connector_retirement_router = APIRouter(tags=["connectors-unavailable"])
 grounded_qa_retirement_router = APIRouter(tags=["grounded-qa-unavailable"])
+public_observability_retirement_router = APIRouter(tags=["public-surface-unavailable"])
 
 
 def semantic_triggers_unavailable_response() -> JSONResponse:
@@ -45,6 +56,52 @@ def grounded_qa_unavailable_response() -> JSONResponse:
         content={"detail": MEMORY_GROUNDED_QA_UNAVAILABLE_DETAIL},
         headers={"Cache-Control": "no-store"},
     )
+
+
+def _public_surface_unavailable_response(detail: dict[str, str]) -> JSONResponse:
+    return JSONResponse(
+        status_code=410,
+        content={"detail": detail},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@public_observability_retirement_router.get(
+    "/demo",
+    response_model=None,
+    status_code=410,
+    response_description="Demo console unavailable",
+)
+def demo_unavailable() -> JSONResponse:
+    return _public_surface_unavailable_response(MEMORY_DEMO_UNAVAILABLE_DETAIL)
+
+
+@public_observability_retirement_router.get(
+    "/openapi.json",
+    response_model=None,
+    status_code=410,
+    response_description="API documentation unavailable",
+)
+@public_observability_retirement_router.get(
+    "/docs",
+    response_model=None,
+    status_code=410,
+    response_description="API documentation unavailable",
+)
+@public_observability_retirement_router.get(
+    "/docs/oauth2-redirect",
+    response_model=None,
+    status_code=410,
+    response_description="API documentation unavailable",
+)
+@public_observability_retirement_router.get(
+    "/redoc",
+    response_model=None,
+    status_code=410,
+    response_description="API documentation unavailable",
+)
+def api_docs_unavailable() -> JSONResponse:
+    return _public_surface_unavailable_response(MEMORY_API_DOCS_UNAVAILABLE_DETAIL)
 
 
 @grounded_qa_retirement_router.post(

@@ -60,7 +60,7 @@ class TestJWTAuthentication:
         """Health endpoint should work without authentication."""
         response = requests.get(f"{API_URL}/health")
         assert response.status_code == 200
-        assert response.json()["status"] == "ok"
+        assert response.json() == {"status": "alive", "service": "activekg-api"}
 
     def test_grounded_q_and_a_is_retired(self):
         """Grounded Q&A stays unavailable regardless of credentials."""

@@ -16,9 +16,15 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import redis
 
+from activekg.common.control_plane import (
+    ControlPlaneUnauthorized,
+    ControlPlaneUnavailable,
+    verify_control_plane_authorization,
+)
 from activekg.embedding.queue import enqueue_embedding_job
 from activekg.extraction.client import (
     ExtractionClient,
@@ -42,29 +48,173 @@ logger = logging.getLogger(__name__)
 HEALTHCHECK_PORT = int(os.getenv("EXTRACTION_HEALTHCHECK_PORT", "8080"))
 
 
+class WorkerHealthState:
+    """Thread-safe in-memory readiness state; request handlers perform no I/O."""
+
+    def __init__(self, poll_interval_seconds: float) -> None:
+        self._lock = threading.Lock()
+        self._stopped = threading.Event()
+        self._poll_interval = poll_interval_seconds
+        self._running = True
+        self._loop_status = "starting"
+        self._redis_status = "starting"
+        self._loop_observed_at: float | None = None
+        self._database_status = "starting"
+        self._database_observed_at: float | None = None
+        self._provider_status = "starting"
+        self._provider_failures = 0
+
+    def provider_configured(self) -> None:
+        with self._lock:
+            self._provider_status = "configured"
+            self._provider_failures = 0
+
+    def provider_success(self) -> None:
+        with self._lock:
+            self._provider_status = "ready"
+            self._provider_failures = 0
+
+    def provider_failure(self) -> None:
+        with self._lock:
+            self._provider_failures += 1
+            self._provider_status = "error" if self._provider_failures >= 2 else "degraded"
+
+    def loop_cycle_success(self) -> None:
+        with self._lock:
+            self._loop_status = "ready"
+            self._redis_status = "ready"
+            self._loop_observed_at = time.monotonic()
+
+    def loop_error(self) -> None:
+        with self._lock:
+            self._loop_status = "error"
+            self._redis_status = "error"
+            self._loop_observed_at = time.monotonic()
+
+    def database_success(self) -> None:
+        with self._lock:
+            self._database_status = "ready"
+            self._database_observed_at = time.monotonic()
+
+    def database_error(self) -> None:
+        with self._lock:
+            self._database_status = "error"
+            self._database_observed_at = time.monotonic()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._running = False
+            self._loop_status = "stopped"
+        self._stopped.set()
+
+    def wait(self, seconds: float) -> bool:
+        """Return true when shutdown interrupts the monitor wait."""
+
+        return self._stopped.wait(seconds)
+
+    def snapshot(self) -> tuple[bool, dict[str, str]]:
+        now = time.monotonic()
+        with self._lock:
+            loop_status = self._loop_status
+            redis_status = self._redis_status
+            database_status = self._database_status
+            provider_status = self._provider_status
+            loop_observed_at = self._loop_observed_at
+            database_observed_at = self._database_observed_at
+            running = self._running
+
+        loop_stale_after = max(10.0, 3.0 * self._poll_interval)
+        if not running or loop_observed_at is None or now - loop_observed_at > loop_stale_after:
+            loop_status = "stale" if running else "stopped"
+            redis_status = "stale" if running else redis_status
+        if database_observed_at is None or now - database_observed_at > 90.0:
+            database_status = "stale"
+
+        components = {
+            "loop": loop_status,
+            "redis": redis_status,
+            "database": database_status,
+            "provider": provider_status,
+        }
+        ready = (
+            loop_status == "ready"
+            and redis_status == "ready"
+            and database_status == "ready"
+            and provider_status in {"configured", "ready", "degraded"}
+        )
+        return ready, components
+
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Simple HTTP handler for healthcheck endpoint."""
+    """Constant-cost liveness and authenticated in-memory readiness."""
+
+    def _write_json(self, status: int, payload: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        if status == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def do_GET(self):
-        # /readyz answered too: services configured with the root railway.json
-        # (whose healthcheck targets /readyz) must not be killed at deploy time.
-        if self.path in ("/health", "/readyz"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+        path = urlsplit(self.path).path
+        state = cast(WorkerHealthState, self.server.health_state)  # type: ignore[attr-defined]
+        status, payload = worker_health_response(path, self.headers.get("Authorization"), state)
+        if payload is None:
+            self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(b'{"status":"healthy","service":"extraction-worker"}')
-        else:
-            self.send_response(404)
-            self.end_headers()
+            return
+        self._write_json(status, payload)
 
     def log_message(self, format, *args):
         # Suppress default logging
         pass
 
 
-def start_healthcheck_server() -> HTTPServer:
+def worker_health_response(
+    path: str,
+    authorization: str | None,
+    state: WorkerHealthState,
+) -> tuple[int, bytes | None]:
+    """Return one dependency-free worker health/readiness response contract."""
+
+    if path == "/health":
+        return 200, b'{"status":"alive","service":"extraction-worker"}'
+    if path != "/readyz":
+        return 404, None
+
+    try:
+        verify_control_plane_authorization(authorization)
+    except ControlPlaneUnavailable:
+        return (
+            503,
+            b'{"detail":{"code":"CONTROL_PLANE_AUTH_UNAVAILABLE",'
+            b'"message":"Operational authentication is unavailable."}}',
+        )
+    except ControlPlaneUnauthorized:
+        return (
+            401,
+            b'{"detail":{"code":"CONTROL_PLANE_AUTH_REQUIRED",'
+            b'"message":"Operational authentication is required."}}',
+        )
+
+    ready, components = state.snapshot()
+    payload = json.dumps(
+        {
+            "status": "ready" if ready else "not_ready",
+            "components": components,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return (200 if ready else 503), payload
+
+
+def start_healthcheck_server(state: WorkerHealthState) -> HTTPServer:
     """Start healthcheck HTTP server in background thread."""
     server = HTTPServer(("0.0.0.0", HEALTHCHECK_PORT), HealthCheckHandler)
+    server.health_state = state  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info(f"Healthcheck server started on port {HEALTHCHECK_PORT}")
@@ -79,6 +229,7 @@ class ExtractionWorker:
         redis_client: redis.Redis,
         repo: GraphRepository,
         extraction_client: ExtractionClient,
+        health_state: WorkerHealthState,
         *,
         poll_interval_seconds: float = 1.0,
         max_attempts: int = 2,  # Only one fallback attempt
@@ -99,6 +250,7 @@ class ExtractionWorker:
         self.redis_client = redis_client
         self.repo = repo
         self.extraction_client = extraction_client
+        self.health_state = health_state
         self.poll_interval = poll_interval_seconds
         self.max_attempts = max_attempts
         self.retry_base_seconds = retry_base_seconds
@@ -119,6 +271,7 @@ class ExtractionWorker:
     def _shutdown_handler(self, signum, frame):
         logger.info("Extraction worker shutting down", extra={"signal": signum})
         self.running = False
+        self.health_state.stop()
 
     def _process_job(self, raw: bytes | str) -> None:
         """Process a single extraction job."""
@@ -169,6 +322,7 @@ class ExtractionWorker:
             # Extract
             current_version = get_extraction_version()
             result, model_used = self.extraction_client.extract(text)
+            self.health_state.provider_success()
 
             # Build status
             status = ExtractionStatus(
@@ -208,6 +362,7 @@ class ExtractionWorker:
             clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
 
         except ExtractionError as e:
+            self.health_state.provider_failure()
             error_msg = str(e)
             logger.warning(
                 "Extraction failed",
@@ -349,6 +504,9 @@ class ExtractionWorker:
                 item = self.redis_client.brpop(
                     EXTRACTION_QUEUE_KEY, timeout=int(self.poll_interval)
                 )
+                # A completed retry-move + BRPOP cycle, including an empty pop,
+                # proves both the loop and Redis path are responsive.
+                self.health_state.loop_cycle_success()
                 if not item:
                     continue
 
@@ -356,8 +514,43 @@ class ExtractionWorker:
                 self._process_job(payload)
 
             except Exception as e:
+                self.health_state.loop_error()
                 logger.error("Worker loop error", extra={"error": str(e)})
                 time.sleep(self.poll_interval)
+
+
+def start_database_monitor(
+    state: WorkerHealthState,
+    dsn: str,
+    *,
+    interval_seconds: float = 30.0,
+) -> threading.Thread:
+    """Monitor DB readiness on a separate bounded connection every 30 seconds."""
+
+    def monitor() -> None:
+        import psycopg
+
+        while True:
+            try:
+                with psycopg.connect(dsn, connect_timeout=2) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SET statement_timeout = 1000")
+                        cur.execute("SELECT 1")
+                        if cur.fetchone() != (1,):
+                            raise RuntimeError("database readiness query failed")
+                state.database_success()
+            except Exception as exc:
+                state.database_error()
+                logger.warning(
+                    "Extraction worker database readiness failed",
+                    extra={"error_type": type(exc).__name__},
+                )
+            if state.wait(interval_seconds):
+                return
+
+    thread = threading.Thread(target=monitor, daemon=True, name="extraction-db-readiness")
+    thread.start()
+    return thread
 
 
 def start_extraction_worker() -> None:
@@ -382,8 +575,13 @@ def start_extraction_worker() -> None:
         logger.error("GROQ_API_KEY not set")
         sys.exit(1)
 
+    poll_interval = float(os.getenv("EXTRACTION_WORKER_POLL_INTERVAL", "1.0"))
+    health_state = WorkerHealthState(poll_interval)
+    health_state.provider_configured()
+
     # Start healthcheck server for Railway
-    start_healthcheck_server()
+    start_healthcheck_server(health_state)
+    start_database_monitor(health_state, dsn)
 
     redis_client = get_redis_client()
     repo = GraphRepository(dsn)
@@ -393,7 +591,8 @@ def start_extraction_worker() -> None:
         redis_client=redis_client,
         repo=repo,
         extraction_client=extraction_client,
-        poll_interval_seconds=float(os.getenv("EXTRACTION_WORKER_POLL_INTERVAL", "1.0")),
+        health_state=health_state,
+        poll_interval_seconds=poll_interval,
         max_attempts=int(os.getenv("EXTRACTION_MAX_ATTEMPTS", "2")),
         retry_base_seconds=float(os.getenv("EXTRACTION_RETRY_BASE_SECONDS", "10")),
         retry_max_seconds=float(os.getenv("EXTRACTION_RETRY_MAX_SECONDS", "60")),

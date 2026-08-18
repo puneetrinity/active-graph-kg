@@ -4,8 +4,14 @@ set -euo pipefail
 # Summarize key Prometheus metrics exposed by the API
 
 API_URL=${API_URL:-${API:-http://localhost:8000}}
+CONTROL_PLANE_TOKEN=${ACTIVEKG_CONTROL_PLANE_TOKEN:-}
 
-METRICS=$(curl -sS "${API_URL}/prometheus")
+if [[ -z "${CONTROL_PLANE_TOKEN}" ]]; then
+  echo "ERROR: ACTIVEKG_CONTROL_PLANE_TOKEN must be set before metrics access." >&2
+  exit 1
+fi
+
+METRICS=$(curl -sS -H "Authorization: Bearer ${CONTROL_PLANE_TOKEN}" "${API_URL}/prometheus")
 
 echo "== Request Counters =="
 echo "$METRICS" | grep '^activekg_search_requests_total' || true
@@ -35,4 +41,3 @@ echo "$METRICS" | grep '^activekg_rejections_total' || true
 echo
 
 echo "✓ Metrics probe complete"
-

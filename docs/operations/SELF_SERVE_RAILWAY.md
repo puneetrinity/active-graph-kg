@@ -41,12 +41,11 @@ Add this badge to your repo README (already included in the main README section 
 When Railway imports the repo, it will use Nixpacks or the provided Dockerfile/Procfile to build the API.
 
 ### Configure Environment Variables
-Set these variables in Railway → Variables for the API service. The healthcheck
-is `/readyz`: it verifies the migration ledger, RLS policies, a **restricted
-runtime role** (non-owner, NOSUPERUSER, NOBYPASSRLS, no admin_role membership)
-and that JWT auth is enabled. A single owner DSN (or relying on the plugin's
-`DATABASE_URL`) leaves the service permanently not-ready; the start script also
-removes `DATABASE_URL` from the API environment when `ACTIVEKG_DSN` is set.
+Set these variables in Railway → Variables for the API service. Railway checks
+public, constant-cost `/health`. Operators check migration/RLS/runtime-role/JWT
+dependency readiness separately through token-protected `/readyz`; dependency
+failure must not create a Railway restart loop. The start script removes
+`DATABASE_URL` from the API environment when `ACTIVEKG_DSN` is set.
 
 Required
 - `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (the Railway Postgres plugin
@@ -56,12 +55,13 @@ Required
 - `ACTIVEKG_DSN` — runtime DSN as the restricted role, e.g.
   `postgresql://activekg_app:SECRET@HOST:5432/DBNAME`
 - `JWT_ENABLED=true` plus key configuration (see `.env.example`)
+- `ACTIVEKG_CONTROL_PLANE_TOKEN` — API-only high-entropy secret used by
+  `/readyz`, `/metrics` and `/prometheus`; set a different value on the extraction worker
 - `EMBEDDING_BACKEND=sentence-transformers`
 - `EMBEDDING_MODEL=all-MiniLM-L6-v2` (or a larger model like `all-mpnet-base-v2`)
 - `SEARCH_DISTANCE=cosine` (or `l2` to match your index opclass)
 
-Development-only escape hatches (never production): `ACTIVEKG_READYZ_ALLOW_OWNER=true`,
-`ACTIVEKG_READYZ_ALLOW_NO_JWT=true`.
+Development-only ownership escape hatch (never production): `ACTIVEKG_READYZ_ALLOW_OWNER=true`.
 
 Recommended
 - `PGVECTOR_INDEXES=ivfflat,hnsw` (coexist for migration)
@@ -109,7 +109,7 @@ ledger-tracked migrations, restricted runtime-role provisioning) using
 `ACTIVEKG_MIGRATE_DSN`, then removes privileged credentials from the
 environment before starting Uvicorn. Manual psql initialization or starting
 Uvicorn directly bypasses the ledger, role provisioning and credential
-scoping; `/readyz` will hold such a deployment not-ready.
+scoping; authenticated `/readyz` will report such a deployment not-ready.
 
 Build ANN indexes (non-blocking, concurrent):
 ```bash
@@ -256,7 +256,8 @@ connector credentials during import or startup.
 - [ ] Split-DSN env vars set (`ACTIVEKG_MIGRATE_DSN`, runtime role vars, `ACTIVEKG_DSN`) — schema/migrations run automatically at boot
 - [ ] JWT configured and tokens generated
 - [ ] ANN indexes created via `/admin/indexes`
-- [ ] Readiness passes (`/readyz` returns `{"status":"ready"}`)
+- [ ] Public liveness passes (`/health` returns the minimal `alive` response)
+- [ ] Readiness passes with the API control-plane bearer (`/readyz` returns `{"status":"ready"}`)
 
 ### Full Deployment (Supported Workers)
 - [ ] **API service** deployed with `RUN_SCHEDULER=true`

@@ -4,6 +4,10 @@
 > connector administration/webhook compatibility routes return HTTP 410 and no poller/worker runs. The connector
 > checks below are retained only as future-design history and are excluded from current release validation.
 
+> **Current operational checks:** Railway probes anonymous `/health`. Validate `/readyz`, `/metrics` and
+> `/prometheus` only with the target service's `ACTIVEKG_CONTROL_PLANE_TOKEN` bearer; never print it. The API and
+> extraction-worker values are different. The demo and interactive HTTP docs must return HTTP 410.
+
 **Version:** 1.0
 **Date:** 2025-11-24
 **Status:** Pre-Launch Validation
@@ -595,7 +599,9 @@ This comprehensive checklist validates all systems before marketing launch and p
 #### Metrics
 - [ ] **Prometheus metrics endpoint:**
   ```bash
-  curl http://localhost:8000/prometheus
+  test -n "$ACTIVEKG_CONTROL_PLANE_TOKEN"
+  curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" \
+    http://localhost:8000/prometheus
   ```
 
 - [ ] **Verify key metrics present:**
