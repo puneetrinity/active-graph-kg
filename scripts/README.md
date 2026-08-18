@@ -18,7 +18,7 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 
 | Script | Description | Makefile Target |
 |--------|-------------|-----------------|
-| `live_smoke.sh` | CRUD, ANN, vector/hybrid search, ask/stream, metrics | `make live-smoke` |
+| `live_smoke.sh` | CRUD, ANN, vector/hybrid search and metrics | `make live-smoke` |
 | `live_extended.sh` | Drift, lineage, events, triggers | `make live-extended` |
 | `metrics_probe.sh` | Prometheus counters/histograms summary | `make metrics-probe` |
 | `proof_points_report.sh` | Builds evaluation/PROOF_POINTS_REPORT.md | `make proof-report` |
@@ -29,7 +29,6 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 |--------|-------------|-----------------|
 | `seed_ground_truth.sh` | Populate evaluation/datasets/ground_truth.json | - |
 | `retrieval_quality.sh` | Vector vs hybrid vs weighted (triple mode) | `make retrieval-quality` |
-| `qa_benchmark.sh` | LLM Q&A latency and accuracy | `make qa-benchmark` |
 | `publish_retrieval_uplift.sh` | Expose uplift as Prom stats (Grafana) | `make publish-retrieval-uplift` |
 | `search_latency_eval.sh` | p50/p95/p99 for vector/hybrid | - |
 
@@ -39,7 +38,7 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 |--------|-------------|-----------------|
 | `db_bootstrap.sh` | Initialize DB schema (extension, init.sql, RLS) | `make db-bootstrap` |
 | `db_index_metrics.sh` | Index sizes, table sizes | - |
-| `scheduler_sla.sh` | Inter-run intervals; first-token SSE latency | - |
+| `scheduler_sla.sh` | Scheduler inter-run intervals | - |
 | `dx_timing.sh` | Developer experience timing (startup, first request) | - |
 | `ingestion_pipeline.sh` | Ingestion throughput testing | - |
 | `failure_recovery.sh` | Graceful failure modes (timeouts, DLQ, resume) | - |

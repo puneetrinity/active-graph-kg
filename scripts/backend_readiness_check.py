@@ -272,48 +272,6 @@ def test_search():
         print_test("GET /debug/search_sanity", False, str(e))
 
 
-def test_qa():
-    """Test Q&A endpoints."""
-    print_section("Q&A (LLM-Powered)")
-
-    # Non-streaming Q&A
-    try:
-        resp = requests.post(
-            f"{API_URL}/ask",
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"},
-            json={"question": "What is machine learning?", "top_k": 5},
-            timeout=30,
-        )
-        data = resp.json()
-        passed = resp.status_code == 200 and "answer" in data
-        answer_preview = data.get("answer", "")[:100]
-        print_test("POST /ask (non-streaming)", passed, f"Answer: {answer_preview}...")
-    except Exception as e:
-        print_test("POST /ask (non-streaming)", False, str(e))
-
-    # Streaming Q&A
-    try:
-        resp = requests.post(
-            f"{API_URL}/ask/stream",
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"},
-            json={"question": "Explain AI briefly", "stream": True},
-            stream=True,
-            timeout=30,
-        )
-        chunks = []
-        for line in resp.iter_lines():
-            if line:
-                decoded = line.decode("utf-8")
-                if decoded.startswith("data: "):
-                    chunks.append(decoded[6:])
-            if len(chunks) >= 3:  # Just test a few chunks
-                break
-        passed = resp.status_code == 200 and len(chunks) > 0
-        print_test("POST /ask/stream (SSE)", passed, f"Received {len(chunks)} chunks")
-    except Exception as e:
-        print_test("POST /ask/stream (SSE)", False, str(e))
-
-
 def test_events_lineage():
     """Test events and lineage."""
     print_section("Events & Lineage")
@@ -611,7 +569,6 @@ def main():
     results.append(("Auth & RLS", lambda: (test_auth_rls(), True)[1] or True))
     results.append(("Node CRUD", test_node_crud()))
     results.append(("Search", lambda: (test_search(), True)[1] or True))
-    results.append(("Q&A", lambda: (test_qa(), True)[1] or True))
     results.append(("Events & Lineage", lambda: (test_events_lineage(), True)[1] or True))
     results.append(("Admin Refresh", lambda: (test_admin_refresh(), True)[1] or True))
     results.append(

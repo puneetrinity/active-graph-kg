@@ -4,7 +4,6 @@ import Layout from './components/layout/Layout'
 import Login from './routes/Login'
 import Dashboard from './routes/Dashboard'
 import Search from './routes/Search'
-import Ask from './routes/Ask'
 import Nodes from './routes/Nodes'
 
 // Protected route wrapper
@@ -34,7 +33,6 @@ function App() {
         >
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/search" element={<Search />} />
-          <Route path="/ask" element={<Ask />} />
           <Route path="/nodes" element={<Nodes />} />
         </Route>
 

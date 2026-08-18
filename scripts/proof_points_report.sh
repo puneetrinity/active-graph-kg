@@ -34,14 +34,6 @@ else
 fi
 METRICS=$(curl -sS "${API_URL}/prometheus" || echo '')
 
-# ANN snapshot via search_explain (vector and hybrid)
-ANN_VEC=$(curl -sS -X POST "${API_URL}/debug/search_explain" \
-  "${hdr_auth[@]}" -H 'Content-Type: application/json' \
-  -d '{"query":"machine learning","use_hybrid":false,"top_k":5}' || echo '{}')
-ANN_HYB=$(curl -sS -X POST "${API_URL}/debug/search_explain" \
-  "${hdr_auth[@]}" -H 'Content-Type: application/json' \
-  -d '{"query":"machine learning","use_hybrid":true,"top_k":5}' || echo '{}')
-
 # Class coverage (admin)
 CLASS_COV=$(curl -sS "${API_URL}/_admin/embed_class_coverage" "${hdr_auth[@]}" || echo '{}')
 
@@ -67,16 +59,6 @@ get_search_count() {
   # $1: mode (vector|hybrid|text), $2: score_type (cosine|rrf_fused|weighted_fusion)
   awk -v mode="$1" -v sc="$2" '
     /^activekg_search_requests_total/ && index($0, "mode=\""mode"\"") && index($0, "score_type=\""sc"\"") {
-      s+=$NF
-    }
-    END { if (s=="") s=0; print s }
-  ' <<< "$METRICS" 2>/dev/null
-}
-
-get_ask_count() {
-  # $1: score_type, $2: rejected (true|false)
-  awk -v sc="$1" -v rej="$2" '
-    /^activekg_ask_requests_total/ && index($0, "score_type=\""sc"\"") && index($0, "rejected=\""rej"\"") {
       s+=$NF
     }
     END { if (s=="") s=0; print s }
@@ -125,8 +107,6 @@ fi
 # Search request counts
 VEC_CNT_REQ=$(get_search_count vector cosine)
 HYB_CNT_REQ=$(get_search_count hybrid rrf_fused)
-ASK_OK=$(get_ask_count rrf_fused false)
-ASK_REJ=$(get_ask_count rrf_fused true)
 
 # DB host/port
 DB_HOST=$(echo "$DBINFO" | jq -r '.server_host // ""' 2>/dev/null || echo "")
@@ -134,13 +114,6 @@ DB_PORT=$(echo "$DBINFO" | jq -r '.server_port // ""' 2>/dev/null || echo "")
 
 # Health summary lines (robust against jq failure)
 HEALTH_SUMMARY=$(echo "$HEALTH" | jq -r '. | {status, llm_backend, llm_model} | to_entries[] | "- " + .key + ": " + ( .value|tostring )' 2>/dev/null || true)
-
-# Extract ANN fields safely
-ANN_OPERATOR=$(echo "$ANN_VEC" | jq -r '.ann_config.operator // empty' 2>/dev/null || true)
-ANN_REQ_IDX=$(echo "$ANN_VEC" | jq -r '.ann_config.requested_indexes | join(",") // empty' 2>/dev/null || true)
-ANN_EXIST_IDX=$(echo "$ANN_VEC" | jq -r '.ann_config.existing_indexes | join(",") // empty' 2>/dev/null || true)
-ANN_TOPSIM_VEC=$(echo "$ANN_VEC" | jq -r '.threshold_info.top_similarity // empty' 2>/dev/null || true)
-ANN_TOPSIM_HYB=$(echo "$ANN_HYB" | jq -r '.threshold_info.top_similarity // empty' 2>/dev/null || true)
 
 # Format class coverage (top 5)
 CLASS_TOP5=$(echo "$CLASS_COV" | jq -r '.classes[:5][] | "- \(.class): total=\(.total), with_embedding=\(.with_embedding), coverage=\(.coverage_pct)%"' 2>/dev/null || true)
@@ -180,21 +153,12 @@ ${HEALTH_SUMMARY}
 - Coverage: ${COVER_FMT}%
 - Max staleness: ${STALENESS}s
 
-## Search/Ask Activity
+## Search Activity
 - Vector searches (cosine): ${VEC_CNT_REQ}
 - Hybrid searches (RRF): ${HYB_CNT_REQ}
-- Ask OK: ${ASK_OK}
-- Ask Rejected: ${ASK_REJ}
 
 ## Latency Snapshot
 - Vector search <= 50ms: ${VEC_FRAC}
-
-## ANN Snapshot (search_explain)
-- Operator: ${ANN_OPERATOR:-}
-- Requested indexes: ${ANN_REQ_IDX:-}
-- Existing indexes: ${ANN_EXIST_IDX:-}
-- Top similarity (vector): ${ANN_TOPSIM_VEC:-}
-- Top similarity (hybrid): ${ANN_TOPSIM_HYB:-}
 
 ## Embedding Coverage by Class (top 5)
 ${CLASS_TOP5}
@@ -248,20 +212,6 @@ $(
     fi
   else
     echo "(No retrieval results file found)"
-  fi
-)
-
-## Q&A Benchmark (from evaluation/llm_qa_results.json)
-$(
-  if [[ -f "evaluation/llm_qa_results.json" ]]; then
-    jq -r '
-      "Accuracy(mean)=" + (.summary.accuracy.mean|tostring) + ", " +
-      "CitationPrecision(mean)=" + (.summary.citation_precision.mean|tostring) + ", " +
-      "CitationRecall(mean)=" + (.summary.citation_recall.mean|tostring) + ", " +
-      "AskLatency(p95)=" + (.summary.latency.p95|tostring)
-    ' evaluation/llm_qa_results.json 2>/dev/null || true
-  else
-    echo "(No QA results file found)"
   fi
 )
 

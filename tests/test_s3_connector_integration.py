@@ -7,7 +7,7 @@ Tests:
 3. Simulate webhook event (manual queue push)
 4. Start worker to process queue
 5. Verify parent + chunk nodes created
-6. Verify /ask endpoint can cite the document
+6. Verify connector compatibility methods remain unavailable
 
 Requirements:
 - PostgreSQL running
@@ -174,28 +174,6 @@ Expected output:
     print("✓ See SQL query above to verify")
 
 
-def test_8_ask_endpoint():
-    """Test /ask endpoint to verify citation."""
-    print("\n=== Test 8: Ask Endpoint (Citation) ===")
-    print("""
-To test citation of the ingested document:
-
-    curl -X POST http://localhost:8000/ask \\
-      -H 'Content-Type: application/json' \\
-      -d '{
-        "q": "What is in the sample document?",
-        "tenant_id": "test_tenant"
-      }' | jq .
-
-Expected output:
-- answer: Summary of document content
-- context: List of chunk nodes used
-- Each context item should have parent_id pointing to the parent Document node
-- Citation in answer should reference parent document title, not chunk IDs
-""")
-    print("✓ See curl command above to test /ask")
-
-
 def main():
     """Run all tests."""
     print("=== S3 Connector Integration Test ===")
@@ -210,7 +188,6 @@ def main():
         test_5_manual_queue_push,
         test_6_worker_instructions,
         test_7_verify_nodes,
-        test_8_ask_endpoint,
     ]
 
     for test in tests:
@@ -228,8 +205,7 @@ Next steps:
 2. Upload test PDF to S3 bucket
 3. Run worker: python -m activekg.connectors.worker
 4. Verify nodes created in database
-5. Test /ask endpoint for citations
-6. Set up SNS → webhook integration for production
+5. Set up SNS → webhook integration for production
 
 For production deployment:
 - Configure SNS topic: arn:aws:sns:region:account:activekg-s3-{tenant_id}

@@ -62,32 +62,11 @@ p99: 9ms
 
 ---
 
-### 3. **LLM Q&A Performance**
+### 3. **Grounded Q&A Boundary**
 
-| Metric | Script | Make Target | Output | Competitive Benchmark |
-|--------|--------|-------------|--------|----------------------|
-| Answer Accuracy (mean) | `scripts/qa_benchmark.sh` | `make qa-benchmark` | `evaluation/llm_qa_results.json` | >0.8 |
-| Citation Precision (mean) | Same | Same | Same | >0.75 |
-| Citation Recall (mean) | Same | Same | Same | >0.7 |
-| Confidence Calibration | Same | Same | Same | ECE <0.1 |
-| Ask Latency p50 | Same | Same | Same | <2s |
-| Ask Latency p95 | Same | Same | Same | <5s |
-| Ask Latency p99 | Same | Same | Same | <10s |
-
-**Data Source**: `evaluation/llm_qa_eval.py`
-**Dataset**: `evaluation/datasets/qa_questions.json`
-
-**Example Output**:
-```json
-{
-  "summary": {
-    "accuracy": {"mean": 0.85, "std": 0.12},
-    "citation_precision": {"mean": 0.78, "std": 0.15},
-    "citation_recall": {"mean": 0.72, "std": 0.18},
-    "latency": {"p50": 1.2, "p95": 3.5, "p99": 7.8}
-  }
-}
-```
+Generic grounded Q&A is not a launch capability. `POST /ask`, `POST /ask/stream`, and
+`POST /debug/search_explain` are dependency-free HTTP 410 compatibility tombstones. No Q&A benchmark is part of
+the current proof matrix; use direct `/search` retrieval measures above.
 
 ---
 
@@ -247,12 +226,11 @@ Compute: ~$5/mo (small instance)
 
 | Test | Script | Make Target | Competitive Benchmark |
 |------|--------|-------------|----------------------|
-| LLM Disabled Fallback | `scripts/failure_recovery.sh` | `make failure-recovery` | Graceful 503 |
 | Connector Errors | Prometheus `connector_errors_total` | Future | <1% error rate |
 | Circuit Breaker | Future enhancement | Future | Open after 5 failures |
 
 **Current Tests**:
-- LLM disabled: `/ask/stream` returns 503 (not crash)
+- Grounded-Q&A compatibility routes return stable no-work HTTP 410 responses
 - Connector poller errors exposed in Prometheus
 
 ---
@@ -268,7 +246,6 @@ export RUN_PROOFS=1
 # Run all evaluations
 make live-smoke
 make retrieval-quality
-make qa-benchmark
 make search-latency-vector
 make search-latency-hybrid
 
@@ -281,17 +258,15 @@ cat evaluation/PROOF_POINTS_REPORT.md
 
 **Report Sections**:
 1. Environment (API, DB)
-2. Health (status, LLM backend)
+2. Health (status and active components)
 3. Embedding Health (coverage, staleness)
-4. Search/Ask Activity (counts)
+4. Search Activity (counts)
 5. Latency Snapshot (p50/p95)
 6. ANN Snapshot (operator, indexes, top similarity)
 7. Embedding Coverage by Class (top 5)
 8. **Retrieval Quality** (Recall@k, MRR, NDCG) - *NEW*
-9. **Q&A Benchmark** (accuracy, citations, latency) - *NEW*
-10. Trigger Effectiveness (total fired)
-11. Scheduler Summary (last runs)
-12. Proof Metrics (DX timing, ingestion E2E)
+9. Scheduler Summary (last runs)
+10. Proof Metrics (DX timing, ingestion E2E)
 
 ---
 
@@ -324,13 +299,13 @@ cat evaluation/PROOF_POINTS_REPORT.md
 - **Hourly**: Prometheus metrics scrape
 - **Daily**: Nightly proof report (GitHub Actions)
 - **Weekly**: Full benchmark suite with `RUN_PROOFS=1`
-- **Monthly**: Retrieval quality + Q&A accuracy trends
+- **Monthly**: Retrieval quality trends
 
 ### Ad-Hoc Validation
 - **After schema changes**: `make db-index-metrics`
 - **After connector changes**: `make ingestion-pipeline`
 - **After search changes**: `make retrieval-quality` + `make search-latency-vector`
-- **After LLM changes**: `make qa-benchmark`
+- **After extraction-model changes**: run the isolated extraction worker/model checks
 
 ---
 
@@ -338,7 +313,7 @@ cat evaluation/PROOF_POINTS_REPORT.md
 
 ```bash
 # Complete proof bundle
-make live-smoke && make retrieval-quality && make qa-benchmark && \
+make live-smoke && make retrieval-quality && \
   make search-latency-vector && make search-latency-hybrid && \
   export RUN_PROOFS=1 && make proof-report
 
@@ -346,7 +321,7 @@ make live-smoke && make retrieval-quality && make qa-benchmark && \
 make search-latency-vector && make db-index-metrics && make tco-snapshot
 
 # Quality validation
-make retrieval-quality && make qa-benchmark
+make retrieval-quality
 
 # Operational health
 make proof-report && make scheduler-sla && make governance-audit

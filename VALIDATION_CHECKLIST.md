@@ -75,6 +75,7 @@ This comprehensive checklist validates all systems before marketing launch and p
 
 #### Test Cases
 - [ ] **Non-empty payload refresh:**
+  - Create the node with bounded inline `props.text`; remote/local `payload_ref` values are unavailable
   - Create node with `refresh_policy: {interval: "1m", drift_threshold: 0.1}`
   - Wait for refresh cycle (or trigger via `POST /admin/refresh`)
   - Verify `last_refreshed` timestamp updated
@@ -178,36 +179,11 @@ This comprehensive checklist validates all systems before marketing launch and p
 
 ---
 
-### 1.5 LLM Paths (Q&A)
+### 1.5 Grounded Q&A retirement contract
 
-**Objective:** Validate LLM provider routing, prompt building, and failure handling
-
-#### Test Cases
-- [ ] **Groq backend:**
-  - Set `LLM_PROVIDER=groq`, `GROQ_API_KEY=...`, `LLM_MODEL=llama-3.3-70b-versatile`
-  - Test `/ask` endpoint
-  - Verify response includes citations and sources
-
-- [ ] **OpenAI backend:**
-  - Set `LLM_PROVIDER=openai`, `OPENAI_API_KEY=...`, `LLM_MODEL=gpt-4o-mini`
-  - Test `/ask` endpoint
-
-- [ ] **Streaming Q&A:**
-  ```bash
-  curl -N -X POST http://localhost:8000/ask/stream \
-    -d '{"question": "What vector databases are discussed?", "max_results": 3}'
-  ```
-- [ ] **LLM disabled mode:**
-  - Set `ASK_ENABLE_LLM=false`
-  - Verify `/ask` returns raw snippets without LLM synthesis
-
-- [ ] **Failure handling:**
-  - Use invalid API key
-  - Verify graceful degradation (error message, no crash)
-
-**Pass Criteria:** All LLM backends work, streaming functions, graceful failure when disabled
-
----
+- [ ] Verify `POST /ask`, `POST /ask/stream`, and `POST /debug/search_explain` return the exact
+  `MEMORY_GROUNDED_QA_UNAVAILABLE` HTTP 410 response with `Cache-Control: no-store`.
+- [ ] Verify malformed and absent bodies produce the same response without provider, repository or auth work.
 
 ### 1.6 Auth & Rate Limiting
 
@@ -252,12 +228,12 @@ This comprehensive checklist validates all systems before marketing launch and p
   - Set `RATE_LIMIT_ENABLED=true`, `REDIS_URL=redis://localhost:6379/0`
   - Start Redis: `docker run -d -p 6379:6379 redis:7-alpine`
 
-- [ ] **Test `/ask` rate limit (3 req/s, burst 5):**
+- [ ] **Test `/search` rate limit:**
   ```bash
   for i in {1..10}; do
-    curl -X POST http://localhost:8000/ask \
+    curl -X POST http://localhost:8000/search \
       -H "Authorization: Bearer $TOKEN" \
-      -d '{"question": "test"}' &
+      -d '{"query": "test", "top_k": 1}' &
   done
   ```
   - Verify 429 responses after 5th request
@@ -584,7 +560,7 @@ This comprehensive checklist validates all systems before marketing launch and p
 
 #### Test Cases
 - [ ] **Rate limit enforcement:**
-  - Exceed rate limit for `/ask` endpoint
+  - Exceed the configured rate limit for `/search`
   - Verify 429 response with correct headers
   - Wait for rate limit window to reset
   - Confirm requests succeed again
@@ -593,11 +569,6 @@ This comprehensive checklist validates all systems before marketing launch and p
   - Send 11MB request body (default limit is 10MB)
   - Verify 413 response: "Request body too large"
   - Send 9MB body - confirm accepted
-
-- [ ] **Concurrent request limit:**
-  - Test `/ask` concurrent limit (default 3 per tenant)
-  - Start 5 concurrent requests
-  - Verify some rejected with 429
 
 **Pass Criteria:** Rate limits enforced, size limits work, concurrent limits respected
 
@@ -854,7 +825,7 @@ This comprehensive checklist validates all systems before marketing launch and p
 8. Refresh cycle with drift-triggered events (30 min)
 9. Semantic-trigger quarantine response (5 min)
 10. Search/hybrid queries with filters and reranker (30 min)
-11. LLM Q&A (streaming and non-streaming) (10 min)
+11. Grounded-Q&A/search-explain HTTP 410 retirement contract (10 min)
 
 **Phase 4: Security & Performance (1 hour)**
 12. Rate limiting and size limits (20 min)

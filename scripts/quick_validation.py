@@ -127,8 +127,8 @@ if node_id:
     test("PUT /nodes/{id}", update_node)
 test("DELETE /nodes/{id}?hard=true", delete_node_hard)
 
-# 3. Search & Q&A
-print("\nSearch & Q&A Tests:")
+# 3. Search
+print("\nSearch Tests:")
 
 
 def test_search():
@@ -143,21 +143,7 @@ def test_search():
     return resp.status_code == 200
 
 
-def test_ask():
-    resp = requests.post(
-        f"{API_URL}/ask",
-        headers={"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"},
-        json={"question": "What is a validation test?", "top_k": 5},
-        timeout=30,
-    )
-    data = resp.json()
-    answer_preview = data.get("answer", "")[:50] if resp.status_code == 200 else "N/A"
-    print(f"  Answer preview: {answer_preview}...")
-    return resp.status_code == 200
-
-
 test("POST /search", test_search)
-test("POST /ask", test_ask)
 
 # 5. Closed connector product
 print("\nConnector Retirement Tests:")

@@ -12,7 +12,7 @@ Active Graph KG implements comprehensive security features for multi-tenant SaaS
 - **JWT Authentication** - Token-based authentication with RS256/HS256 support
 - **Row-Level Security (RLS)** - Database-enforced tenant isolation
 - **Rate Limiting** - Redis-backed request throttling per tenant/IP
-- **Payload Security** - Safe handling of file, HTTP, and S3 sources
+- **Content Admission** - Inline properties and bounded multipart upload only
 - **Audit Trail** - Complete actor tracking for all mutations
 - **Input Validation** - XSS protection, SQL injection prevention
 
@@ -23,8 +23,8 @@ Active Graph KG implements comprehensive security features for multi-tenant SaaS
 1. [Authentication (JWT)](#authentication-jwt)
 2. [Multi-Tenancy & RLS](#multi-tenancy-rls)
 3. [Rate Limiting](#rate-limiting)
-4. [Payload Loaders](#payload-loaders-security)
-5. [Security Limits Configuration](#security-limits-configuration)
+4. [Content Admission](#content-admission-security)
+5. [Security Limits](#content-admission-security)
 6. [PII Handling](#pii-handling)
 7. [Audit Trail](#audit-trail)
 8. [API Security](#api-security)
@@ -280,7 +280,6 @@ REAL_IP_HEADER=X-Forwarded-For
 
 **Per-Tenant Limits:**
 - `/search`: 100 req/s burst, 10 req/s sustained
-- `/ask`: 10 req/s burst, 2 req/s sustained
 - `/nodes` (write): 50 req/s burst, 10 req/s sustained
 
 **Per-IP Limits (unauthenticated):**
@@ -312,244 +311,20 @@ REAL_IP_HEADER=X-Forwarded-For
 
 ---
 
-## Payload Loaders Security
+## Content admission security
 
-### File Loader
+Caller-selected URL, S3 and local-file payload references are unavailable. `NodeCreate.payload_ref` is a null-only
+compatibility field and the graph repository contains no generic remote/local/S3 loader. Historical stored values
+are inert metadata and are never fetched.
 
-**Path Traversal Protection:**
+Supported content sources are:
 
-```python
-from pathlib import Path
+- bounded inline node properties (`text`, `resume_text`, `content`, `body`, `description`);
+- authenticated bounded multipart `/upload`.
 
-def _load_from_file(self, file_path: str) -> str:
-    ALLOWED_BASE = Path("/var/activekg/data").resolve()
+`GET /_admin/security/limits` reports this closed state without reading or exposing stale allowlists/directories.
+The global `MAX_REQUEST_SIZE_BYTES` middleware remains active for declared and chunked request bodies.
 
-    try:
-        requested_path = Path(file_path).resolve()
-
-        # Check if within allowed base
-        if not requested_path.is_relative_to(ALLOWED_BASE):
-            logger.warning(f"Path outside allowed base: {file_path}")
-            return ''
-
-        # Size limit (10MB)
-        if requested_path.stat().st_size > 10 * 1024 * 1024:
-            logger.warning(f"File too large: {file_path}")
-            return ''
-
-        with open(requested_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except Exception as e:
-        logger.error(f"Failed to load file: {e}")
-        return ''
-```
-
-### HTTP Loader
-
-**Size Limit with Streaming:**
-
-```python
-def _load_from_url(self, url: str) -> str:
-    MAX_SIZE = 5 * 1024 * 1024  # 5MB
-
-    response = requests.get(url, timeout=10, stream=True)
-    response.raise_for_status()
-
-    # Check content-length header
-    content_length = response.headers.get('content-length')
-    if content_length and int(content_length) > MAX_SIZE:
-        logger.warning(f"URL content too large: {url}")
-        return ''
-
-    # Read with size limit
-    content = []
-    total_size = 0
-    for chunk in response.iter_content(chunk_size=8192):
-        total_size += len(chunk)
-        if total_size > MAX_SIZE:
-            logger.warning(f"URL exceeded size limit: {url}")
-            return ''
-        content.append(chunk)
-
-    return b''.join(content).decode('utf-8')
-```
-
-### S3 Loader
-
-**Bucket Allowlist:**
-
-```python
-def _load_from_s3(self, s3_uri: str) -> str:
-    # Allowlist buckets
-    ALLOWED_BUCKETS = os.getenv("ALLOWED_S3_BUCKETS", "").split(",")
-
-    bucket, key = parse_s3_uri(s3_uri)
-
-    if ALLOWED_BUCKETS and bucket not in ALLOWED_BUCKETS:
-        logger.warning(f"Bucket not in allowlist: {bucket}")
-        return ''
-
-    # Check size before download
-    s3_client = boto3.client('s3')
-    response = s3_client.head_object(Bucket=bucket, Key=key)
-
-    if response['ContentLength'] > 10 * 1024 * 1024:  # 10MB
-        logger.warning(f"S3 object too large: {s3_uri}")
-        return ''
-
-    # Validate content type
-    content_type = response.get('ContentType', '')
-    if not content_type.startswith(('text/', 'application/json', 'application/pdf')):
-        logger.warning(f"Invalid content type: {content_type}")
-        return ''
-
-    # Download
-    obj = s3_client.get_object(Bucket=bucket, Key=key)
-    return obj['Body'].read().decode('utf-8')
-```
-
----
-
-## Security Limits Configuration
-
-Active Graph KG implements comprehensive security limits to protect against SSRF attacks, path traversal, and resource exhaustion.
-
-### SSRF Protection
-
-**Environment Variables:**
-
-```bash
-# Optional: Restrict HTTP payload sources to trusted domains (comma-separated)
-ACTIVEKG_URL_ALLOWLIST=example.com,trusted-api.com,docs.yourcompany.com
-
-# Maximum bytes to fetch from URLs (default: 10MB)
-ACTIVEKG_MAX_FETCH_BYTES=10485760
-
-# Timeout for HTTP requests (default: 10 seconds)
-ACTIVEKG_FETCH_TIMEOUT=10
-```
-
-**Protected IP Ranges:**
-
-The system automatically blocks requests to:
-- `127.0.0.0/8` - Localhost
-- `10.0.0.0/8` - Private network
-- `172.16.0.0/12` - Private network
-- `192.168.0.0/16` - Private network
-- `169.254.0.0/16` - Link-local (AWS metadata service)
-- `224.0.0.0/4` - Multicast
-
-**Allowed Content-Types:**
-- `text/*` (text/plain, text/html, text/csv, etc.)
-- `application/json`
-
-### File Access Protection
-
-```bash
-# Restrict local file access to specific directories (comma-separated)
-# Leave empty to default to current working directory
-ACTIVEKG_FILE_BASEDIRS=/opt/data,/mnt/uploads
-
-# Maximum file size for local file reads (default: 1MB)
-ACTIVEKG_MAX_FILE_BYTES=1048576
-```
-
-**Security Features:**
-- Path normalization with `os.path.realpath()`
-- Symlink blocking
-- Directory allowlist enforcement
-- Size limits to prevent memory exhaustion
-
-### Request Body Limits
-
-```bash
-# Maximum request body size (default: 10MB)
-MAX_REQUEST_SIZE_BYTES=10485760
-```
-
-**Enforcement:**
-- Content-Length header validation
-- Chunked transfer streaming validation
-- Returns HTTP 413 (Request Entity Too Large) when exceeded
-
-### Runtime Inspection
-
-Check currently configured limits:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8000/_admin/security/limits
-```
-
-**Example Response:**
-
-```json
-{
-  "ssrf_protection": {
-    "enabled": true,
-    "url_allowlist": ["example.com", "trusted-api.com"],
-    "blocked_ip_ranges": [
-      "127.0.0.0/8 (localhost)",
-      "10.0.0.0/8 (private)",
-      "172.16.0.0/12 (private)",
-      "192.168.0.0/16 (private)",
-      "169.254.0.0/16 (link-local / AWS metadata)",
-      "224.0.0.0/4 (multicast)"
-    ],
-    "max_fetch_bytes": 10485760,
-    "max_fetch_mb": 10.0,
-    "fetch_timeout_seconds": 10.0,
-    "allowed_content_types": ["text/*", "application/json"]
-  },
-  "file_access": {
-    "enabled": true,
-    "allowed_base_directories": ["/opt/data", "/mnt/uploads"],
-    "symlinks_blocked": true,
-    "max_file_bytes": 1048576,
-    "max_file_mb": 1.0
-  },
-  "request_limits": {
-    "max_request_body_bytes": 10485760,
-    "max_request_body_mb": 10.0,
-    "enforced_for": ["Content-Length header", "chunked transfers"]
-  }
-}
-```
-
-### Production Recommendations
-
-**1. Enable URL Allowlist:**
-```bash
-# Only allow specific trusted domains
-ACTIVEKG_URL_ALLOWLIST=docs.yourcompany.com,api.partner.com
-```
-
-**2. Restrict File Access:**
-```bash
-# Only allow specific data directories
-ACTIVEKG_FILE_BASEDIRS=/opt/activekg/data
-```
-
-**3. Conservative Size Limits:**
-```bash
-# Smaller limits for high-traffic deployments
-ACTIVEKG_MAX_FETCH_BYTES=5242880    # 5MB
-ACTIVEKG_MAX_FILE_BYTES=524288      # 512KB
-MAX_REQUEST_SIZE_BYTES=5242880      # 5MB
-```
-
-**4. Reverse Proxy Configuration:**
-
-Add additional limits at the reverse proxy level (Nginx/Ingress):
-
-```nginx
-# Nginx example
-client_max_body_size 10M;
-client_body_timeout 30s;
-client_header_timeout 30s;
-```
-
----
 
 ## PII Handling
 
@@ -712,10 +487,10 @@ def get_dsn():
 - [ ] TRUST_PROXY configured correctly
 - [ ] REAL_IP_HEADER matches proxy
 
-#### Payload Loaders
-- [ ] ALLOWED_S3_BUCKETS set (if using S3)
-- [ ] File base directory configured
-- [ ] Size limits appropriate for use case
+#### Content Admission
+- [ ] Non-null node `payload_ref` values reject with HTTP 422
+- [ ] Inline properties and bounded multipart upload remain available
+- [ ] Security limits report remote/local loading disabled
 
 #### API Security
 - [ ] CORS configured with specific origins
@@ -867,8 +642,7 @@ curl -X POST http://localhost:8000/nodes \
 - [x] TRUST_PROXY configured correctly
 
 ### High Priority (P1)
-- [x] File loader path allowlist
-- [x] HTTP/S3 size limits
+- [x] Generic URL/S3/file payload loaders removed
 - [x] JWT clock skew tolerance
 - [x] Scope format support (list + string)
 - [x] Concurrency cleanup for long requests

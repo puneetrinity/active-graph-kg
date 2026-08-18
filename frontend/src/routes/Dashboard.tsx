@@ -52,16 +52,6 @@ export default function Dashboard() {
         </a>
 
         <a
-          href="/ask"
-          className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow"
-        >
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">Ask</h3>
-          <p className="text-sm text-gray-600">
-            Ask questions about your knowledge graph with streaming LLM responses
-          </p>
-        </a>
-
-        <a
           href="/nodes"
           className="bg-white rounded-lg shadow-sm p-6 hover:shadow-md transition-shadow"
         >

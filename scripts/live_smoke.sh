@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Live end-to-end smoke for Active Graph KG
 # - Verifies health, DB info, ANN indexes
-# - Exercises CRUD, search (vector+hybrid), and ask streaming
+# - Exercises CRUD and search (vector+hybrid)
 # - Emits traffic to populate Prometheus metrics
 
 API_URL=${API_URL:-${API:-http://localhost:8000}}
@@ -56,21 +56,10 @@ curl -sS -X POST "${API_URL}/search" \
   "${hdr_auth[@]}" -H 'Content-Type: application/json' \
   -d '{"query":"machine learning","top_k":5,"use_hybrid":false}' | jq '.results | length'
 
-echo "== Search Explain (vector) =="
-curl -sS -X POST "${API_URL}/debug/search_explain" \
-  "${hdr_auth[@]}" -H 'Content-Type: application/json' \
-  -d '{"query":"machine learning","use_hybrid":false,"top_k":5}' | jq '.ann_config'
-
 echo "== Search (hybrid) =="
 curl -sS -X POST "${API_URL}/search" \
   "${hdr_auth[@]}" -H 'Content-Type: application/json' \
   -d '{"query":"machine learning","top_k":5,"use_hybrid":true}' | jq '.results | length'
-
-echo "== Ask (stream) =="
-# Stream a few lines, then stop (timeout guards long streams)
-curl -N -m 20 -X POST "${API_URL}/ask/stream" \
-  "${hdr_auth[@]}" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
-  --data '{"question":"What is machine learning?","stream":true}' | head -n 10 || true
 
 echo "== Hard Delete Node =="
 curl -sS -X DELETE "${API_URL}/nodes/${NODE_ID}?hard=true" "${hdr_auth[@]}" | jq . || true
@@ -83,6 +72,6 @@ for i in $(seq 1 30); do
 done
 
 echo "== Prometheus scrape (key lines) =="
-curl -sS "${API_URL}/prometheus" | grep -E 'activekg_(ask|search|gating|embedding|rejections|cited|latency)' || true
+curl -sS "${API_URL}/prometheus" | grep -E 'activekg_(search|embedding|latency)' || true
 
 echo "✓ Live smoke complete"

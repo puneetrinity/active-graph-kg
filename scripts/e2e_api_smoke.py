@@ -137,34 +137,16 @@ def main():
     data = r.json()
     print(f"   ✓ Hybrid search returned {data['count']} results")
 
-    # 7) /ask endpoint (if LLM enabled)
-    print("\n7. Testing /ask endpoint...")
-    r = req(
-        "POST",
-        "/ask",
-        token=user_token,
-        json={"question": "Who is a software engineer with Python experience?"},
-    )
-    if r.status_code == 200:
-        ans = r.json()
-        answer_len = len(ans.get("answer", ""))
-        citations = len(ans.get("citations", []))
-        print(f"   ✓ /ask returned answer (length: {answer_len}, citations: {citations})")
-    elif r.status_code == 503:
-        print("   ⚠ /ask unavailable (LLM backend not configured)")
-    else:
-        print(f"   ⚠ /ask returned status: {r.status_code}")
-
-    # 8) Events endpoint
-    print("\n8. Testing /events endpoint...")
+    # 7) Events endpoint
+    print("\n7. Testing /events endpoint...")
     r = req("GET", "/events?limit=10", token=user_token)
     assert r.status_code == 200, f"Events fetch failed: {r.text}"
     events_data = r.json()
     event_count = events_data.get("count", 0)
     print(f"   ✓ Retrieved {event_count} events")
 
-    # 9) Node versions
-    print("\n9. Testing /nodes/{id}/versions...")
+    # 8) Node versions
+    print("\n8. Testing /nodes/{id}/versions...")
     r = req("GET", f"/nodes/{node_id}/versions", token=user_token)
     assert r.status_code == 200, f"Versions fetch failed: {r.text}"
     versions_data = r.json()

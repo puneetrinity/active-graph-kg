@@ -24,16 +24,8 @@ curl -s -w "\nStatus: %{http_code}\n" -X POST http://localhost:8000/admin/refres
   -d '{"node_ids":[]}'
 echo ""
 
-# Test 2: X-RateLimit headers
-echo "[Test 3] X-RateLimit headers on /ask"
-curl -s -i -X POST http://localhost:8000/ask \
-  -H "Authorization: Bearer $TENANT_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"test"}' 2>&1 | grep -E "HTTP/|x-ratelimit"
-echo ""
-
 # Test 3: Manual refresh with RLS
-echo "[Test 4] Create node and test manual refresh"
+echo "[Test 3] Create node and test manual refresh"
 NODE_RESPONSE=$(curl -s -X POST http://localhost:8000/nodes \
   -H "Authorization: Bearer $TENANT_A_TOKEN" \
   -H "Content-Type: application/json" \

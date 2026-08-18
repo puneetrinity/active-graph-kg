@@ -13,12 +13,6 @@ fi
 
 HDR=( -H "Authorization: Bearer ${TOKEN}" )
 
-echo "== LLM disabled fallback (expect 503 when LLM_ENABLED=false) =="
-code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/ask/stream" \
-  "${HDR[@]}" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
-  --data '{"question":"resilience test","stream":true}')
-echo "POST /ask/stream -> ${code}"
-
 echo "== Connector poller errors (if any) exposed in Prometheus =="
 
 echo "(For full chaos tests, add guarded /_admin/simulate_failure endpoints)"

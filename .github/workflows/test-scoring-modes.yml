@@ -162,29 +162,28 @@ jobs:
 
       - name: Run scoring mode tests
         run: |
-          pytest tests/test_scoring_modes.py -v --tb=short --color=yes
+          pytest tests/test_grounded_qa_remote_content_retirement.py -v --tb=short --color=yes
 
       - name: Run smoke tests
         run: |
-          echo "=== Smoke Test 1: Hybrid search scoring ==="
-          curl -s -X POST http://localhost:8000/debug/search_explain \
+          echo "=== Smoke Test 1: Hybrid search ==="
+          curl -s -X POST http://localhost:8000/search \
             -H "Content-Type: application/json" \
             -d '{"query":"machine learning engineer frameworks","use_hybrid":true,"top_k":5}' \
-            | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'score_type': d.get('score_type'), 'result_count': d.get('result_count'), 'score_range': d.get('score_range')}, indent=2))"
+            | python3 -m json.tool
 
           echo ""
-          echo "=== Smoke Test 2: Vector-only search scoring ==="
-          curl -s -X POST http://localhost:8000/debug/search_explain \
+          echo "=== Smoke Test 2: Vector-only search ==="
+          curl -s -X POST http://localhost:8000/search \
             -H "Content-Type: application/json" \
             -d '{"query":"machine learning engineer frameworks","use_hybrid":false,"top_k":5}' \
-            | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps({'score_type': d.get('score_type'), 'result_count': d.get('result_count'), 'score_range': d.get('score_range')}, indent=2))"
+            | python3 -m json.tool
 
           echo ""
-          echo "=== Smoke Test 3: /ask endpoint metadata ==="
+          echo "=== Smoke Test 3: Grounded Q&A retirement ==="
           curl -s -X POST http://localhost:8000/ask \
             -H "Content-Type: application/json" \
-            -d '{"question":"What ML frameworks does the Machine Learning Engineer position require?"}' \
-            | python3 -c "import sys, json; d=json.load(sys.stdin); m=d.get('metadata',{}); print(json.dumps({'gating_score': m.get('gating_score'), 'gating_score_type': m.get('gating_score_type'), 'cited_nodes': m.get('cited_nodes'), 'confidence': d.get('confidence')}, indent=2))"
+            -d '{"question":"ignored"}' | python3 -m json.tool
 
           echo ""
           echo "=== Smoke Test 4: Embedding configuration ==="

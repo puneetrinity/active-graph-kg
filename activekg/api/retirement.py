@@ -13,8 +13,14 @@ MEMORY_CONNECTORS_UNAVAILABLE_DETAIL = {
     "message": "Connectors are not available.",
 }
 
+MEMORY_GROUNDED_QA_UNAVAILABLE_DETAIL = {
+    "code": "MEMORY_GROUNDED_QA_UNAVAILABLE",
+    "message": "Grounded Q&A and search explanation are not available.",
+}
+
 semantic_triggers_router = APIRouter()
 connector_retirement_router = APIRouter(tags=["connectors-unavailable"])
+grounded_qa_retirement_router = APIRouter(tags=["grounded-qa-unavailable"])
 
 
 def semantic_triggers_unavailable_response() -> JSONResponse:
@@ -31,6 +37,44 @@ def connectors_unavailable_response() -> JSONResponse:
         content={"detail": MEMORY_CONNECTORS_UNAVAILABLE_DETAIL},
         headers={"Cache-Control": "no-store"},
     )
+
+
+def grounded_qa_unavailable_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=410,
+        content={"detail": MEMORY_GROUNDED_QA_UNAVAILABLE_DETAIL},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@grounded_qa_retirement_router.post(
+    "/ask",
+    response_model=None,
+    status_code=410,
+    response_description="Grounded Q&A unavailable",
+)
+async def ask_unavailable() -> JSONResponse:
+    return grounded_qa_unavailable_response()
+
+
+@grounded_qa_retirement_router.post(
+    "/ask/stream",
+    response_model=None,
+    status_code=410,
+    response_description="Grounded Q&A unavailable",
+)
+async def ask_stream_unavailable() -> JSONResponse:
+    return grounded_qa_unavailable_response()
+
+
+@grounded_qa_retirement_router.post(
+    "/debug/search_explain",
+    response_model=None,
+    status_code=410,
+    response_description="Search explanation unavailable",
+)
+async def search_explain_unavailable() -> JSONResponse:
+    return grounded_qa_unavailable_response()
 
 
 @semantic_triggers_router.post(

@@ -48,11 +48,7 @@ export ACTIVEKG_DSN="postgresql://activekg:activekg@localhost:5432/activekg"
 export EMBEDDING_BACKEND="sentence-transformers"
 export EMBEDDING_MODEL="all-MiniLM-L6-v2"
 
-# Ask endpoint tuning
-export ASK_SIM_THRESHOLD=0.30
-export ASK_MAX_TOKENS=256
-export ASK_MAX_SNIPPETS=3
-export ASK_SNIPPET_LEN=300
+# Direct-search reranker tuning
 export HYBRID_RERANKER_CANDIDATES=20
 
 # Run scheduler on exactly one instance
@@ -357,7 +353,7 @@ python scheduler_runner.py
 | File | Purpose | Lines |
 |------|---------|-------|
 | `db/init.sql` | Schema with explicit columns, patterns table, indexes | 93 |
-| `activekg/graph/repository.py` | CRUD, vector_search, lineage, payload loaders | ~417 |
+| `activekg/graph/repository.py` | CRUD, vector_search, lineage, inline payload text | ~417 |
 | `activekg/refresh/scheduler.py` | Refresh cycle with drift gating | 94 |
 | `activekg/triggers/pattern_store.py` | Dormant pattern persistence design (not launch-wired) | 78 |
 | `activekg/api/main.py` | All 11 API endpoints | 249 |
@@ -371,11 +367,11 @@ python scheduler_runner.py
 1. **Enable Production Security** (See `docs/operations/security.md`):
    - Row-Level Security (RLS) for multi-tenancy
    - Actor IDs in events
-   - File/HTTP/S3 size limits
+   - Bounded inline and multipart content admission
 
 2. **Evaluate Hybrid Retrieval**:
    - Ensure `db/migrations/add_text_search.sql` applied
-   - Use `/search` with `use_hybrid=true` or rely on hybrid inside `/ask`
+   - Use `/search` with `use_hybrid=true`
    - Tune `HYBRID_RERANKER_CANDIDATES`
 
 3. **Deploy to Production**:
@@ -404,15 +400,7 @@ python scheduler_runner.py
 **Status:** Phase 1 Complete ✅
 **Time to Working Demo:** 5 minutes
 **Time to Production:** +1-2 days (security hardening)
-### **Q&A (Citations + Lineage)**
-```bash
-# Non-streaming
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What vector databases are discussed?", "max_results": 3}'
+### **Grounded Q&A**
 
-# Streaming SSE
-curl -N -X POST http://localhost:8000/ask/stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What vector databases are discussed?", "max_results": 3}'
-```
+Generic `/ask`, `/ask/stream`, and `/debug/search_explain` are unavailable for launch and return HTTP 410. Use
+the authenticated `/search` contract for direct retrieval.

@@ -94,7 +94,7 @@ PERFORMANCE_ISSUES = [
         "classes": ["Incident"],
         "props": {
             "title": "LLM generation bottleneck",
-            "text": "Performance degradation in /ask endpoint. LLM generation taking 8-10 seconds at p95. Need to implement caching and streaming to reduce latency.",
+            "text": "Performance degradation in semantic search. Retrieval latency is above the target p95 and needs profiling.",
         },
         "metadata": {
             "severity": "medium",
@@ -176,12 +176,7 @@ def seed_data():
     print(f"  - {len(OPEN_POSITIONS)} open positions")
     print(f"  - {len(PERFORMANCE_ISSUES)} performance issues")
     print()
-    print("Wait 5-10 seconds for embeddings to be generated, then test with:")
-    print("  curl -X POST http://localhost:8000/ask -H 'Content-Type: application/json' \\")
-    print('    -d \'{"question": "What ML engineer positions are open?"}\'')
-    print()
-    print("  curl -X POST http://localhost:8000/ask -H 'Content-Type: application/json' \\")
-    print('    -d \'{"question": "What are the main performance issues reported?"}\'')
+    print("Wait 5-10 seconds for embeddings to be generated, then test with direct /search.")
 
 
 if __name__ == "__main__":

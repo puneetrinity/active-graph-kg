@@ -1,6 +1,7 @@
 # Active Graph KG Documentation
 
-Welcome to the **Active Graph KG** documentation — a production-ready knowledge graph system with semantic search, LLM-powered Q&A, and self-improving capabilities.
+Welcome to the **Active Graph KG** documentation — a knowledge graph system with tenant-scoped semantic search,
+lineage, refresh and extraction. Generic grounded Q&A is unavailable for launch.
 
 ---
 
@@ -81,14 +82,14 @@ Welcome to the **Active Graph KG** documentation — a production-ready knowledg
 Active Graph KG is a **self-improving knowledge graph** that combines:
 
 - **Semantic Search** - pgvector-powered vector search with hybrid ranking
-- **LLM Q&A** - Citation-backed answers using retrieval-augmented generation
+- **Bounded extraction** - Provider-backed structured extraction through the deployed worker
 - **Self-Refreshing** - Automatic drift detection and scheduled refreshes
 - **Multi-Tenant** - Row-level security (RLS) with per-tenant isolation
 - **Production-Ready** - JWT auth, rate limiting, Prometheus metrics, comprehensive testing
 
 ### Key Features
 
-✅ **REST API endpoints** - Health, nodes, edges, search, ask, events, admin
+✅ **REST API endpoints** - Health, nodes, edges, direct search, events and bounded admin operations
 ✅ **Hybrid search** - Vector + text search with RRF (Reciprocal Rank Fusion) reranking  
 ✅ **Strict citations** - LLM answers cite source nodes with [0], [1], [2] references  
 💤 **Triggers & patterns** - Dormant design; CRUD and evaluation are unavailable for launch
@@ -137,27 +138,29 @@ curl -X POST http://localhost:8000/nodes \
   }'
 ```
 
-### 3. Ask a Question
+### 3. Search the Graph
 
 ```bash
-curl -X POST http://localhost:8000/ask \
+curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "What are Python best practices?"
+    "query": "Python best practices",
+    "top_k": 5,
+    "use_hybrid": true
   }'
 ```
 
 Response:
 ```json
 {
-  "answer": "Python best practices include using type hints for better code clarity and following the PEP 8 style guide [0].",
-  "sources": [
+  "results": [
     {
-      "node_id": "python-guide",
-      "title": "Python Best Practices",
+      "id": "python-guide",
+      "classes": ["Document"],
       "similarity": 0.92
     }
-  ]
+  ],
+  "count": 1
 }
 ```
 
@@ -209,7 +212,7 @@ See the repository root for these additional documents.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         FastAPI REST API                     │
-│     /health /nodes /search /ask /events /admin /_prom        │
+│       /health /nodes /search /events /admin /_prom           │
 └────────────┬────────────────────────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────────┐
@@ -226,17 +229,17 @@ See the repository root for these additional documents.
 
 ┌──────────────────────────────────────────────────────────────┐
 │                   Background Scheduler                        │
-│  • Trigger polling   • Scheduled refreshes   • Drift monitor │
+│  • Scheduled refreshes   • Drift monitor                      │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│                   LLM Provider (Groq/OpenAI)                  │
-│  • Citation-backed answers   • Intent detection   • Embeddings│
+│                     Extraction Worker                        │
+│  • Bounded structured extraction   • Re-embedding handoff    │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
 │                   Redis (Rate Limits & Cache)                 │
-│  • Per-tenant rate limiting   • /ask response cache          │
+│  • Per-tenant rate limiting                                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 

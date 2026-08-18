@@ -62,78 +62,11 @@ class TestJWTAuthentication:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
-    def test_ask_without_jwt_fails(self):
-        """/ask should return 401 when JWT is required but not provided."""
-        response = requests.post(f"{API_URL}/ask", json={"question": "test question"})
-
-        # Should fail if JWT_ENABLED=true
-        if response.status_code == 401:
-            assert (
-                response.json()["detail"]
-                == "Missing Authorization header. JWT required for this endpoint."
-            )
-        elif response.status_code == 200:
-            # JWT disabled in dev mode - that's ok
-            pytest.skip("JWT authentication disabled (dev mode)")
-
-    def test_ask_with_valid_jwt(self):
-        """/ask should work with valid JWT."""
-        token = generate_test_jwt()
-
-        response = requests.post(
-            f"{API_URL}/ask",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"question": "What are vector databases?"},
-        )
-
-        assert response.status_code in [200, 503]  # 503 if LLM disabled
-        if response.status_code == 200:
-            data = response.json()
-            assert "answer" in data
-            assert "confidence" in data
-
-    def test_ask_with_expired_jwt_fails(self):
-        """/ask should reject expired JWT."""
-        # Generate token that expired 1 hour ago
-        now = datetime.utcnow()
-        payload = {
-            "sub": "test_user",
-            "tenant_id": "test_tenant",
-            "actor_type": "user",
-            "scopes": ["search:read"],
-            "aud": "activekg",
-            "iss": "https://test.activekg.com",
-            "iat": now - timedelta(hours=2),
-            "nbf": now - timedelta(hours=2),
-            "exp": now - timedelta(hours=1),  # Expired
-        }
-
-        expired_token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-        response = requests.post(
-            f"{API_URL}/ask",
-            headers={"Authorization": f"Bearer {expired_token}"},
-            json={"question": "test"},
-        )
-
-        assert response.status_code == 401
-        assert "expired" in response.json()["detail"].lower()
-
-    def test_ask_with_invalid_signature_fails(self):
-        """/ask should reject JWT with invalid signature."""
-        token = generate_test_jwt()
-
-        # Tamper with token (change last character)
-        tampered_token = token[:-1] + ("x" if token[-1] != "x" else "y")
-
-        response = requests.post(
-            f"{API_URL}/ask",
-            headers={"Authorization": f"Bearer {tampered_token}"},
-            json={"question": "test"},
-        )
-
-        assert response.status_code == 401
-        assert "Invalid" in response.json()["detail"]
+    def test_grounded_q_and_a_is_retired(self):
+        """Grounded Q&A stays unavailable regardless of credentials."""
+        response = requests.post(f"{API_URL}/ask", json={"question": "ignored"})
+        assert response.status_code == 410
+        assert response.json()["detail"]["code"] == "MEMORY_GROUNDED_QA_UNAVAILABLE"
 
     def test_tenant_isolation(self):
         """Nodes created by one tenant should not be visible to another."""
@@ -205,9 +138,9 @@ class TestRateLimiting:
         token = generate_test_jwt()
 
         response = requests.post(
-            f"{API_URL}/ask",
+            f"{API_URL}/search",
             headers={"Authorization": f"Bearer {token}"},
-            json={"question": "test"},
+            json={"query": "test", "top_k": 1},
         )
 
         # Check for rate limit headers
@@ -226,9 +159,9 @@ class TestRateLimiting:
         responses = []
         for i in range(10):
             response = requests.post(
-                f"{API_URL}/ask",
+                f"{API_URL}/search",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"question": f"test {i}"},
+                json={"query": f"test {i}", "top_k": 1},
             )
             responses.append(response)
             time.sleep(0.05)  # 50ms between requests
@@ -254,15 +187,15 @@ class TestRateLimiting:
         token = generate_test_jwt()
 
         def make_request(i):
-            """Make a single /ask request."""
+            """Make a single direct-search request."""
             response = requests.post(
-                f"{API_URL}/ask",
+                f"{API_URL}/search",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"question": f"test concurrent {i}"},
+                json={"query": f"test concurrent {i}", "top_k": 1},
             )
             return response.status_code
 
-        # Start 10 concurrent requests (concurrency limit for /ask is 3)
+        # Start 10 concurrent direct-search requests
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(make_request, i) for i in range(10)]
             status_codes = [f.result() for f in concurrent.futures.as_completed(futures)]
@@ -282,17 +215,17 @@ class TestRateLimiting:
         # Fire 5 requests for tenant A
         for i in range(5):
             _ = requests.post(
-                f"{API_URL}/ask",
+                f"{API_URL}/search",
                 headers={"Authorization": f"Bearer {token_a}"},
-                json={"question": f"test a {i}"},
+                json={"query": f"test a {i}", "top_k": 1},
             )
             time.sleep(0.1)
 
         # Tenant B should still have full quota
         response_b = requests.post(
-            f"{API_URL}/ask",
+            f"{API_URL}/search",
             headers={"Authorization": f"Bearer {token_b}"},
-            json={"question": "test b"},
+            json={"query": "test b", "top_k": 1},
         )
 
         # Should succeed (not rate limited by tenant A's usage)

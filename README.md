@@ -39,7 +39,7 @@ Active Graph KG is a **self-refreshing knowledge graph** built on PostgreSQL + p
 - 📊 **Detects semantic drift** and emits events when content changes significantly
 - 💤 **Preserves dormant semantic-trigger design** without exposing trigger CRUD or execution at launch
 - 🔗 **Tracks lineage** through DERIVED_FROM edges with recursive queries
-- 🌐 **Loads polyglot payloads** from S3, HTTP, local files, or inline text
+- 📥 **Ingests bounded content** from inline node properties or authenticated multipart upload
 - 🔍 **Searches with compound filters** using JSONB containment for complex queries
 - 🔒 **Isolates tenants** with Row-Level Security at the database level
 - 📈 **Exports Prometheus metrics** for production monitoring
@@ -68,7 +68,7 @@ Active Graph KG's architecture is grounded in peer-reviewed research on AI-augme
 
 - **"LLMs excel at reasoning and orchestration; retrieval + structure remain the backbone for accuracy."**
   *Zhu et al. (2023), arXiv:2305.13168* - LLMs for knowledge graph construction and reasoning
-  → Supports our design: structured KG for retrieval, LLMs for grounded Q&A with citations (coming in Phase 2)
+  → Supports our design: structured retrieval first; any future assistant is separately designed and approved
 
 - **"AI-augmented database systems demonstrate improved real-time performance and anomaly detection."**
   *Gadde (2024)* - AI-Augmented DBMS for Real-Time Data Analytics, Revista de Inteligencia Artificial en Medicina
@@ -137,10 +137,6 @@ export ACTIVEKG_DSN='postgresql://activekg:activekg@localhost:5432/activekg'
 
 export EMBEDDING_BACKEND='sentence-transformers'
 export EMBEDDING_MODEL='all-MiniLM-L6-v2'
-export ASK_SIM_THRESHOLD=0.30        # similarity cutoff for /ask
-export ASK_MAX_TOKENS=256            # token budget
-export ASK_MAX_SNIPPETS=3            # snippets in context
-export ASK_SNIPPET_LEN=300           # chars per snippet
 
 # Run scheduler on exactly one instance
 export RUN_SCHEDULER=true            # false on other replicas
@@ -213,29 +209,6 @@ curl -X POST http://localhost:8000/search \
     "compound_filter": {"category": "AI", "tags": ["research"]}
   }'
 
-# Q&A (non-streaming)
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What vector databases are discussed?", "max_results": 3}'
-
-# Q&A (streaming SSE)
-curl -N -X POST http://localhost:8000/ask/stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What vector databases are discussed?", "max_results": 3}'
-
-# Note: /ask metadata
-# - top_similarity is the gating score (RRF/weighted/cosine depending on mode)
-# - top_vector_similarity / max_vector_similarity are true cosine similarities
-# Example (RRF mode):
-# {
-#   "metadata": {
-#     "top_similarity": 0.033,
-#     "top_vector_similarity": 0.583,
-#     "max_vector_similarity": 0.583,
-#     "gating_score_type": "rrf_fused"
-#   }
-# }
-
 # Prometheus metrics
 curl http://localhost:8000/prometheus
 ```
@@ -249,7 +222,7 @@ active-graph-kg/postman/actvgraph-kg.postman_collection.json
 ```
 
 Set `{{base_url}}` (default `http://localhost:8000`) and run requests for `/health`, `/nodes`, `/search`,
-`/lineage`, `/events`, and `/ask`. Any trigger requests in older collections now receive HTTP 410.
+`/lineage`, and `/events`. Grounded-Q&A, trigger and connector requests receive HTTP 410.
 
 ---
 
@@ -366,24 +339,16 @@ curl http://localhost:8000/lineage/A?max_depth=5
 
 Returns recursive ancestor chain with depth and edge metadata.
 
-#### 5. **Polyglot Payloads**
-Load content from multiple sources:
+#### 5. **Bounded Content Ingest**
+Use inline node properties or authenticated bounded multipart upload:
 
 ```python
-# S3
-{"payload_ref": "s3://my-bucket/document.txt"}
-
-# HTTP
-{"payload_ref": "https://example.com/article.html"}
-
-# Local file
-{"payload_ref": "file:///path/to/document.txt"}
-
 # Inline
 {"props": {"text": "Direct inline text"}}
 ```
 
-All are automatically fetched and embedded during refresh.
+Caller-selected URL, S3 and local-file `payload_ref` values are unavailable. Historical values are retained as
+inert metadata and are never fetched.
 
 ---
 
@@ -551,8 +516,8 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 - `POST /nodes/{node_id}/refresh` - Manually refresh a specific node
 - `GET /nodes/{node_id}/versions` - Get version history for a node
 - `POST /search` - Vector search with compound filters
-- `POST /ask` - Q&A with RAG and citations
-- `POST /ask/stream` - Streaming Q&A with SSE
+- `POST /ask` - HTTP 410 compatibility tombstone
+- `POST /ask/stream` - HTTP 410 compatibility tombstone
 
 ### Edges & Lineage
 - `POST /edges` - Create relationship
@@ -579,7 +544,7 @@ Integrate with Prometheus + Grafana for dashboards and alerts.
 
 ### Debug & Diagnostics
 - `GET /debug/embed_info` - Embedding backend status
-- `GET /debug/search_explain` - Query plan analysis
+- `POST /debug/search_explain` - HTTP 410 compatibility tombstone
 - `GET /debug/search_sanity` - Sanity checks
 - `GET /debug/dbinfo` - Database metadata
 - `GET /debug/intent` - Intent classification for queries
@@ -698,7 +663,7 @@ CREATE TABLE nodes (
     tenant_id TEXT,                         -- Multi-tenant isolation
     classes TEXT[],                         -- Semantic classes
     props JSONB,                            -- Arbitrary properties
-    payload_ref TEXT,                       -- S3/HTTP/file reference
+    payload_ref TEXT,                       -- historical inert metadata; never fetched
     embedding VECTOR(384),                  -- pgvector (all-MiniLM-L6-v2)
     metadata JSONB,                         -- Filterable metadata
     refresh_policy JSONB,                   -- {"interval": "5m", "drift_threshold": 0.1}
@@ -912,7 +877,7 @@ groups:
 - Self-refreshing nodes with drift detection
 - Semantic-trigger code/schema retained but deliberately unavailable for launch
 - Lineage tracking (recursive CTEs)
-- Polyglot payload loaders (S3, HTTP, file)
+- Inline node content and bounded multipart upload; remote/local payload references are unavailable
 - Vector search with compound filters
 - Multi-tenant audit trail
 - Row-Level Security policies (database-level isolation)
@@ -961,9 +926,9 @@ export JWT_ISSUER=vantahire             # Must match issuer in Vanta JWT
 python scripts/generate_test_jwt.py --tenant test_tenant --actor test_user
 
 # 4. Use JWT in requests
-curl -X POST http://localhost:8000/ask \
+curl -X POST http://localhost:8000/search \
   -H "Authorization: Bearer <token>" \
-  -d '{"question": "test"}'
+  -d '{"query": "test", "top_k": 5}'
 ```
 
 **What it does**:
@@ -974,7 +939,6 @@ curl -X POST http://localhost:8000/ask \
 
 **Required scopes**:
 - `search:read` — `POST /search`
-- `ask:read` — `POST /ask`, `POST /ask/stream`
 - `kg:write` — `POST /nodes`, `POST /nodes/batch`, `POST /edges`, `POST /upload`
 - `admin:refresh` — `POST /admin/refresh`, debug endpoints
 
@@ -987,7 +951,7 @@ curl -X POST http://localhost:8000/ask \
 
 ### Rate Limiting
 
-**Purpose**: Prevent cost spikes (LLM calls) and noisy neighbor problems.
+**Purpose**: Prevent noisy-neighbor pressure on active API work.
 
 **Setup**:
 
@@ -1004,16 +968,13 @@ export REDIS_URL=redis://localhost:6379/0
 
 # 4. Test rate limiting
 for i in {1..10}; do
-  curl -X POST http://localhost:8000/ask \
+  curl -X POST http://localhost:8000/search \
     -H "Authorization: Bearer <token>" \
-    -d '{"question": "test"}' &
+    -d '{"query": "test", "top_k": 1}' &
 done
-# Should see 429 after 5th request
 ```
 
 **Rate limits** (default, configurable via `activekg/api/rate_limiter.py`):
-- `/ask`: 3 req/s (burst 5), max 3 concurrent per tenant
-- `/ask/stream`: 1 req/s (burst 3), max 2 concurrent per tenant
 - `/search`: 50 req/s (burst 100)
 - `/admin/*`: 1 req/s (burst 2)
 
@@ -1192,7 +1153,8 @@ Before deploying to production, ensure:
 - [ ] Vector Indexes: Ensure ANN via `POST /admin/indexes` (IVFFLAT/HNSW as needed).
 - [ ] Auto-Index Disabled: Set `AUTO_INDEX_ON_STARTUP=false` for large datasets.
 - [ ] Rate Limiting: Configure Redis and set `RATE_LIMIT_ENABLED=true`.
-- [ ] SSRF Protection: Set `ACTIVEKG_URL_ALLOWLIST` (comma-separated) and consider disabling URL loads in prod.
+- [ ] Content Admission: Keep node content inline or use the bounded authenticated multipart upload; remote/local
+      `payload_ref` loading is unavailable.
 - [ ] Request Limits: Configure reverse proxy and/or `MAX_REQUEST_SIZE_BYTES` (defaults to 10MB).
 - [ ] Monitoring: Scrape `/prometheus` and import Grafana dashboard.
 - [ ] Secrets Management: Use env vars / secret store; never commit credentials.

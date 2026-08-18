@@ -20,7 +20,7 @@ Thanks for your interest in contributing! This project is open‑source and Post
   - Add/adjust env variables and examples
 
 ## Commit Messages
-- Use clear, imperative style: `add hybrid reranker knob`, `fix /ask streaming null text`
+- Use clear, imperative style: `add hybrid reranker knob`, `fix search response metadata`
 - Reference issues when applicable: `fixes #123`
 
 ## PR Checklist
@@ -39,6 +39,7 @@ Thanks for your interest in contributing! This project is open‑source and Post
 ## Development Notes
 - DB: PostgreSQL + pgvector 384‑dim vectors; enable via `db/init.sql`
 - Hybrid text search: apply `db/migrations/add_text_search.sql`
-- LLM Q&A: `/ask` and `/ask/stream`, tune with env: `ASK_SIM_THRESHOLD`, `ASK_MAX_TOKENS`, `ASK_MAX_SNIPPETS`, `ASK_SNIPPET_LEN`, `HYBRID_RERANKER_CANDIDATES`
+- Generic `/ask`, `/ask/stream`, and `/debug/search_explain` are unavailable compatibility routes; do not revive
+  them without a separately approved design
 
 Happy hacking! 🚀

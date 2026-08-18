@@ -144,27 +144,6 @@ class IndexBuildRequest(BaseModel):
             raise ValueError("Invalid data source path")
 
 
-class AskRequest(BaseModel):
-    """LLM-powered Q&A request with grounded citations."""
-
-    question: str = Field(
-        ..., min_length=1, max_length=1000, description="Question to answer using KG context"
-    )
-    max_results: int | None = Field(5, ge=1, le=20, description="Max context nodes to retrieve")
-    tenant_id: str | None = Field(None, max_length=100, description="Tenant ID for multi-tenancy")
-    use_weighted_score: bool = Field(
-        True, description="Use recency/drift weighting for context (default: True)"
-    )
-
-    @field_validator("question")
-    @classmethod
-    def validate_question(cls, v):
-        clean_question = re.sub(r"\s+", " ", v.strip())
-        if not clean_question:
-            raise ValueError("Question cannot be empty")
-        return clean_question
-
-
 class HealthCheckResponse(BaseModel):
     status: str
     timestamp: str
@@ -241,8 +220,10 @@ class NodeCreate(BaseModel):
         description="Node class labels (e.g., ['Person', 'Employee'])",
     )
     props: dict[str, Any] = Field(..., description="Node properties (arbitrary JSON)")
-    payload_ref: str | None = Field(
-        None, max_length=500, description="External payload reference (URL, S3 key, etc.)"
+    payload_ref: None = Field(
+        default=None,
+        description="External payload references are unavailable; use inline node properties "
+        "or bounded multipart upload.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     refresh_policy: dict[str, Any] = Field(
@@ -279,16 +260,6 @@ class NodeCreate(BaseModel):
             if not isinstance(class_name, str) or len(class_name) > 100:
                 raise ValueError("Class names must be strings under 100 characters")
         return v[:10]  # Max 10 classes
-
-    @field_validator("payload_ref")
-    @classmethod
-    def validate_payload_ref(cls, v):
-        if v is None:
-            return v
-        # Basic validation for common payload ref formats
-        if len(v) > 500:
-            raise ValueError("payload_ref must be under 500 characters")
-        return v.strip()
 
     @field_validator("triggers")
     @classmethod

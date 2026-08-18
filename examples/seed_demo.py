@@ -155,7 +155,7 @@ def main():
     except Exception as e:
         print(f"⚠ Could not run admin refresh: {e}")
 
-    print("Done. Try /search or /ask with your queries.")
+    print("Done. Try authenticated /search with your queries.")
 
 
 if __name__ == "__main__":

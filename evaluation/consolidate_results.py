@@ -124,22 +124,6 @@ def generate_markdown_summary(results: dict[str, Any], timestamp: str) -> str:
                 ]
             )
 
-    # LLM Q&A
-    if "llm_qa" in results and results["llm_qa"]:
-        qa = results["llm_qa"]
-        md.extend(
-            [
-                "## 5. LLM Q&A Evaluation",
-                "",
-                f"- **Questions evaluated**: {qa.get('num_questions', 0)}",
-                f"- **Answer accuracy**: {qa.get('mean_accuracy', 0):.1f}%",
-                f"- **Citation precision**: {qa.get('mean_citation_precision', 0):.1f}%",
-                f"- **Citation recall**: {qa.get('mean_citation_recall', 0):.1f}%",
-                f"- **Latency p95**: {qa.get('latency_p95_seconds', 0):.2f}s",
-                "",
-            ]
-        )
-
     md.extend(
         [
             "---",
@@ -178,12 +162,11 @@ def main():
         "freshness": load_result(output_dir / "freshness_results.json"),
         "weighted_search": load_result(output_dir / "weighted_search_results.json"),
         "drift_cohort": load_result(output_dir / "drift_cohort_results.json"),
-        "llm_qa": load_result(output_dir / "llm_qa_results.json"),
     }
 
     # Count loaded results
     loaded = sum(1 for k, v in results.items() if v and k != "metadata")
-    print(f"✓ Loaded {loaded}/5 result files")
+    print(f"✓ Loaded {loaded}/4 result files")
 
     # Write consolidated JSON
     results_file = output_dir / "results.json"

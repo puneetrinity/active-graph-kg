@@ -76,7 +76,7 @@ Recommended
 Security
 - Dev: `JWT_SECRET_KEY=<dev-secret>` and `JWT_ALGORITHM=HS256`
 - Prod: `JWT_PUBLIC_KEY=<RS256 public>` (preferred) and disable HS256
-- If using /ask, set your LLM provider key (e.g., `GROQ_API_KEY`)
+- Configure extraction-worker provider keys only when extraction is enabled; generic API Q&A is unavailable
 
 Rate Limiting (optional)
 - `RATE_LIMIT_ENABLED=true`
@@ -182,7 +182,7 @@ WORKERS=2  # API server worker processes
 ```
 
 **Responsibilities:**
-- REST API endpoints (`/search`, `/ask`, `/upload`, `/nodes`, etc.)
+- REST API endpoints (`/search`, `/upload`, `/nodes`, etc.); Q&A compatibility routes return HTTP 410
 - Connector compatibility routes return HTTP 410 without work
 - Background scheduler runs refresh and purge only
 - Health checks and metrics

@@ -53,20 +53,20 @@ print()
 print("[Test 2] JWT Authentication")
 try:
     # Without JWT
-    r = requests.post(f"{API_URL}/ask", json={"question": "test"}, timeout=5)
+    r = requests.post(f"{API_URL}/search", json={"query": "test", "top_k": 1}, timeout=5)
     test(
-        "Ask endpoint rejects unauthenticated requests",
+        "Search endpoint rejects unauthenticated requests",
         r.status_code == 401,
         f"Status: {r.status_code}",
     )
 except requests.Timeout:
     test(
-        "Ask endpoint rejects unauthenticated requests",
+        "Search endpoint rejects unauthenticated requests",
         False,
-        "Timeout - endpoint may require auth check before LLM",
+        "Timeout while checking authentication",
     )
 except Exception as e:
-    test("Ask endpoint rejects unauthenticated requests", False, str(e))
+    test("Search endpoint rejects unauthenticated requests", False, str(e))
 
 try:
     # With JWT
