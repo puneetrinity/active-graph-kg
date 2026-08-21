@@ -239,6 +239,19 @@ def test_guard_is_green_and_mutations_restore_from_saved_bytes(tmp_path: Path) -
     start.write_bytes(saved)
     assert start.read_bytes() == saved
 
+    descriptor = copied / "railway.schema-release.json"
+    descriptor_saved = descriptor.read_bytes()
+    descriptor.write_text(
+        descriptor.read_text().replace(
+            '"restartPolicyType": "NEVER"',
+            '"restartPolicyType": "NEVER", "restartPolicyMaxRetries": 0',
+        )
+    )
+    findings = schema_control_guard.check(copied)
+    assert any("one-shot/no-healthcheck" in finding for finding in findings)
+    descriptor.write_bytes(descriptor_saved)
+    assert descriptor.read_bytes() == descriptor_saved
+
     retired = copied / "scripts/db_bootstrap.sh"
     retired.write_text('#!/bin/sh\npsql "$DATABASE_URL"\n')
     findings = schema_control_guard.check(copied)

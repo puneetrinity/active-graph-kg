@@ -6,7 +6,6 @@
   },
   "deploy": {
     "startCommand": "python /app/scripts/init_railway_db.py",
-    "restartPolicyType": "NEVER",
-    "restartPolicyMaxRetries": 0
+    "restartPolicyType": "NEVER"
   }
 }

@@ -130,7 +130,11 @@ def check(root: Path) -> list[str]:
     deploy = descriptor.get("deploy", {})
     if deploy.get("startCommand") != "python /app/scripts/init_railway_db.py":
         findings.append("manual release service command changed")
-    if deploy.get("restartPolicyType") != "NEVER" or "healthcheckPath" in deploy:
+    if (
+        deploy.get("restartPolicyType") != "NEVER"
+        or "healthcheckPath" in deploy
+        or "restartPolicyMaxRetries" in deploy
+    ):
         findings.append("manual release service is not a one-shot/no-healthcheck service")
 
     ignored = {
