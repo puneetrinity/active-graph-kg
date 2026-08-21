@@ -36,7 +36,6 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 
 | Script | Description | Makefile Target |
 |--------|-------------|-----------------|
-| `db_bootstrap.sh` | Initialize DB schema (extension, init.sql, RLS) | `make db-bootstrap` |
 | `db_index_metrics.sh` | Index sizes, table sizes | - |
 | `scheduler_sla.sh` | Scheduler inter-run intervals | - |
 | `dx_timing.sh` | Developer experience timing (startup, first request) | - |
@@ -63,7 +62,10 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 |--------|-------------|
 | `dev_up.sh` | Start development environment |
 | `start_api.sh` | Start API server with standard config |
-| `db_bootstrap.sh` | Database schema bootstrap |
+| `schema_ready.py` | Read-only startup admission for API/workers |
+| `init_railway_db.py` | Manual release-service migration runner |
+| `adopt_schema_control.py` | One-time metadata-only existing-target adoption |
+| `schema_control_guard.py` | CI caller/authority/migration immutability guard |
 
 ---
 
@@ -82,8 +84,7 @@ make metrics-probe
 make retrieval-quality && make publish-retrieval-uplift
 make proof-report            # writes evaluation/PROOF_POINTS_REPORT.md
 
-# DB bootstrap and indexes
-make db-bootstrap            # uses ACTIVEKG_DSN or DATABASE_URL
+# Index management (database schema changes use the manual release service)
 curl -X POST "$API/admin/indexes" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"action":"ensure","types":["ivfflat","hnsw"],"metric":"cosine"}'
 

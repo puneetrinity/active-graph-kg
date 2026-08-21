@@ -200,16 +200,17 @@ class EmbeddingWorker:
 
 def start_worker() -> None:
     """CLI entrypoint for embedding worker."""
-    from activekg.common.env import env_str
     from activekg.common.metrics import get_redis_client
+    from activekg.common.schema_control import SchemaControlError, assert_startup_schema_ready
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])
-    if not dsn:
-        logger.error("ACTIVEKG_DSN/DATABASE_URL not set")
+    try:
+        dsn = assert_startup_schema_ready()
+    except SchemaControlError as exc:
+        logger.error("Schema readiness refused", extra={"error_type": type(exc).__name__})
         sys.exit(1)
 
     redis_client = get_redis_client()

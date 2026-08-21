@@ -555,20 +555,21 @@ def start_database_monitor(
 
 def start_extraction_worker() -> None:
     """CLI entrypoint for extraction worker."""
-    from activekg.common.env import env_str
     from activekg.common.metrics import get_redis_client
+    from activekg.common.schema_control import SchemaControlError, assert_startup_schema_ready
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    assert_extraction_models_configured()
-
-    dsn = env_str(["ACTIVEKG_DSN", "DATABASE_URL"])
-    if not dsn:
-        logger.error("ACTIVEKG_DSN/DATABASE_URL not set")
+    try:
+        dsn = assert_startup_schema_ready()
+    except SchemaControlError as exc:
+        logger.error("Schema readiness refused", extra={"error_type": type(exc).__name__})
         sys.exit(1)
+
+    assert_extraction_models_configured()
 
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:

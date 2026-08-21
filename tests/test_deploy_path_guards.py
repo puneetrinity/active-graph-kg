@@ -6,9 +6,8 @@ schema to simulate a hazardous state, asserts the guard fires (or the safe
 path succeeds), and restores the state it touched.
 
 Covered: the PR#11→PR#12 checksum transition, unknown checksum drift,
-reserved runtime-role rejection, partial-legacy baseline rejection (the
-empirically found 006 case: duplicate-column error while the migration's
-indexes are missing), and re-verification of previously baselined rows.
+reserved runtime-role rejection, adopted-target middle-ledger-gap refusal,
+and re-verification of previously baselined rows.
 
 Gated on ``ACTIVEKG_RLS_TEST_OWNER_DSN`` (also used as the migrate DSN).
 """
@@ -21,12 +20,14 @@ from hashlib import sha256
 
 import psycopg
 import pytest
+from psycopg import sql
 
 OWNER_DSN = os.getenv("ACTIVEKG_RLS_TEST_OWNER_DSN")
 
 pytestmark = pytest.mark.skipif(not OWNER_DSN, reason="ACTIVEKG_RLS_TEST_OWNER_DSN not configured")
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts", "init_railway_db.py")
+TARGET_ID = "11111111-1111-4111-8111-111111111111"
 
 PR11_016_CHECKSUM = "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21"
 
@@ -34,6 +35,10 @@ PR11_016_CHECKSUM = "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae3
 def _run_init(**extra_env: str) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("ACTIVEKG_")}
     env["ACTIVEKG_MIGRATE_DSN"] = OWNER_DSN
+    env["ACTIVEKG_MIGRATION_APPLY"] = "1"
+    env["ACTIVEKG_SCHEMA_TARGET_ID"] = TARGET_ID
+    env["ACTIVEKG_SCHEMA_ENVIRONMENT"] = "development"
+    env["ACTIVEKG_SCHEMA_SOURCE_COMMIT"] = "0" * 40
     for key in ("ACTIVEKG_RUNTIME_ROLE", "ACTIVEKG_RUNTIME_PASSWORD"):
         if value := os.environ.get(key):
             env[key] = value
@@ -50,6 +55,71 @@ def _sql(query: str, params: tuple = ()) -> list[tuple]:
             if cur.description:
                 return cur.fetchall()
     return []
+
+
+def _assert_safe_refusal(result: subprocess.CompletedProcess) -> None:
+    """Assert the release failed without depending on secret-bearing detail.
+
+    The release CLI deliberately exposes only a safe error class at its outer
+    boundary. Scenario-specific assertions therefore belong in database state,
+    not in production-facing error text.
+    """
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "[Schema release] REFUSED (" in result.stderr
+    combined = result.stdout + result.stderr
+    assert OWNER_DSN not in combined
+    assert TARGET_ID not in combined
+
+
+def _assert_release_ok() -> subprocess.CompletedProcess:
+    result = _run_init()
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result
+
+
+def _attempt_state() -> list[tuple]:
+    return _sql(
+        "SELECT outcome, error_class, finished_at IS NOT NULL "
+        "FROM activekg_schema_control.release_attempts ORDER BY id"
+    )
+
+
+def _restore_runtime_posture() -> None:
+    """Restore grants after a fixture drops and recreates migration-022 objects.
+
+    The release runner deliberately provisions the runtime role only during a
+    fresh install. Replaying migration 022 in these legacy-upgrade scenarios
+    therefore recreates tables with the owner's default table grants and a new
+    sequence without runtime USAGE. Restore the exact fresh-install posture so
+    this shared CI database remains safe for later tests regardless of order.
+    """
+    role = os.environ.get("ACTIVEKG_RUNTIME_ROLE")
+    if not role:
+        return
+    role_ident = sql.Identifier(role)
+    with psycopg.connect(OWNER_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON "
+                "contact_suppression_tombstones, contact_person_suppressions, "
+                "contact_suppression_receipts TO {}"
+            ).format(role_ident)
+        )
+        cur.execute(
+            sql.SQL(
+                "REVOKE DELETE, TRUNCATE ON "
+                "contact_suppression_tombstones, contact_person_suppressions, "
+                "contact_suppression_receipts FROM {}"
+            ).format(role_ident)
+        )
+        cur.execute(
+            sql.SQL("REVOKE UPDATE ON contact_suppression_receipts FROM {}").format(role_ident)
+        )
+        cur.execute(
+            sql.SQL(
+                "GRANT USAGE, SELECT ON SEQUENCE contact_suppression_receipts_id_seq TO {}"
+            ).format(role_ident)
+        )
 
 
 def _contact_evidence_owner_sql(query: str, params: tuple = ()) -> None:
@@ -93,9 +163,16 @@ def test_unknown_checksum_drift_fails_boot():
             "UPDATE schema_migrations SET checksum = repeat('0', 64) "
             "WHERE filename = '016_candidate_rls.sql'"
         )
+        before_attempts = _attempt_state()
         result = _run_init()
-        assert result.returncode == 1
-        assert "changed since it was applied" in result.stdout
+        _assert_safe_refusal(result)
+        # The target/ledger proof rejects unknown drift before an attempt or
+        # migration body can be opened. The owner fixture remains responsible
+        # for restoring its deliberate corruption.
+        assert _attempt_state() == before_attempts
+        assert _sql(
+            "SELECT checksum FROM schema_migrations WHERE filename = '016_candidate_rls.sql'"
+        ) == [("0" * 64,)]
     finally:
         _sql(
             "UPDATE schema_migrations SET checksum = %s WHERE filename = '016_candidate_rls.sql'",
@@ -104,33 +181,40 @@ def test_unknown_checksum_drift_fails_boot():
 
 
 def test_reserved_runtime_role_rejected():
-    result = _run_init(ACTIVEKG_RUNTIME_ROLE="app_user", ACTIVEKG_RUNTIME_PASSWORD="irrelevant")
-    assert result.returncode == 1
-    assert "must be a dedicated role" in result.stdout
+    before_attempts = len(_attempt_state())
+    try:
+        result = _run_init(ACTIVEKG_RUNTIME_ROLE="app_user", ACTIVEKG_RUNTIME_PASSWORD="irrelevant")
+        _assert_safe_refusal(result)
+        attempts = _attempt_state()
+        assert len(attempts) == before_attempts + 1
+        assert attempts[-1][0] == "failure"
+        assert attempts[-1][1] == "SchemaControlError"
+        assert attempts[-1][2] is True
+    finally:
+        # A failed release is intentionally readiness-blocking until a later
+        # verified release succeeds. Leave the shared disposable CI target
+        # healthy for the following scenarios.
+        _assert_release_ok()
 
 
-def test_partial_legacy_baseline_rejected_then_verified():
-    """The empirically found 006 false positive: a duplicate-column error must
-    not baseline the migration while its indexes are missing."""
+def test_adopted_target_middle_ledger_gap_refuses_before_baseline():
+    """An adopted target must reject a missing middle row before migration SQL."""
+    original = _sql(
+        "SELECT checksum, baselined FROM schema_migrations "
+        "WHERE filename = '006_add_key_version.sql'"
+    )[0]
     try:
         _sql("DELETE FROM schema_migrations WHERE filename = '006_add_key_version.sql'")
         _sql("DROP INDEX IF EXISTS idx_connector_configs_key_version")
+        before_attempts = _attempt_state()
         result = _run_init()
-        assert result.returncode == 1, result.stdout + result.stderr
-        assert "cannot be baselined" in result.stdout
-        assert "idx_connector_configs_key_version" in result.stdout
-        # Ledger must NOT contain a false baseline.
+        _assert_safe_refusal(result)
+        # Adopted targets may advance only through a manifest-prefix tail.
+        # A missing middle ledger row is therefore rejected before the older
+        # baseline machinery can bless a partial object set.
+        assert _attempt_state() == before_attempts
         rows = _sql("SELECT 1 FROM schema_migrations WHERE filename = '006_add_key_version.sql'")
         assert rows == []
-
-        # Restore the missing object: baselining must now verify and succeed.
-        _sql(
-            "CREATE INDEX IF NOT EXISTS idx_connector_configs_key_version "
-            "ON connector_configs (key_version)"
-        )
-        result = _run_init()
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "baselined (all objects verified present)" in result.stdout
     finally:
         _sql(
             "CREATE INDEX IF NOT EXISTS idx_connector_configs_key_version "
@@ -138,7 +222,12 @@ def test_partial_legacy_baseline_rejected_then_verified():
         )
         rows = _sql("SELECT 1 FROM schema_migrations WHERE filename = '006_add_key_version.sql'")
         if not rows:
-            _run_init()
+            _sql(
+                "INSERT INTO schema_migrations (filename, checksum, baselined) "
+                "VALUES ('006_add_key_version.sql', %s, %s)",
+                original,
+            )
+        _assert_release_ok()
 
 
 def test_previously_baselined_rows_are_reverified():
@@ -166,6 +255,7 @@ def test_previously_baselined_rows_are_reverified():
             "WHERE filename = '005_connector_configs_table.sql'",
             (was_baselined,),
         )
+        _assert_release_ok()
 
 
 def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
@@ -306,6 +396,7 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
+        _restore_runtime_posture()
 
 
 def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
@@ -329,8 +420,10 @@ def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
         )
 
         result = _run_init()
-        assert result.returncode == 1, result.stdout + result.stderr
-        assert "legacy complaint tombstone(s) without a candidate identity" in result.stdout
+        _assert_safe_refusal(result)
+        assert (
+            "022_contact_suppression_person_and_audit.sql failed (RaiseException)" in result.stdout
+        )
         assert (
             _sql(
                 "SELECT 1 FROM schema_migrations "
@@ -350,6 +443,7 @@ def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
+        _restore_runtime_posture()
 
 
 def test_022_partial_if_not_exists_schema_is_not_recorded():
@@ -414,6 +508,7 @@ def test_022_baseline_rejects_replica_only_audit_trigger():
             "WHERE filename = '022_contact_suppression_person_and_audit.sql'",
             (was_baselined,),
         )
+        _assert_release_ok()
 
 
 def test_022_baseline_rejects_permissive_authority_constraint():
@@ -442,13 +537,14 @@ def test_022_baseline_rejects_permissive_authority_constraint():
             "DROP CONSTRAINT contact_suppression_receipt_authority_check; "
             "ALTER TABLE contact_suppression_receipts "
             "ADD CONSTRAINT contact_suppression_receipt_authority_check CHECK ("
-            "actor_type = 'service')"
+            "btrim(issuer) <> '' AND btrim(actor_id) <> '' AND actor_type = 'service')"
         )
         _sql(
             "UPDATE schema_migrations SET baselined = %s "
             "WHERE filename = '022_contact_suppression_person_and_audit.sql'",
             (was_baselined,),
         )
+        _assert_release_ok()
 
 
 def test_022_baseline_rejects_wrong_receipt_primary_key_columns():
@@ -484,6 +580,7 @@ def test_022_baseline_rejects_wrong_receipt_primary_key_columns():
             "WHERE filename = '022_contact_suppression_person_and_audit.sql'",
             (was_baselined,),
         )
+        _assert_release_ok()
 
 
 def test_022_baseline_rejects_noop_append_only_function():
@@ -517,3 +614,4 @@ def test_022_baseline_rejects_noop_append_only_function():
             "WHERE filename = '022_contact_suppression_person_and_audit.sql'",
             (was_baselined,),
         )
+        _assert_release_ok()

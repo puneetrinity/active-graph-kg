@@ -41,6 +41,10 @@ jobs:
         run: |
           ruff format --check .
 
+      - name: Enforce schema-control authority and caller census
+        run: |
+          python scripts/schema_control_guard.py
+
       - name: Run type checking
         run: |
           mypy activekg/ --ignore-missing-imports
@@ -81,6 +85,7 @@ jobs:
             tests/test_jwt_scopes.py \
             tests/test_contact_suppression_authority.py \
             tests/test_public_observability_boundary.py \
+            tests/test_schema_control.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -152,20 +157,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ACTIVEKG_CONTROL_PLANE_TOKEN: "ci-control-plane-token-for-deploy-path-verification"
+      ACTIVEKG_SCHEMA_TARGET_ID: "11111111-1111-4111-8111-111111111111"
+      ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+      ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
     services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: activekg
-          POSTGRES_PASSWORD: activekg
-          POSTGRES_DB: activekg
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
       redis:
         image: redis:7-alpine
         options: >-
@@ -190,9 +185,33 @@ jobs:
           pip install pytest pytest-timeout
           pip install -r requirements.txt
 
-      - name: Run Railway init script on a clean database (as deploys do)
+      - name: Start runner-local PostgreSQL 16 with pgvector
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16-pgvector
+            sudo systemctl restart postgresql
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS memory_schema_control_test WITH (FORCE);
+          DROP ROLE IF EXISTS activekg_app;
+          DROP ROLE IF EXISTS activekg_schema_control_test;
+          CREATE ROLE activekg_schema_control_test LOGIN SUPERUSER PASSWORD 'owner-test-only';
+          CREATE DATABASE memory_schema_control_test OWNER activekg_schema_control_test;
+          SQL
+          pg_isready -h 127.0.0.1 -p 5432 -d memory_schema_control_test -U activekg_schema_control_test
+
+      - name: Run the manual release path on a clean disposable database
         env:
-          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
           ACTIVEKG_RUNTIME_ROLE: activekg_app
           ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
@@ -200,7 +219,8 @@ jobs:
 
       - name: Re-run init script (idempotency + ledger check)
         env:
-          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
           ACTIVEKG_RUNTIME_ROLE: activekg_app
           ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
@@ -208,17 +228,17 @@ jobs:
 
       - name: Assert schema, RLS, ledger and runtime-role posture
         env:
-          PGPASSWORD: activekg
+          PGPASSWORD: owner-test-only
         run: |
           for table in candidates candidate_identifiers candidate_source_records candidate_contact_evidence; do
-            rls=$(psql -h localhost -U activekg -d activekg -tAc \
+            rls=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
               "SELECT relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '$table';")
             if [ "$rls" != "t" ]; then
               echo "FAIL: table $table missing or RLS disabled (got: '$rls')"
               exit 1
             fi
             if [ "$table" = "candidate_contact_evidence" ]; then
-              force_rls=$(psql -h localhost -U activekg -d activekg -tAc \
+              force_rls=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
                 "SELECT relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '$table';")
               if [ "$force_rls" != "t" ]; then
                 echo "FAIL: table $table does not force RLS (got: '$force_rls')"
@@ -227,14 +247,14 @@ jobs:
             fi
             echo "OK: $table exists with RLS enabled"
           done
-          ledger=$(psql -h localhost -U activekg -d activekg -tAc \
+          ledger=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
           if [ "$ledger" != "22|0" ]; then
             echo "FAIL: ledger should have exactly 22 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
           echo "OK: migration ledger has 22 applied, 0 baselined"
-          posture=$(psql -h localhost -U activekg -d activekg -tAc \
+          posture=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
             echo "FAIL: runtime role posture wrong (got: '$posture', want 't' = not superuser, no bypassrls)"
@@ -242,10 +262,17 @@ jobs:
           fi
           echo "OK: runtime role is NOSUPERUSER NOBYPASSRLS"
 
+      - name: Run disposable Memory schema-control matrix
+        env:
+          ACTIVEKG_SCHEMA_CONTROL_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_SCHEMA_CONTROL_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
+        run: |
+          pytest tests/test_schema_control_postgres.py -v --tb=short --timeout=240
+
       - name: Run RLS enforcement tests as the restricted runtime role
         env:
-          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
-          ACTIVEKG_RLS_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
+          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_RLS_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
         run: |
           pytest \
             tests/test_candidate_rls_enforcement.py \
@@ -255,7 +282,7 @@ jobs:
 
       - name: Start API under the restricted runtime DSN
         env:
-          ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
           JWT_ENABLED: "true"
           JWT_ALGORITHM: HS256
           JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
@@ -346,8 +373,9 @@ jobs:
 
       - name: Readiness must detect tampered policies and ledger
         env:
-          PGPASSWORD: activekg
-          ACTIVEKG_MIGRATE_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          PGPASSWORD: owner-test-only
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
         run: |
           check_readyz() {
             curl -s -o /dev/null -w '%{http_code}' \
@@ -357,59 +385,59 @@ jobs:
           }
           # The two global #12 tables are readiness dependencies even though
           # only tenant contact evidence itself is RLS-scoped.
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE public_candidate_market_memberships RENAME TO public_candidate_market_memberships_tampered;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after public table rename (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE public_candidate_market_memberships_tampered RENAME TO public_candidate_market_memberships;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after public table restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts ENABLE REPLICA TRIGGER contact_suppression_receipts_no_mutation;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with replica-only audit trigger (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts ENABLE TRIGGER contact_suppression_receipts_no_mutation;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after audit trigger restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER SEQUENCE contact_suppression_receipts_id_seq RENAME TO contact_suppression_receipts_id_seq_tampered;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after receipt sequence rename (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER SEQUENCE contact_suppression_receipts_id_seq_tampered RENAME TO contact_suppression_receipts_id_seq;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt sequence restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipts_provider_event_unique;
              ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipts_provider_event_unique UNIQUE (provider_event_id, issuer);"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with wrong receipt idempotency key (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipts_provider_event_unique;
              ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipts_provider_event_unique UNIQUE (issuer, provider_event_id);"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt idempotency restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipt_authority_check;
              ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipt_authority_check CHECK (true);"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with permissive suppression authority (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE contact_suppression_receipts DROP CONSTRAINT contact_suppression_receipt_authority_check;
              ALTER TABLE contact_suppression_receipts ADD CONSTRAINT contact_suppression_receipt_authority_check
              CHECK (btrim(issuer) <> '' AND btrim(actor_id) <> '' AND actor_type = 'service');"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after suppression authority restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "CREATE OR REPLACE FUNCTION contact_suppression_receipts_append_only()
              RETURNS trigger LANGUAGE plpgsql AS \$\$
              BEGIN RETURN OLD; END;
              \$\$;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with no-op append-only function (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "CREATE OR REPLACE FUNCTION contact_suppression_receipts_append_only()
              RETURNS trigger LANGUAGE plpgsql AS \$\$
              BEGIN
@@ -418,33 +446,33 @@ jobs:
              \$\$;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after append-only function restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "GRANT UPDATE ON contact_suppression_receipts TO activekg_app;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with mutable receipts (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "REVOKE UPDATE ON contact_suppression_receipts FROM activekg_app;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after receipt privilege restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "GRANT TRUNCATE ON contact_suppression_tombstones TO activekg_app;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with erasable tombstones (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "REVOKE TRUNCATE ON contact_suppression_tombstones FROM activekg_app;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after tombstone privilege restore (want 200)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE global_candidates RENAME COLUMN public_role_family TO public_role_family_tampered;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after public column rename (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "ALTER TABLE global_candidates RENAME COLUMN public_role_family_tampered TO public_role_family;"
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after public column restore (want 200)"; exit 1; }
           # A policy retaining the expected substrings but adding OR true is
           # still cross-tenant permissive and must fail readiness.
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "DROP POLICY tenant_isolation_candidates ON candidates;
              CREATE POLICY tenant_isolation_candidates ON candidates FOR ALL TO PUBLIC
              USING (
@@ -458,25 +486,35 @@ jobs:
              );"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after permissive policy tamper (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -f db/migrations/017_reserve_quarantine_tenant.sql
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -f db/migrations/017_reserve_quarantine_tenant.sql
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after policy definition restore (want 200)"; exit 1; }
           # Malformed policy: dropping the tenant policy must flip readiness.
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "DROP POLICY tenant_isolation_candidates ON candidates;"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code after policy drop (want 503)"; exit 1; }
-          psql -h localhost -U activekg -d activekg -f db/migrations/017_reserve_quarantine_tenant.sql
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -f db/migrations/017_reserve_quarantine_tenant.sql
           code=$(check_readyz)
           [ "$code" = "200" ] || { echo "FAIL: readyz=$code after policy restore (want 200)"; exit 1; }
           # NULL ledger checksum must flip readiness.
-          psql -h localhost -U activekg -d activekg -c \
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
             "UPDATE schema_migrations SET checksum = NULL WHERE filename = '018_tenant_nonblank.sql';"
           code=$(check_readyz)
           [ "$code" = "503" ] || { echo "FAIL: readyz=$code with NULL checksum (want 503)"; exit 1; }
-          python scripts/init_railway_db.py  # backfills the NULL
+          if python scripts/init_railway_db.py; then
+            echo "FAIL: release runner accepted a corrupt migration ledger"
+            exit 1
+          fi
+          # This is an intentional CI-tamper repair by the disposable owner,
+          # not a release behavior: production releases must never bless a
+          # missing/unknown checksum.
+          psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -c \
+            "UPDATE schema_migrations
+             SET checksum = '46c9da96191a87c3143f73516dd7dcb2f2499dfba9afa2ddce55673842d2db0c'
+             WHERE filename = '018_tenant_nonblank.sql';"
           code=$(check_readyz)
-          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after checksum backfill (want 200)"; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: readyz=$code after checksum repair (want 200)"; exit 1; }
           echo "OK: readiness detects tampered public schema, policies and ledger"
         # the init re-run above needs the migrate DSN
         # (guards tests below run it the same way)
@@ -488,7 +526,7 @@ jobs:
 
       - name: Run deploy-path guard regression tests
         env:
-          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_RLS_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
           ACTIVEKG_RUNTIME_ROLE: activekg_app
           ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
@@ -499,7 +537,7 @@ jobs:
       # dedicated enforcement suite running as the restricted role.
       - name: Run candidate identity tests against the migrated schema
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
           JWT_ENABLED: "false"
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
