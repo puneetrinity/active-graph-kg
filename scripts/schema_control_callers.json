@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "authoring_base": "9ee570a35351fc12ec8ac9f1047b07552d57836d",
+  "baseline_assets": {
+    "db/init.sql": "214a1172e877eb80b3589c1b29481a6d91b69ddc65c2f9674ec20556bdf2ee10",
+    "enable_rls_policies.sql": "9d85ac1404ed9da146f2eff16ee71871b8732290c8b4cfc84a215c5442873c64"
+  },
+  "migration_manifest": [
+    "001_add_embedding_history_index.sql",
+    "004_add_external_id_index.sql",
+    "add_text_search.sql",
+    "005_connector_configs_table.sql",
+    "006_add_key_version.sql",
+    "007_add_provider_check.sql",
+    "008_connector_cursors_table.sql",
+    "009_embedding_queue_status.sql",
+    "010_update_text_search_vector.sql",
+    "011_unique_tenant_external_id.sql",
+    "012_global_memory.sql",
+    "012_candidate_identity.sql",
+    "013_vantahire_provenance.sql",
+    "014_signal_job_tags.sql",
+    "015_candidate_profile.sql",
+    "016_candidate_rls.sql",
+    "017_reserve_quarantine_tenant.sql",
+    "018_tenant_nonblank.sql",
+    "019_global_reconciliation.sql",
+    "020_embed_version.sql",
+    "021_public_memory_contact_evidence.sql",
+    "022_contact_suppression_person_and_audit.sql"
+  ],
+  "migration_files": {
+    "001_add_embedding_history_index.sql": "f109a2eb8da22cbcd1efdbadb5d9fa3a166784740bfe48f7e5c85805fc1556fa",
+    "004_add_external_id_index.sql": "49a2fb38c7bcf1df96923abbfb3b6d913a6824c8b467e6769805371125e8fe20",
+    "005_connector_configs_table.sql": "42f4a2a2f134dd455cafff14ae906ecb633d8ff594650b32ada7c3afa31afb51",
+    "006_add_key_version.sql": "163c9b9442ec1659449ceb8848bb1b56b135c1050f2ba99e88ab8c92404e6092",
+    "007_add_provider_check.sql": "9ded04ff2944d3f7966399917a2f44a29df5966ff5376ce23f688de3cf21e15d",
+    "008_connector_cursors_table.sql": "099bf0b13bac290b4f5b64f1769d10c147d3b0f622c06cdc134696bd12da4039",
+    "009_embedding_queue_status.sql": "fbe9c6e7bba390b03827bf18edf26507011d955c6c49bc857335fe146dfea3fe",
+    "010_update_text_search_vector.sql": "26d56f1d806e910755617728db3129c9998ff19d6e1db2786b6a1e8d3773d511",
+    "011_unique_tenant_external_id.sql": "b03014f3be91f49514fe32096780b6daa9c7782bb626e1fddad5a8d495b09689",
+    "012_candidate_identity.sql": "fc9e708d7da68aee3ec9746c1eb3ff20d0228650ccb2d1ba1c71ed24ee089557",
+    "012_global_memory.sql": "f8ef4063e1dd69fe38ea9e0dcf6e79edaf70fc130fa78254c92e8ca66b495262",
+    "013_vantahire_provenance.sql": "df7553a55b26d267f1d8e2d151a9009adefb6251a34cb54510a9da0df3f27c17",
+    "014_signal_job_tags.sql": "c575c4c64a3229156f20db744b6e0bc472343646142e447307056b50ef40403d",
+    "015_candidate_profile.sql": "56553e49c7c28c7061c4ff5af9d276b9c43ca2bf7aeca0c0d546a072a5f160a0",
+    "016_candidate_rls.sql": "2294ef74ce9436782dc5f3c1484939bb53edec69e963233f5ee705a3849d6a63",
+    "017_reserve_quarantine_tenant.sql": "6a8602cc932c495a03cc35a5777cf2dfe61cb08c37ce72f2355fb18116932761",
+    "018_tenant_nonblank.sql": "46c9da96191a87c3143f73516dd7dcb2f2499dfba9afa2ddce55673842d2db0c",
+    "019_global_reconciliation.sql": "913da9f75523e8b81b1271c41232ec985b5fb0699a3ce446063bde481c5830ef",
+    "020_embed_version.sql": "5558ed8a0e7b41afbb0f71f2435e0beb4de3000ffc91053183ed155d868eb154",
+    "021_public_memory_contact_evidence.sql": "8ce5999f50ff36468ff75d2c95be972778a82c0b7d3c586f4258355f0636b161",
+    "022_contact_suppression_person_and_audit.sql": "a7abfdeef3c2b6a6e36743b19ab5aae10d0fb02f5b94f237699e174d0be8d0bf",
+    "add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
+    "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad"
+  },
+  "checksum_transitions": {
+    "016_candidate_rls.sql": {
+      "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21": "2294ef74ce9436782dc5f3c1484939bb53edec69e963233f5ee705a3849d6a63"
+    }
+  },
+  "runtime_callers": {
+    "api": ["Dockerfile", "Procfile", "railway.json", "scripts/start_railway.sh"],
+    "embedding_worker": ["activekg/embedding/worker.py", "railway.worker.json"],
+    "extraction_worker": ["activekg/extraction/worker.py"],
+    "release": ["railway.schema-release.json", "scripts/init_railway_db.py"],
+    "adoption": ["scripts/adopt_schema_control.py"]
+  },
+  "external_callers": {
+    "extraction_worker_dashboard_start_command": "python -m activekg.extraction.worker"
+  }
+}

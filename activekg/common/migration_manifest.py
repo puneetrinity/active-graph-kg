@@ -6,6 +6,19 @@ is complete before reporting ready). Keep this list append-only and in apply
 order. Must stay import-light: no activekg imports, no third-party deps.
 """
 
+SCHEMA_PRODUCT = "memory"
+SCHEMA_MANIFEST_VERSION = 1
+
+# Historical, explicitly reviewed checksum transition. This is metadata about
+# the immutable ledger contract, not permission to edit an applied migration.
+CHECKSUM_TRANSITIONS: dict[str, dict[str, str]] = {
+    "016_candidate_rls.sql": {
+        "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21": (
+            "2294ef74ce9436782dc5f3c1484939bb53edec69e963233f5ee705a3849d6a63"
+        ),
+    },
+}
+
 MIGRATIONS: tuple[str, ...] = (
     "001_add_embedding_history_index.sql",
     "004_add_external_id_index.sql",
@@ -30,3 +43,6 @@ MIGRATIONS: tuple[str, ...] = (
     "021_public_memory_contact_evidence.sql",
     "022_contact_suppression_person_and_audit.sql",
 )
+
+if len(MIGRATIONS) != 22 or len(set(MIGRATIONS)) != len(MIGRATIONS):
+    raise RuntimeError("Memory migration manifest must contain 22 unique ordered entries")

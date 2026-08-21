@@ -45,15 +45,13 @@ Set these variables in Railway → Variables for the API service. Railway checks
 public, constant-cost `/health`. Operators check migration/RLS/runtime-role/JWT
 dependency readiness separately through token-protected `/readyz`; dependency
 failure must not create a Railway restart loop. The start script removes
-`DATABASE_URL` from the API environment when `ACTIVEKG_DSN` is set.
+`DATABASE_URL` and all migration/adoption variables before Uvicorn.
 
-Required
-- `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (the Railway Postgres plugin
-  credential); used only by the boot-time migration script, then unset
-- `ACTIVEKG_RUNTIME_ROLE=activekg_app` and `ACTIVEKG_RUNTIME_PASSWORD=<secret>`
-  — the migration script provisions/hardens this restricted role on boot
+Required on API and workers
 - `ACTIVEKG_DSN` — runtime DSN as the restricted role, e.g.
   `postgresql://activekg_app:SECRET@HOST:5432/DBNAME`
+- `ACTIVEKG_SCHEMA_TARGET_ID` — opaque UUID for this adopted database
+- `ACTIVEKG_SCHEMA_ENVIRONMENT=production`
 - `JWT_ENABLED=true` plus key configuration (see `.env.example`)
 - `ACTIVEKG_CONTROL_PLANE_TOKEN` — API-only high-entropy secret used by
   `/readyz`, `/metrics` and `/prometheus`; set a different value on the extraction worker
@@ -101,15 +99,16 @@ python -m activekg.embedding.worker
 
 Note: the worker has no HTTP server, so healthcheck should be disabled (handled by `railway.worker.json`).
 
-### Initialize the Database
-No manual initialization is needed — and none should be performed. The API
-service boots via `scripts/start_railway.sh`, which runs
-`scripts/init_railway_db.py` (extensions, `db/init.sql`, RLS policies, all
-ledger-tracked migrations, restricted runtime-role provisioning) using
-`ACTIVEKG_MIGRATE_DSN`, then removes privileged credentials from the
-environment before starting Uvicorn. Manual psql initialization or starting
-Uvicorn directly bypasses the ledger, role provisioning and credential
-scoping; authenticated `/readyz` will report such a deployment not-ready.
+### Adopt and release the database
+
+Create one private, manual-only service from the same repository using
+`railway.schema-release.json`; keep auto-deploy off, restart policy `NEVER`, no
+domain/replicas/healthcheck. It alone receives `ACTIVEKG_MIGRATE_DSN`, the same
+target ID/environment and the exact source commit. Existing databases use the
+one-time `scripts/adopt_schema_control.py` gate. Thereafter an approved release
+temporarily receives `ACTIVEKG_MIGRATION_APPLY=1`, runs
+`scripts/init_railway_db.py`, and has the flag removed immediately. Runtime
+starts only call read-only schema readiness.
 
 Build ANN indexes (non-blocking, concurrent):
 ```bash
@@ -137,14 +136,9 @@ Create a new Railway service with Docker image:
 - Set env: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
 - Use a persistent volume
 
-Configure the API service's DSNs to point to the DB service hostname inside
-Railway using the split-DSN model: `ACTIVEKG_MIGRATE_DSN` (the owner
-credential, used only by the boot-time migration script) plus
-`ACTIVEKG_RUNTIME_ROLE`/`ACTIVEKG_RUNTIME_PASSWORD` and `ACTIVEKG_DSN` (the
-restricted runtime role).
-
-Schema, RLS and migrations run automatically at boot; build ANN indexes via
-`/admin/indexes` as above.
+Configure each runtime with only the restricted `ACTIVEKG_DSN`, target ID and
+production environment. Keep the owner DSN exclusively on the manual release
+service. Build ANN indexes via `/admin/indexes` as above.
 
 ---
 
@@ -157,16 +151,14 @@ create a connector-worker service or configure storage-provider credentials.
 
 **Config:** `railway.json`
 **Start Command:** leave unset — the Dockerfile runs `scripts/start_railway.sh`
-(migrations + runtime-role provisioning, then Uvicorn). Never start Uvicorn
-directly in production.
+(read-only schema readiness, then Uvicorn). Never bypass readiness in production.
 
 **Environment Variables:**
 ```bash
-# Core (split-DSN model — see "Configure Environment Variables" above)
-ACTIVEKG_MIGRATE_DSN=postgresql://owner:...   # privileged; migrations only
-ACTIVEKG_RUNTIME_ROLE=activekg_app
-ACTIVEKG_RUNTIME_PASSWORD=...
+# Core runtime identity (see "Configure Environment Variables" above)
 ACTIVEKG_DSN=postgresql://activekg_app:...    # restricted runtime role
+ACTIVEKG_SCHEMA_TARGET_ID=00000000-0000-4000-8000-000000000000
+ACTIVEKG_SCHEMA_ENVIRONMENT=production
 EMBEDDING_BACKEND=sentence-transformers
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 
@@ -253,7 +245,7 @@ connector credentials during import or startup.
 ### Basic Deployment (API Only)
 - [ ] API service deployed with `railway.json`
 - [ ] PostgreSQL with pgvector provisioned
-- [ ] Split-DSN env vars set (`ACTIVEKG_MIGRATE_DSN`, runtime role vars, `ACTIVEKG_DSN`) — schema/migrations run automatically at boot
+- [ ] Runtime DSN + target ID/environment set; manual release service is private and auto-deploy-disabled
 - [ ] JWT configured and tokens generated
 - [ ] ANN indexes created via `/admin/indexes`
 - [ ] Public liveness passes (`/health` returns the minimal `alive` response)

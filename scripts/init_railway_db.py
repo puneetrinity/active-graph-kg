@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Initialize/migrate the database on the deploy path.
+"""Run one explicitly authorized Memory schema release.
 
-Runs before the API starts (scripts/start_railway.sh). Responsibilities:
+This is a manual release-service entrypoint, never an API/worker startup hook.
+Responsibilities:
 
 * base schema (db/init.sql) + extensions on a fresh database
 * RLS policies (enable_rls_policies.sql — contains no login roles)
@@ -9,11 +10,10 @@ Runs before the API starts (scripts/start_railway.sh). Responsibilities:
   ``schema_migrations`` ledger under a Postgres advisory lock
 * optional provisioning of the restricted runtime role from env vars
 
-DSNs:
-    ACTIVEKG_MIGRATE_DSN   privileged/owner role used ONLY here (preferred)
-    ACTIVEKG_DSN           runtime DSN; used as a fallback with a warning so
-                           single-DSN dev environments keep working
-    DATABASE_URL           last-resort fallback (Railway convention)
+Production requires ACTIVEKG_MIGRATE_DSN, ACTIVEKG_MIGRATION_APPLY=1, an
+existing exact target identity, environment and source commit. There is no DSN
+fallback and no drift override. Fresh initialization is available only for a
+positively proved local disposable target.
 
 Runtime role provisioning (optional, all-or-nothing):
     ACTIVEKG_RUNTIME_ROLE      role name to create/harden (NOSUPERUSER,
@@ -35,12 +35,35 @@ import re
 import sys
 import time
 
-import psycopg
-from psycopg import sql
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import psycopg  # noqa: E402
+from psycopg import sql  # noqa: E402
+
+from activekg.common.migration_manifest import CHECKSUM_TRANSITIONS  # noqa: E402
+from activekg.common.schema_control import (  # noqa: E402
+    ADVISORY_LOCK_KEY,
+    CONTROL_SCHEMA,
+    RUNTIME_ROLE_DEFAULT,
+    SchemaControlError,
+    assert_identity,
+    assert_ledger,
+    create_control_schema,
+    finish_attempt,
+    grant_control_read,
+    load_migration_records,
+    manifest_digest,
+    read_ledger,
+    resolve_control_environment,
+    safe_error_class,
+    safe_target_fingerprint,
+    start_attempt,
+)
 
 MAX_RETRIES = 10
 RETRY_DELAY = 3  # seconds
-ADVISORY_LOCK_KEY = 0x41435447  # 'ACTG'
 
 # SQLSTATEs that mean "object already exists" — safe to baseline on a database
 # migrated before the ledger existed. Data errors (23xxx) are deliberately
@@ -51,18 +74,6 @@ DUPLICATE_OBJECT_SQLSTATES = {
     "42710",  # duplicate_object
     "42723",  # duplicate_function
     "42P06",  # duplicate_schema
-}
-
-# Migrations that were edited before the immutability rule took effect.
-# Maps filename -> {old recorded checksum: new expected checksum}; a mismatch
-# matching one of these pairs is upgraded in place instead of failing boot.
-CHECKSUM_TRANSITIONS: dict[str, dict[str, str]] = {
-    "016_candidate_rls.sql": {
-        # PR #11 preflight -> PR #12 effective-tenant preflight rewrite
-        "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21": (
-            "2294ef74ce9436782dc5f3c1484939bb53edec69e963233f5ee705a3849d6a63"
-        ),
-    },
 }
 
 # Baseline verifiers: before a migration may be recorded as baselined off a
@@ -219,6 +230,17 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
         ("constraint", "candidates_tenant_nonblank"),
         ("constraint", "candidate_identifiers_tenant_nonblank"),
         ("constraint", "candidate_source_records_tenant_nonblank"),
+    ],
+    "019_global_reconciliation.sql": [
+        ("column", "candidates", "global_candidate_id"),
+        ("index", "idx_candidates_global_id"),
+        ("table", "candidate_merge_queue"),
+        ("index", "idx_cmq_open_pair"),
+        ("index", "idx_cmq_status"),
+    ],
+    "020_embed_version.sql": [
+        ("column", "global_candidates", "embed_version"),
+        ("index", "idx_global_candidates_embed_version"),
     ],
     "021_public_memory_contact_evidence.sql": [
         ("column", "global_candidates", "public_profile"),
@@ -766,10 +788,10 @@ def _connect_with_retry(dsn: str) -> psycopg.Connection:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return psycopg.connect(dsn, autocommit=True)
-        except (psycopg.OperationalError, psycopg.errors.ConnectionTimeout) as e:
+        except (psycopg.OperationalError, psycopg.errors.ConnectionTimeout):
             if attempt == MAX_RETRIES:
                 raise
-            print(f"  Connection attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            print(f"  Connection attempt {attempt}/{MAX_RETRIES} failed")
             print(f"  Retrying in {RETRY_DELAY}s...")
             time.sleep(RETRY_DELAY)
     raise RuntimeError("unreachable")
@@ -910,7 +932,10 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
                     )
                     ledger_skipped += 1
                     continue
-                if os.getenv("ACTIVEKG_ALLOW_MIGRATION_DRIFT", "false").lower() == "true":
+                if (
+                    os.getenv("ACTIVEKG_SCHEMA_ENVIRONMENT") != "production"
+                    and os.getenv("ACTIVEKG_ALLOW_MIGRATION_DRIFT", "false").lower() == "true"
+                ):
                     print(
                         f"WARNING: {migration_file} changed since it was applied "
                         f"(recorded {recorded[:12]}, on disk {checksum[:12]}); "
@@ -921,7 +946,7 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
                         f"ERROR: {migration_file} changed since it was applied "
                         f"(recorded {recorded[:12]}, on disk {checksum[:12]}). "
                         "Applied migrations are immutable; add a new migration instead, "
-                        "or set ACTIVEKG_ALLOW_MIGRATION_DRIFT=true to override."
+                        "Production drift cannot be overridden."
                     )
                     sys.exit(1)
             ledger_skipped += 1
@@ -950,7 +975,7 @@ def _apply_migrations(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
                 )
                 baselined += 1
                 continue
-            print(f"ERROR: migration {migration_file} failed: {e}")
+            print(f"ERROR: migration {migration_file} failed ({safe_error_class(e)})")
             sys.exit(1)
 
         # IF NOT EXISTS can make a partially pre-existing table look like a
@@ -1094,44 +1119,153 @@ def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
         )
 
 
+def _assert_disposable_fresh_target(cur: psycopg.Cursor, environment: str) -> None:
+    if environment == "production":
+        raise SchemaControlError("fresh initialization is forbidden in production")
+    cur.execute(
+        """
+        SELECT current_database(), current_user, host(inet_server_addr()),
+               (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+                  AND n.nspname NOT LIKE 'pg_toast%%' AND c.relkind IN ('r','p','v','m','S','f')),
+               to_regnamespace(%s)
+        """,
+        (CONTROL_SCHEMA,),
+    )
+    database_name, role_name, server_host, relation_count, control_schema = cur.fetchone()
+    if (
+        not str(database_name).endswith("_test")
+        or not str(role_name).endswith("_test")
+        or server_host not in {None, "127.0.0.1", "::1"}
+        or int(relation_count) != 0
+        or control_schema is not None
+    ):
+        raise SchemaControlError(
+            "fresh initialization requires an empty local *_test database and *_test role"
+        )
+
+
+def _assert_full_baseline(cur: psycopg.Cursor, migrations: tuple[str, ...]) -> None:
+    for filename in migrations:
+        ok, detail = _verify_baseline(cur, filename)
+        if not ok:
+            raise SchemaControlError(f"migration postcondition failed for {filename}: {detail}")
+
+
+def _assert_runtime_role_catalog(cur: psycopg.Cursor, role: str) -> None:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute(
+        """
+        SELECT r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolbypassrls,
+               has_schema_privilege(%s, 'public', 'USAGE'),
+               has_schema_privilege(%s, 'public', 'CREATE'),
+               has_table_privilege(%s, 'public.schema_migrations', 'SELECT'),
+               (has_table_privilege(%s, 'public.schema_migrations', 'INSERT') OR
+                has_table_privilege(%s, 'public.schema_migrations', 'UPDATE') OR
+                has_table_privilege(%s, 'public.schema_migrations', 'DELETE') OR
+                has_table_privilege(%s, 'public.schema_migrations', 'TRUNCATE')),
+               EXISTS (
+                 SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = 'public' AND pg_get_userbyid(c.relowner) = %s
+                   AND c.relkind IN ('r','p','v','m','S','f')
+               )
+        FROM pg_roles r WHERE r.rolname = %s
+        """,
+        (role, role, role, role, role, role, role, role, role),
+    )
+    row = cur.fetchone()
+    if row is None or (
+        not row[0]
+        or any(bool(value) for value in row[1:5])
+        or not row[5]
+        or row[6]
+        or not row[7]
+        or row[8]
+        or row[9]
+    ):
+        raise SchemaControlError("restricted Memory runtime role posture is invalid")
+
+
+def _prepare_target(cur: psycopg.Cursor, target_id: str, environment: str, fresh: bool) -> None:
+    if fresh:
+        _assert_disposable_fresh_target(cur, environment)
+        with cur.connection.transaction():
+            create_control_schema(cur, target_id, environment)
+        return
+    assert_identity(cur, target_id, environment)
+
+
 def main():
-    migrate_dsn = os.environ.get("ACTIVEKG_MIGRATE_DSN")
-    if not migrate_dsn:
-        migrate_dsn = os.environ.get("ACTIVEKG_DSN") or os.environ.get("DATABASE_URL")
-        if migrate_dsn:
-            print(
-                "WARNING: ACTIVEKG_MIGRATE_DSN not set — falling back to the runtime DSN. "
-                "Migrations should run as a separate privileged role; the runtime role "
-                "must stay non-owner so RLS applies to it."
-            )
-    if not migrate_dsn:
-        print("ERROR: ACTIVEKG_MIGRATE_DSN (or ACTIVEKG_DSN/DATABASE_URL) not set")
-        sys.exit(1)
-
-    migrations = _load_manifest()
-    print("Connecting to database...")
-
+    attempt_id: int | None = None
+    conn: psycopg.Connection | None = None
     try:
-        with _connect_with_retry(migrate_dsn) as conn:
-            with conn.cursor() as cur:
-                # One migrator at a time; concurrent replicas wait here.
-                cur.execute("SELECT pg_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
-                try:
+        control = resolve_control_environment()
+        if os.getenv("ACTIVEKG_MIGRATION_APPLY") != "1":
+            raise SchemaControlError("ACTIVEKG_MIGRATION_APPLY=1 is required")
+        if control.environment == "production" and os.getenv("ACTIVEKG_ALLOW_MIGRATION_DRIFT"):
+            raise SchemaControlError("ACTIVEKG_ALLOW_MIGRATION_DRIFT is forbidden in production")
+        fresh = os.getenv("ACTIVEKG_SCHEMA_FRESH_INIT") == "1"
+
+        print("Connecting to the fingerprinted Memory target...")
+        conn = _connect_with_retry(control.dsn)
+        with conn.cursor() as cur:
+            # Target proof happens before manifest or migration-file reads.
+            _prepare_target(cur, control.target_id, control.environment, fresh)
+
+            migrations = _load_manifest()
+            records = load_migration_records()
+            if tuple(record.filename for record in records) != migrations:
+                raise SchemaControlError("migration manifest/record order mismatch")
+            digest = manifest_digest(records)
+
+            cur.execute("SELECT pg_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
+            try:
+                assert_identity(cur, control.target_id, control.environment)
+                if not fresh:
+                    assert_ledger(read_ledger(cur), records, allow_prefix=True)
+                attempt_id = start_attempt(cur, "migration", control.source_commit, digest)
+
+                # Existing/adopted targets advance only through the append-only
+                # migration manifest. Baseline and RLS assets are fresh-install
+                # inputs and must never be replayed in production.
+                if fresh:
                     _ensure_extensions_and_schema(cur)
-                    _apply_migrations(cur, migrations)
+                _apply_migrations(cur, migrations)
+                if fresh:
                     _provision_runtime_role(cur)
                     _remediate_legacy_app_user(cur)
-                finally:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
-        print("\n✅ Database initialization complete!")
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"ERROR: Database initialization failed: {e}")
-        import traceback
+                    grant_control_read(
+                        cur, os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
+                    )
+                assert_ledger(read_ledger(cur), records, allow_prefix=False)
+                _assert_full_baseline(cur, migrations)
+                _assert_runtime_role_catalog(
+                    cur, os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
+                )
+                finish_attempt(cur, attempt_id, "success")
+            except BaseException as exc:
+                if attempt_id is not None:
+                    try:
+                        finish_attempt(cur, attempt_id, "failure", safe_error_class(exc))
+                    except Exception:
+                        pass
+                raise
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
 
-        traceback.print_exc()
-        sys.exit(1)
+        print(
+            "[Schema release] OK "
+            f"(target={safe_target_fingerprint(control.target_id)}; migrations={len(records)})"
+        )
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        print(f"[Schema release] REFUSED ({safe_error_class(exc)})", file=sys.stderr)
+        raise SystemExit(1) from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":

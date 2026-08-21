@@ -252,8 +252,7 @@ make metrics-probe
 make retrieval-quality && make publish-retrieval-uplift
 make proof-report            # writes evaluation/PROOF_POINTS_REPORT.md
 
-# DB bootstrap and indexes
-make db-bootstrap            # uses ACTIVEKG_DSN or DATABASE_URL
+# Index management (schema releases use the manual release service below)
 curl -X POST "$API/admin/indexes" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"action":"ensure","types":["ivfflat","hnsw"],"metric":"cosine"}'
 
@@ -261,23 +260,15 @@ curl -X POST "$API/admin/indexes" -H "Authorization: Bearer $TOKEN" \
 make open-grafana            # opens http://localhost:3000/d/activekg-ops
 ```
 
-## Railway DB Initialization
+## Railway schema releases
 
-Railway deployments initialize the database **automatically on every boot**:
-the Dockerfile runs `scripts/start_railway.sh`, which executes
-`scripts/init_railway_db.py` (extensions + schema + ledger-tracked migrations +
-restricted runtime-role provisioning) before starting Uvicorn, then removes the
-privileged credentials from the environment. Do not initialize manually and do
-not start Uvicorn directly in production — that bypasses migrations, role
-provisioning and credential scoping, and `/readyz` will refuse readiness.
-
-For local/one-off use the script is idempotent and can be run by hand with
-`ACTIVEKG_MIGRATE_DSN` set to a privileged DSN:
-
-```bash
-ACTIVEKG_MIGRATE_DSN=postgresql://owner:pw@localhost:5432/activekg \
-python3 scripts/init_railway_db.py
-```
+Ordinary API and worker starts are read-only: each proves the adopted target,
+the exact 22-file migration ledger, release health, RLS and restricted-role
+posture before serving or consuming work. Schema changes run only through the
+manual, auto-deploy-disabled service configured with
+`railway.schema-release.json`. That service alone receives the privileged DSN
+and a one-run `ACTIVEKG_MIGRATION_APPLY=1` flag. Do not run the release command
+from a runtime service or start a production runtime without schema readiness.
 
 ### Demo Run (Quick)
 
@@ -288,10 +279,9 @@ make demo-run && make open-grafana
 ```
 
 Notes:
-- Production uses the split-DSN model: `ACTIVEKG_MIGRATE_DSN` (owner, migrations
-  only) + `ACTIVEKG_DSN` (restricted runtime role). `DATABASE_URL` is a
-  development-only fallback and is removed from the API environment at startup
-  when `ACTIVEKG_DSN` is set.
+- Production runtimes carry only `ACTIVEKG_DSN` (restricted role),
+  `ACTIVEKG_SCHEMA_TARGET_ID` and `ACTIVEKG_SCHEMA_ENVIRONMENT=production`.
+  The manual release service alone carries `ACTIVEKG_MIGRATE_DSN`.
 - Run exactly one API instance with `RUN_SCHEDULER=true`.
 - `make open-grafana` opens `GRAFANA_URL` (defaults to `http://localhost:3000/d/activekg-ops`) using your OS opener.
 
@@ -605,7 +595,8 @@ active-graph-kg/
 │   ├── live_smoke.sh                  # Quick validation
 │   ├── retrieval_quality.sh           # Triple retrieval test
 │   ├── proof_points_report.sh         # Generate proof report
-│   └── db_bootstrap.sh                # DB schema setup
+│   ├── schema_ready.py                 # read-only startup admission
+│   └── init_railway_db.py              # manual release-service entrypoint
 ├── tests/
 │   ├── test_phase1_complete.py        # Phase 1 MVP tests
 │   ├── test_phase1_plus.py            # Phase 1+ improvement tests
@@ -633,14 +624,11 @@ After deploy, set variables in Railway → Variables. Railway uses public `/heal
 for process liveness. Operators check the dependency boundary separately through
 authenticated `/readyz`; a non-ready dependency does not create a restart loop.
 
-Required (split-DSN model):
-- `ACTIVEKG_MIGRATE_DSN` — privileged/owner DSN (e.g. the Railway Postgres
-  plugin credential). Used only by the startup migration script and removed
-  from the environment before the API starts.
-- `ACTIVEKG_RUNTIME_ROLE=activekg_app` + `ACTIVEKG_RUNTIME_PASSWORD=<secret>` —
-  the migration script creates/hardens this restricted role on boot.
-- `ACTIVEKG_DSN` — the runtime DSN using that restricted role, e.g.
+Required on API and workers:
+- `ACTIVEKG_DSN` — runtime DSN using the restricted role, e.g.
   `postgresql://activekg_app:<secret>@<host>:5432/<db>`.
+- `ACTIVEKG_SCHEMA_TARGET_ID` — opaque UUID for the adopted Memory database.
+- `ACTIVEKG_SCHEMA_ENVIRONMENT=production`.
 - `JWT_ENABLED=true` + key config (see `.env.example`).
 - `ACTIVEKG_CONTROL_PLANE_TOKEN` — a different high-entropy secret on the API and
   extraction-worker services; never place it in a URL or log.
@@ -649,10 +637,9 @@ Required (split-DSN model):
 - `SEARCH_DISTANCE=cosine`
 - Optional: `PGVECTOR_INDEXES=ivfflat,hnsw`, `RUN_SCHEDULER=true`, `AUTO_INDEX_ON_STARTUP=false`
 
-Schema, migrations and role provisioning run automatically on every boot
-(`scripts/init_railway_db.py`, idempotent, ledger-tracked) — no manual psql
-initialization is needed. Development-only escape hatches:
-`ACTIVEKG_READYZ_ALLOW_OWNER=true`, `ACTIVEKG_READYZ_ALLOW_NO_JWT=true`.
+Migrations never run at runtime boot. Operators use the manual release service;
+the API and workers fail closed if its adopted identity or 22-row ledger is not
+ready. `DATABASE_URL` fallback is development-only.
 
 Run the demo bundle against Railway:
 ```bash

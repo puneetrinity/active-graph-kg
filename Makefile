@@ -1,9 +1,9 @@
 SHELL := /bin/bash
 
 
-.PHONY: test-unit test-all live-smoke live-extended metrics-probe proof-report rate-limit-validate \
+.PHONY: test-unit test-all schema-control-guard schema-control-test live-smoke live-extended metrics-probe proof-report rate-limit-validate \
 	trigger-effectiveness ingestion-pipeline scheduler-sla governance-audit \
-	failure-recovery dx-timing demo-run open-grafana db-bootstrap
+	failure-recovery dx-timing demo-run open-grafana
 
 API ?= http://localhost:8000
 
@@ -23,6 +23,12 @@ test-all:
 		exit 1; \
 	fi
 	@unset ACTIVEKG_TEST_NO_DB && pytest -v
+
+schema-control-guard:
+	@python scripts/schema_control_guard.py
+
+schema-control-test:
+	@ACTIVEKG_TEST_NO_DB=true pytest tests/test_schema_control.py -v
 
 # ============================================================================
 # Evaluation and Smoke Tests
@@ -111,6 +117,3 @@ open-grafana:
 	( command -v open     >/dev/null 2>&1 && open     "$$URL" ) || \
 	( command -v start    >/dev/null 2>&1 && start "" "$$URL" ) || \
 	echo "Please open $$URL manually."
-
-db-bootstrap:
-	@ACTIVEKG_DSN=$${ACTIVEKG_DSN:-$$DATABASE_URL} bash scripts/db_bootstrap.sh

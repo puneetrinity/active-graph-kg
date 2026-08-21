@@ -27,6 +27,7 @@ OWNER_DSN = os.getenv("ACTIVEKG_RLS_TEST_OWNER_DSN")
 pytestmark = pytest.mark.skipif(not OWNER_DSN, reason="ACTIVEKG_RLS_TEST_OWNER_DSN not configured")
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts", "init_railway_db.py")
+TARGET_ID = "11111111-1111-4111-8111-111111111111"
 
 PR11_016_CHECKSUM = "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae344b21"
 
@@ -34,6 +35,10 @@ PR11_016_CHECKSUM = "34f02ce7137003697e1a3e0a675883b5203d55150ea1a0c258892308ae3
 def _run_init(**extra_env: str) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("ACTIVEKG_")}
     env["ACTIVEKG_MIGRATE_DSN"] = OWNER_DSN
+    env["ACTIVEKG_MIGRATION_APPLY"] = "1"
+    env["ACTIVEKG_SCHEMA_TARGET_ID"] = TARGET_ID
+    env["ACTIVEKG_SCHEMA_ENVIRONMENT"] = "development"
+    env["ACTIVEKG_SCHEMA_SOURCE_COMMIT"] = "0" * 40
     for key in ("ACTIVEKG_RUNTIME_ROLE", "ACTIVEKG_RUNTIME_PASSWORD"):
         if value := os.environ.get(key):
             env[key] = value

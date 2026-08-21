@@ -183,10 +183,22 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
             self.statements.append(self.last)
 
         def fetchone(self):
-            if self.last == "SELECT 1":
-                return (1,)
             if "to_regclass" in self.last:
-                return ("schema_migrations",)
+                return (
+                    "schema_migrations",
+                    "activekg_schema_control.target_identity",
+                    "activekg_schema_control.release_attempts",
+                )
+            if "FROM activekg_schema_control.target_identity" in self.last:
+                return (
+                    1,
+                    "memory",
+                    "production",
+                    "11111111-1111-4111-8111-111111111111",
+                    4,
+                    0,
+                    "success",
+                )
             if "FROM pg_roles r" in self.last:
                 return (False, False, False, False, False)
             raise AssertionError(self.last)
@@ -323,16 +335,24 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
     class FakeRepository:
         pool = FakePool()
 
-    result = bounded_readiness_check(
-        FakeRepository(),
-        unsafe_search_configuration=False,
-        jwt_enabled=True,
-        jwt_problems=[],
-    )
+    with patch.dict(
+        os.environ,
+        {
+            "ACTIVEKG_SCHEMA_TARGET_ID": "11111111-1111-4111-8111-111111111111",
+            "ACTIVEKG_SCHEMA_ENVIRONMENT": "production",
+        },
+        clear=False,
+    ):
+        result = bounded_readiness_check(
+            FakeRepository(),
+            unsafe_search_configuration=False,
+            jwt_enabled=True,
+            jwt_problems=[],
+        )
     assert result == ReadinessResult(True)
     assert FakeRepository.pool.timeout == 0.25
     assert len(cursor.statements) == 8
-    assert not any("count(" in statement.lower() for statement in cursor.statements)
+    assert not any("from candidates" in statement.lower() for statement in cursor.statements)
 
     cached = ReadinessCoordinator()
     checks = 0

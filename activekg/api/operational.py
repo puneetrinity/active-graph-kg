@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from activekg.common.migration_manifest import MIGRATIONS
+from activekg.common.migration_manifest import CHECKSUM_TRANSITIONS, MIGRATIONS
+from activekg.common.schema_control import CONTROL_SCHEMA, validate_environment, validate_target_id
 
 READINESS_SUCCESS_TTL_SECONDS = 30.0
 READINESS_FAILURE_TTL_SECONDS = 5.0
@@ -390,7 +391,7 @@ def _tenant_policy_expression_ok(expression: str) -> bool:
 
 def _migration_checksums_match(applied: Mapping[str, str | None], started_at: float) -> bool:
     migrations_dir = Path(__file__).resolve().parents[2] / "db" / "migrations"
-    if set(MIGRATIONS) - set(applied):
+    if set(MIGRATIONS) != set(applied):
         return False
     for filename in MIGRATIONS:
         _check_budget(started_at)
@@ -402,7 +403,9 @@ def _migration_checksums_match(applied: Mapping[str, str | None], started_at: fl
         except OSError:
             return False
         if not hmac.compare_digest(on_disk, recorded):
-            return False
+            transition = CHECKSUM_TRANSITIONS.get(filename, {}).get(recorded)
+            if transition is None or not hmac.compare_digest(on_disk, transition):
+                return False
     return True
 
 
@@ -424,31 +427,102 @@ def bounded_readiness_check(
         reasons.append("jwt_verification_unavailable")
     if candidate_repository is None:
         reasons.append("candidate_repository_unavailable")
+    try:
+        expected_target_id = validate_target_id(os.getenv("ACTIVEKG_SCHEMA_TARGET_ID"))
+        expected_environment = validate_environment(os.getenv("ACTIVEKG_SCHEMA_ENVIRONMENT"))
+    except Exception:
+        expected_target_id = ""
+        expected_environment = ""
+        reasons.append("schema_control_configuration_invalid")
     if reasons:
         return ReadinessResult(False, tuple(sorted(set(reasons))))
 
     started_at = time.monotonic()
-    allow_owner = os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
+    allow_owner = (
+        expected_environment != "production"
+        and os.getenv("ACTIVEKG_READYZ_ALLOW_OWNER", "false").lower() == "true"
+    )
     try:
         with candidate_repository.pool.connection(timeout=READINESS_POOL_TIMEOUT_SECONDS) as conn:
             with conn.cursor() as cur:
                 _check_budget(started_at)
-                # Statement 1: bound every following catalog/ledger query.
-                cur.execute(f"SET LOCAL statement_timeout = {READINESS_STATEMENT_TIMEOUT_MS}")
+                # Statement 1: force the transaction read-only and bound every
+                # following catalog/ledger query without adding an unbounded
+                # preflight statement.
+                cur.execute(
+                    "SET TRANSACTION READ ONLY; "
+                    f"SET LOCAL statement_timeout = {READINESS_STATEMENT_TIMEOUT_MS}; "
+                    f"SET LOCAL lock_timeout = {READINESS_STATEMENT_TIMEOUT_MS}"
+                )
 
                 _check_budget(started_at)
-                # Statement 2: basic database reachability.
-                cur.execute("SELECT 1")
-                if cur.fetchone() != (1,):
-                    reasons.append("database_unavailable")
-
-                _check_budget(started_at)
-                # Statement 3: migration-ledger presence.
-                cur.execute("SELECT to_regclass('public.schema_migrations')")
-                ledger_exists = cur.fetchone()[0] is not None
-                if not ledger_exists:
+                # Statement 2: reachability and both readiness authorities.
+                cur.execute(
+                    "SELECT to_regclass('public.schema_migrations'), "
+                    "to_regclass(%s), to_regclass(%s)",
+                    (
+                        f"{CONTROL_SCHEMA}.target_identity",
+                        f"{CONTROL_SCHEMA}.release_attempts",
+                    ),
+                )
+                ledger_relation, identity_relation, attempts_relation = cur.fetchone()
+                if ledger_relation is None:
                     reasons.append("migration_ledger_missing")
-                else:
+                if identity_relation is None or attempts_relation is None:
+                    reasons.append("schema_control_missing")
+
+                if identity_relation is not None and attempts_relation is not None:
+                    _check_budget(started_at)
+                    # Statement 3: exact target identity, append-only guards
+                    # and release health.
+                    cur.execute(
+                        f"""
+                        SELECT
+                          (SELECT count(*) FROM {CONTROL_SCHEMA}.target_identity),
+                          (SELECT min(product) FROM {CONTROL_SCHEMA}.target_identity),
+                          (SELECT min(environment) FROM {CONTROL_SCHEMA}.target_identity),
+                          (SELECT min(target_id::text) FROM {CONTROL_SCHEMA}.target_identity),
+                          (SELECT count(*) FROM pg_trigger t
+                           JOIN pg_class c ON c.oid = t.tgrelid
+                           JOIN pg_namespace n ON n.oid = c.relnamespace
+                           WHERE n.nspname = '{CONTROL_SCHEMA}' AND NOT t.tgisinternal
+                             AND t.tgenabled IN ('O','A')
+                             AND (c.relname, t.tgname) IN (
+                               ('target_identity', 'target_identity_no_mutation'),
+                               ('target_identity', 'target_identity_no_truncate'),
+                               ('release_attempts', 'release_attempts_finish_only'),
+                               ('release_attempts', 'release_attempts_no_truncate')
+                             )),
+                          (SELECT count(*) FROM {CONTROL_SCHEMA}.release_attempts
+                           WHERE outcome = 'running' OR finished_at IS NULL),
+                          (SELECT outcome FROM {CONTROL_SCHEMA}.release_attempts
+                           ORDER BY id DESC LIMIT 1)
+                        """
+                    )
+                    (
+                        identity_count,
+                        product,
+                        environment,
+                        target_id,
+                        control_guard_count,
+                        unfinished,
+                        latest,
+                    ) = cur.fetchone()
+                    if (
+                        identity_count != 1
+                        or product != "memory"
+                        or environment != expected_environment
+                        or target_id != expected_target_id
+                    ):
+                        reasons.append("schema_control_identity_mismatch")
+                    if control_guard_count != 4:
+                        reasons.append("schema_control_guards_missing")
+                    if unfinished != 0:
+                        reasons.append("schema_release_unfinished")
+                    if latest != "success":
+                        reasons.append("schema_release_latest_failed")
+
+                if ledger_relation is not None:
                     _check_budget(started_at)
                     # Statement 4: bounded ledger metadata only; no application rows.
                     cur.execute("SELECT filename, checksum FROM schema_migrations")

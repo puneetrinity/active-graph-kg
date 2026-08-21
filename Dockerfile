@@ -31,8 +31,6 @@ ENV HOST=0.0.0.0 \
 
 EXPOSE 8000
 
-# start_railway.sh runs init_railway_db.py (schema + migrations, idempotent)
-# before exec'ing uvicorn — the Railway web service builds from this Dockerfile,
-# so migrations must run here, not only in the unused Procfile path.
+# Ordinary API startup performs read-only schema readiness. Schema writes run
+# only through the manual railway.schema-release.json one-shot service.
 CMD ["sh", "/app/scripts/start_railway.sh"]
-
