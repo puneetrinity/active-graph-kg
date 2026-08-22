@@ -4,8 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from enum import StrEnum as StrEnum
+else:  # pragma: no cover - runtime fallback for Python < 3.11
+    try:
+        from enum import StrEnum as StrEnum  # Python 3.11+
+    except Exception:
+
+        class StrEnum(str, Enum):  # noqa: UP042
+            """Fallback StrEnum for Python < 3.11."""
+
+            pass
 
 
 class CandidatePrivacyAction(StrEnum):
