@@ -88,6 +88,8 @@ def test_resolve_creates_new_candidate(client: TestClient, tenant: str):
 
 def test_resolve_matches_existing_by_identifier(client: TestClient, tenant: str):
     shared_email = f"shared-{uuid.uuid4().hex[:8]}@example.com"
+    vantahire_id = f"VH-APP-{uuid.uuid4()}"
+    signal_id = f"SIG-{uuid.uuid4()}"
     first = _post(
         client,
         {
@@ -96,7 +98,7 @@ def test_resolve_matches_existing_by_identifier(client: TestClient, tenant: str)
             "source_record_id": f"VH-{uuid.uuid4()}",
             "identifiers": [
                 {"identifier_type": "email", "value": shared_email},
-                {"identifier_type": "vantahire_application_id", "value": "VH-APP-1"},
+                {"identifier_type": "vantahire_application_id", "value": vantahire_id},
             ],
             "tenant_id": tenant,
         },
@@ -112,7 +114,7 @@ def test_resolve_matches_existing_by_identifier(client: TestClient, tenant: str)
             "identifiers": [
                 # Different casing — normalization should still match.
                 {"identifier_type": "email", "value": shared_email.upper()},
-                {"identifier_type": "signal_candidate_id", "value": "SIG-99"},
+                {"identifier_type": "signal_candidate_id", "value": signal_id},
             ],
             "tenant_id": tenant,
         },

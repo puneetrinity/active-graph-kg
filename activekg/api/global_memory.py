@@ -33,6 +33,12 @@ from activekg.graph.candidate_identifiers import (
     IdentifierNormalizationError,
     normalize_identifier,
 )
+from activekg.privacy.config import (
+    CandidatePrivacyConfigurationError,
+    load_candidate_privacy_config,
+)
+from activekg.privacy.identity import identity_token, normalize_privacy_identifier
+from activekg.privacy.models import CandidatePrivacyDecision
 
 logger = get_enhanced_logger(__name__)
 
@@ -261,6 +267,88 @@ def _require_public_enabled():
     _require_enabled()
     if not PUBLIC_PROFILE_SEARCH_ENABLED:
         raise HTTPException(status_code=503, detail="Public profile search is disabled")
+
+
+def _privacy_decision(
+    cur: psycopg.Cursor,
+    *,
+    global_candidate_id: str | UUID | None = None,
+    identifiers: list[tuple[str, str]] | None = None,
+) -> CandidatePrivacyDecision:
+    """Resolve privacy in the caller transaction without logging submitted identity."""
+    token_payloads: list[dict[str, Any]] = []
+    if identifiers:
+        try:
+            config = load_candidate_privacy_config(require_hmac=True)
+            _active, keys = config.require_hmac()
+            normalized = [normalize_privacy_identifier(kind, value) for kind, value in identifiers]
+            token_payloads = [
+                {
+                    "identifier_type": item.identifier_type,
+                    "key_version": version,
+                    "token": identity_token(key, item).hex(),
+                }
+                for item in normalized
+                for version, key in sorted(keys.items())
+            ]
+        except (CandidatePrivacyConfigurationError, ValueError) as exc:
+            if os.getenv("ACTIVEKG_SCHEMA_ENVIRONMENT") == "production":
+                raise HTTPException(
+                    status_code=503, detail="candidate_privacy_unavailable"
+                ) from exc
+    cur.execute(
+        """
+        SELECT decision
+        FROM candidate_privacy_match(%s::jsonb, %s, NULL, NULL)
+        ORDER BY CASE decision WHEN 'review' THEN 4 WHEN 'block_all' THEN 3
+                 WHEN 'block_global' THEN 2 ELSE 1 END DESC
+        LIMIT 1
+        """,
+        (json.dumps(token_payloads), global_candidate_id),
+    )
+    row = cur.fetchone()
+    return CandidatePrivacyDecision(row[0]) if row else CandidatePrivacyDecision.ALLOW
+
+
+def _require_privacy_allowed(
+    cur: psycopg.Cursor,
+    *,
+    global_candidate_id: str | UUID | None = None,
+    identifiers: list[tuple[str, str]] | None = None,
+    global_use: bool,
+) -> None:
+    decision = _privacy_decision(
+        cur,
+        global_candidate_id=global_candidate_id,
+        identifiers=identifiers,
+    )
+    if decision.blocks_all or (global_use and decision.blocks_global):
+        raise HTTPException(status_code=409, detail="candidate_privacy_restricted")
+
+
+def _require_hash_only_candidate_subject_verifiable(
+    *,
+    existing: dict[str, Any] | None,
+    email_hash: str | None,
+    transient_identifiers: list[tuple[str, str]],
+) -> None:
+    """Preserve 1AM ingest while refusing an unverifiable future intake.
+
+    The legacy global upsert contract sometimes provides only a one-way email
+    hash. That value cannot be converted into the separately keyed privacy
+    HMAC receipt. During 1AM the privacy tables are empty and intake is
+    disabled, so preserving the existing write is safe. Once intake is
+    enabled, a new hash-only subject must fail closed until 1AF supplies a
+    transient strong identifier.
+    """
+    if existing is not None or not email_hash or transient_identifiers:
+        return
+    try:
+        privacy_config = load_candidate_privacy_config(require_hmac=True)
+    except CandidatePrivacyConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
+    if privacy_config.intake_enabled:
+        raise HTTPException(status_code=503, detail="candidate_privacy_subject_unverifiable")
 
 
 def _validate_tenant(claims, body_tenant_id: str | None) -> None:
@@ -838,6 +926,7 @@ def _assert_public_candidate_visible(
         SELECT gc.id
         FROM global_candidates gc
         WHERE gc.id = %s
+          AND candidate_privacy_global_decision(gc.id) = 'allow'
           AND (
               EXISTS (
                   SELECT 1 FROM candidate_provenance cp
@@ -994,6 +1083,24 @@ def upsert_global_candidate(
         with conn.cursor() as cur:
             existing, extras = _find_existing_all(
                 cur, body.linkedin_id, body.github_id, body.email_hash
+            )
+            transient: list[tuple[str, str]] = []
+            if body.linkedin_url:
+                transient.append(("linkedin_url", body.linkedin_url))
+            elif body.linkedin_id:
+                transient.append(("linkedin_url", f"https://linkedin.com/in/{body.linkedin_id}"))
+            if body.github_id:
+                transient.append(("github_url", f"https://github.com/{body.github_id}"))
+            _require_hash_only_candidate_subject_verifiable(
+                existing=existing,
+                email_hash=body.email_hash,
+                transient_identifiers=transient,
+            )
+            _require_privacy_allowed(
+                cur,
+                global_candidate_id=str(existing["id"]) if existing else None,
+                identifiers=transient,
+                global_use=True,
             )
 
             # Cross-anchor conflict: this evidence bridges >1 existing row
@@ -1165,6 +1272,7 @@ def get_by_anchor(
                                  AND tca.tenant_id = %s
                                  AND tca.revoked_at IS NULL
                            ) AS _tenant_visible
+                           ,candidate_privacy_global_decision(gc.id) AS _privacy_decision
                     FROM global_candidates gc
                     WHERE {anchor_sql} = %s
                       AND (
@@ -1184,6 +1292,8 @@ def get_by_anchor(
                               )
                           )
                       )
+                      AND candidate_privacy_global_decision(gc.id)
+                          NOT IN ('block_all', 'review')
                     LIMIT 1
                     """,
                     (tenant_id, normalized_value, tenant_id, public_allowed),
@@ -1193,6 +1303,7 @@ def get_by_anchor(
                     result = _row_to_dict(cur, row)
                     public_visible = bool(result.pop("_public_visible", False))
                     tenant_visible = bool(result.pop("_tenant_visible", False))
+                    privacy_decision = result.pop("_privacy_decision", "allow")
                     if tenant_visible:
                         # This endpoint resolves identity anchors; it must not
                         # double as a profile read. The historical canonical
@@ -1213,7 +1324,7 @@ def get_by_anchor(
                             identity["email_hash"] = value
                         conn.commit()
                         return identity
-                    if public_visible:
+                    if public_visible and privacy_decision == "allow":
                         # A public match never authorizes applicant-derived
                         # canonical fields such as email_hash or resume skills.
                         conn.commit()
@@ -1257,6 +1368,7 @@ def create_provenance(
     conn = _get_tenant_conn(rls_tenant)
     try:
         with conn.cursor() as cur:
+            _require_privacy_allowed(cur, global_candidate_id=candidate_id, global_use=True)
             if body.tenant_id is None:
                 # NULL tenant_id: use partial unique index for idempotency
                 cur.execute(
@@ -1343,6 +1455,7 @@ def upsert_access(
     conn = _get_tenant_conn(body.tenant_id)
     try:
         with conn.cursor() as cur:
+            _require_privacy_allowed(cur, global_candidate_id=candidate_id, global_use=True)
             cur.execute(
                 """
                 INSERT INTO tenant_candidate_access
@@ -1509,10 +1622,27 @@ def sync_applicant_to_global_memory(
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
+            transient: list[tuple[str, str]] = []
+            if isinstance(email_raw, str) and email_raw:
+                transient.append(("email", email_raw))
+            if isinstance(linkedin_url_raw, str) and linkedin_url_raw:
+                transient.append(("linkedin_url", linkedin_url_raw))
+            _require_privacy_allowed(
+                cur,
+                identifiers=transient,
+                global_use=True,
+            )
             # Multi-anchor lookup (linkedin > email). Cross-anchor hits queue a
             # needs_merge item — the sourced-then-applied case must converge,
             # not duplicate or crash on the unique anchor indexes.
             existing_row, extras = _find_existing_all(cur, li_id, None, email_hash)
+            if existing_row:
+                _require_privacy_allowed(
+                    cur,
+                    global_candidate_id=str(existing_row["id"]),
+                    identifiers=transient,
+                    global_use=True,
+                )
             for extra in extras:
                 _enqueue_merge(
                     cur,
@@ -1694,6 +1824,15 @@ def upsert_signal_candidate_to_global(
         (f"global-signal:{li_id}",),
     )
     existing, extras = _find_existing_all(cur, li_id, None, None)
+    privacy_identifiers = [("signal_candidate_id", signal_candidate_id)]
+    if linkedin_url:
+        privacy_identifiers.append(("linkedin_url", linkedin_url))
+    _require_privacy_allowed(
+        cur,
+        global_candidate_id=str(existing["id"]) if existing else None,
+        identifiers=privacy_identifiers,
+        global_use=True,
+    )
     if existing:
         # Serialize all public observations for one canonical identity, then
         # re-read under the lock. Without this, two workers that both observed a
@@ -2085,10 +2224,16 @@ def record_contact_evidence(
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
+            _require_privacy_allowed(
+                cur,
+                global_candidate_id=str(body.global_candidate_id),
+                identifiers=[("email", body.email)],
+                global_use=True,
+            )
             candidate_id = _assert_public_candidate_visible(
                 cur,
                 tenant_id=tenant_id,
-                global_candidate_id=body.global_candidate_id,
+                global_candidate_id=str(body.global_candidate_id),
             )
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -2569,6 +2714,7 @@ def resolve_public_identities(
                 FROM global_candidates gc
                 WHERE lower(gc.linkedin_id) = ANY(%s::text[])
                   AND gc.public_profile <> '{}'::jsonb
+                  AND candidate_privacy_global_decision(gc.id) = 'allow'
                   AND EXISTS (
                       SELECT 1 FROM candidate_provenance cp
                       WHERE cp.global_candidate_id = gc.id
@@ -2668,6 +2814,7 @@ def search_global_candidates(
     skills_col = "gc.public_skills_normalized" if public_surface else "gc.skills_normalized"
     status_col = "gc.public_embedding_status" if public_surface else "gc.embedding_status"
     filters: list[str] = [f"{status_col} = 'ready'", f"{embedding_col} IS NOT NULL"]
+    filters.append("candidate_privacy_global_decision(gc.id) = 'allow'")
     params: list[Any] = []
     if public_surface:
         filters.append("gc.public_embed_version = %s")
@@ -2833,6 +2980,8 @@ def resume_refs(
                 JOIN candidate_provenance cp ON cp.global_candidate_id = gc.id
                 WHERE gc.linkedin_id = ANY(%s)
                   AND cp.source_type IN ('platform_applicant', 'org_upload')
+                  AND candidate_privacy_global_decision(gc.id)
+                      NOT IN ('block_all', 'review')
                 """,
                 (slugs,),
             )

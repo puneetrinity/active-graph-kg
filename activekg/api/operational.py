@@ -36,6 +36,74 @@ _SHARED_TABLES = (
     "contact_suppression_receipts",
     "public_candidate_market_memberships",
 )
+_PRIVACY_TABLES = (
+    "candidate_privacy_directive_events",
+    "candidate_privacy_directives",
+    "candidate_privacy_identity_tokens",
+)
+_PRIVACY_INDEXES = {
+    "candidate_privacy_events_cursor_idx",
+    "candidate_privacy_events_directive_idx",
+    "candidate_privacy_directives_global_idx",
+    "candidate_privacy_directives_candidate_idx",
+    "candidate_privacy_identity_tokens_lookup_idx",
+}
+_PRIVACY_FUNCTIONS = {
+    "candidate_privacy_append_only",
+    "candidate_privacy_decision_for",
+    "candidate_privacy_global_decision",
+    "candidate_privacy_candidate_decision",
+    "candidate_privacy_node_decision",
+    "candidate_privacy_resolve_subject",
+    "candidate_privacy_resolve_canonical",
+    "candidate_privacy_match",
+    "candidate_privacy_token_key_versions",
+    "candidate_privacy_create_directive",
+    "candidate_privacy_transition_directive",
+}
+_PRIVACY_FUNCTION_ARGUMENTS = {
+    "candidate_privacy_decision_for": 3,
+    "candidate_privacy_global_decision": 1,
+    "candidate_privacy_candidate_decision": 2,
+    "candidate_privacy_node_decision": 1,
+    "candidate_privacy_resolve_subject": 2,
+    "candidate_privacy_resolve_canonical": 3,
+    "candidate_privacy_match": 4,
+    "candidate_privacy_token_key_versions": 0,
+    "candidate_privacy_create_directive": 16,
+    "candidate_privacy_transition_directive": 9,
+}
+_PRIVACY_APPEND_ONLY_FUNCTION = "candidate_privacy_append_only"
+_PRIVACY_APPEND_ONLY_FUNCTION_BODY = (
+    "beginraiseexception'candidateprivacyauthorityisappend-only(attempted%)',tg_op;end;"
+)
+_PRIVACY_TRIGGERS = (
+    (
+        "candidate_privacy_directive_events",
+        "candidate_privacy_events_no_mutation",
+        _PRIVACY_APPEND_ONLY_FUNCTION,
+        27,
+    ),
+    (
+        "candidate_privacy_directive_events",
+        "candidate_privacy_events_no_truncate",
+        _PRIVACY_APPEND_ONLY_FUNCTION,
+        34,
+    ),
+    (
+        "candidate_privacy_identity_tokens",
+        "candidate_privacy_tokens_no_mutation",
+        _PRIVACY_APPEND_ONLY_FUNCTION,
+        27,
+    ),
+    (
+        "candidate_privacy_identity_tokens",
+        "candidate_privacy_tokens_no_truncate",
+        _PRIVACY_APPEND_ONLY_FUNCTION,
+        34,
+    ),
+)
+_PRIVACY_SEQUENCE = "candidate_privacy_directive_events_cursor_seq"
 _PUBLIC_COLUMNS = {
     "public_profile",
     "public_profile_observed_at",
@@ -100,6 +168,50 @@ _REQUIRED_CONSTRAINTS_BY_TABLE = {
     "public_candidate_market_memberships": {
         "public_candidate_market_country_code_check",
         "public_candidate_market_memberships_pkey",
+    },
+    "candidate_privacy_directive_events": {
+        "candidate_privacy_directive_events_pkey",
+        "candidate_privacy_directive_events_event_id_key",
+        "candidate_privacy_directive_events_directive_version_check",
+        "candidate_privacy_directive_events_event_type_check",
+        "candidate_privacy_directive_events_action_check",
+        "candidate_privacy_directive_events_scope_check",
+        "candidate_privacy_directive_events_resulting_state_check",
+        "candidate_privacy_directive_events_authority_type_check",
+        "candidate_privacy_directive_events_reason_code_check",
+        "candidate_privacy_directive_events_issuer_check",
+        "candidate_privacy_directive_events_actor_id_check",
+        "candidate_privacy_directive_events_actor_type_check",
+        "candidate_privacy_directive_events_global_candidate_id_fkey",
+        "candidate_privacy_directive_events_key_version_check",
+        "candidate_privacy_directive_events_schema_version_check",
+        "candidate_privacy_event_action_scope_check",
+        "candidate_privacy_event_candidate_pair_check",
+        "candidate_privacy_event_candidate_fkey",
+        "candidate_privacy_event_directive_version_unique",
+        "candidate_privacy_event_request_type_unique",
+    },
+    "candidate_privacy_directives": {
+        "candidate_privacy_directives_pkey",
+        "candidate_privacy_directives_action_check",
+        "candidate_privacy_directives_scope_check",
+        "candidate_privacy_directives_state_check",
+        "candidate_privacy_directives_version_check",
+        "candidate_privacy_directives_authority_type_check",
+        "candidate_privacy_directives_reason_code_check",
+        "candidate_privacy_directives_global_candidate_id_fkey",
+        "candidate_privacy_directives_last_event_cursor_key",
+        "candidate_privacy_directives_last_event_cursor_fkey",
+        "candidate_privacy_directive_action_scope_check",
+        "candidate_privacy_directive_candidate_pair_check",
+        "candidate_privacy_directive_candidate_fkey",
+    },
+    "candidate_privacy_identity_tokens": {
+        "candidate_privacy_identity_tokens_pkey",
+        "candidate_privacy_identity_tokens_directive_id_fkey",
+        "candidate_privacy_identity_tokens_identifier_type_check",
+        "candidate_privacy_identity_tokens_key_version_check",
+        "candidate_privacy_identity_tokens_token_check",
     },
 }
 _REQUIRED_CONSTRAINTS = {
@@ -415,6 +527,8 @@ def bounded_readiness_check(
     unsafe_search_configuration: bool,
     jwt_enabled: bool,
     jwt_problems: list[str],
+    privacy_problems: list[str] | None = None,
+    privacy_key_versions: set[int] | None = None,
 ) -> ReadinessResult:
     """Run a fixed, read-only readiness census with at most eight SQL statements."""
 
@@ -425,6 +539,8 @@ def bounded_readiness_check(
         reasons.append("jwt_disabled")
     if jwt_problems:
         reasons.append("jwt_verification_unavailable")
+    if privacy_problems:
+        reasons.extend(privacy_problems)
     if candidate_repository is None:
         reasons.append("candidate_repository_unavailable")
     try:
@@ -459,17 +575,33 @@ def bounded_readiness_check(
                 # Statement 2: reachability and both readiness authorities.
                 cur.execute(
                     "SELECT to_regclass('public.schema_migrations'), "
-                    "to_regclass(%s), to_regclass(%s)",
+                    "to_regclass(%s), to_regclass(%s), "
+                    "to_regclass('public.candidate_privacy_directive_events'), "
+                    "to_regclass('public.candidate_privacy_directives'), "
+                    "to_regclass('public.candidate_privacy_identity_tokens')",
                     (
                         f"{CONTROL_SCHEMA}.target_identity",
                         f"{CONTROL_SCHEMA}.release_attempts",
                     ),
                 )
-                ledger_relation, identity_relation, attempts_relation = cur.fetchone()
+                (
+                    ledger_relation,
+                    identity_relation,
+                    attempts_relation,
+                    privacy_events_relation,
+                    privacy_directives_relation,
+                    privacy_tokens_relation,
+                ) = cur.fetchone()
                 if ledger_relation is None:
                     reasons.append("migration_ledger_missing")
                 if identity_relation is None or attempts_relation is None:
                     reasons.append("schema_control_missing")
+                if None in (
+                    privacy_events_relation,
+                    privacy_directives_relation,
+                    privacy_tokens_relation,
+                ):
+                    reasons.append("candidate_privacy_schema_missing")
 
                 if identity_relation is not None and attempts_relation is not None:
                     _check_budget(started_at)
@@ -541,12 +673,16 @@ def bounded_readiness_check(
                     WHERE n.nspname = 'public' AND c.relkind = 'r'
                       AND c.relname = ANY(%s)
                     """,
-                    (list(_CANDIDATE_TABLES + _SHARED_TABLES),),
+                    (list(_CANDIDATE_TABLES + _SHARED_TABLES + _PRIVACY_TABLES),),
                 )
                 relation_rows = cur.fetchall()
                 relation_map = {row[0]: row for row in relation_rows}
                 if set(_CANDIDATE_TABLES + _SHARED_TABLES) - set(relation_map):
                     reasons.append("required_schema_missing")
+                if set(_PRIVACY_TABLES) - set(relation_map):
+                    reasons.append("candidate_privacy_schema_missing")
+                elif any(not bool(relation_map[table][1]) for table in _PRIVACY_TABLES):
+                    reasons.append("candidate_privacy_rls_incomplete")
                 for table in _CANDIDATE_TABLES:
                     row = relation_map.get(table)
                     if row is None or not bool(row[1]):
@@ -573,7 +709,7 @@ def bounded_readiness_check(
                     FROM pg_policies
                     WHERE schemaname = 'public' AND tablename = ANY(%s)
                     """,
-                    (list(_CANDIDATE_TABLES),),
+                    (list(_CANDIDATE_TABLES + _PRIVACY_TABLES),),
                 )
                 policies = {(row[0], row[1]): row for row in cur.fetchall()}
                 for table in _CANDIDATE_TABLES:
@@ -615,6 +751,30 @@ def bounded_readiness_check(
                     ):
                         reasons.append("admin_policy_definition_unexpected")
                         break
+                for table, policy_name in (
+                    (
+                        "candidate_privacy_directive_events",
+                        "candidate_privacy_events_runtime_read",
+                    ),
+                    (
+                        "candidate_privacy_directives",
+                        "candidate_privacy_directives_runtime_read",
+                    ),
+                ):
+                    policy = policies.get((table, policy_name))
+                    if (
+                        policy is None
+                        or policy[2] != "PERMISSIVE"
+                        or policy[3].lower() != "{public}"
+                        or policy[4] != "SELECT"
+                        or _normalize_sql_definition(policy[5]) != "true"
+                    ):
+                        reasons.append("candidate_privacy_policy_unexpected")
+                        break
+                if any(
+                    table == "candidate_privacy_identity_tokens" for table, _policy_name in policies
+                ):
+                    reasons.append("candidate_privacy_token_policy_unsafe")
 
                 _check_budget(started_at)
                 # Statement 7: runtime-role escalation posture.
@@ -650,6 +810,7 @@ def bounded_readiness_check(
                                'returns_trigger', p.prorettype = 'trigger'::regtype,
                                'language', l.lanname,
                                'security_definer', p.prosecdef,
+                               'config', COALESCE(to_jsonb(p.proconfig), '[]'::jsonb),
                                'source', p.prosrc,
                                'owned_by_runtime', pg_get_userbyid(p.proowner) = current_user
                            )
@@ -696,7 +857,7 @@ def bounded_readiness_check(
                            )
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE n.nspname = 'public' AND c.relname = %s
+                    WHERE n.nspname = 'public' AND c.relname = ANY(%s)
                     UNION ALL
                     SELECT 'public_column'::text, column_name::text, '{}'::jsonb
                     FROM information_schema.columns
@@ -733,14 +894,74 @@ def bounded_readiness_check(
                                    current_user, 'public.contact_person_suppressions', 'TRUNCATE'
                                )
                            )
+                    UNION ALL
+                    SELECT 'privacy_privilege'::text, 'runtime'::text,
+                           jsonb_build_object(
+                               'events_select', has_table_privilege(
+                                   current_user,
+                                   'public.candidate_privacy_directive_events', 'SELECT'
+                               ),
+                               'events_write', (
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directive_events', 'INSERT') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directive_events', 'UPDATE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directive_events', 'DELETE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directive_events', 'TRUNCATE')
+                               ),
+                               'directives_select', has_table_privilege(
+                                   current_user,
+                                   'public.candidate_privacy_directives', 'SELECT'
+                               ),
+                               'directives_write', (
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directives', 'INSERT') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directives', 'UPDATE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directives', 'DELETE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_directives', 'TRUNCATE')
+                               ),
+                               'tokens_select', has_table_privilege(
+                                   current_user,
+                                   'public.candidate_privacy_identity_tokens', 'SELECT'
+                               ),
+                               'tokens_write', (
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_identity_tokens', 'INSERT') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_identity_tokens', 'UPDATE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_identity_tokens', 'DELETE') OR
+                                   has_table_privilege(current_user,
+                                       'public.candidate_privacy_identity_tokens', 'TRUNCATE')
+                               )
+                           )
+                    UNION ALL
+                    SELECT 'privacy_key_version'::text, key_version::text, '{}'::jsonb
+                    FROM candidate_privacy_token_key_versions()
+                    UNION ALL
+                    SELECT 'privacy_function_privilege'::text, p.proname::text,
+                           jsonb_build_object(
+                               'execute', has_function_privilege(current_user, p.oid, 'EXECUTE')
+                           )
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = 'public'
+                      AND p.proname = ANY(%s)
                     """,
                     (
-                        list(_REQUIRED_INDEXES),
-                        list(_REQUIRED_FUNCTIONS),
+                        list(_REQUIRED_INDEXES | _PRIVACY_INDEXES),
+                        list(_REQUIRED_FUNCTIONS | _PRIVACY_FUNCTIONS),
                         list(_REQUIRED_CONSTRAINTS),
-                        [trigger[1] for trigger in _SUPPRESSION_TRIGGERS],
-                        _SUPPRESSION_SEQUENCE,
+                        [trigger[1] for trigger in _SUPPRESSION_TRIGGERS]
+                        + [trigger[1] for trigger in _PRIVACY_TRIGGERS],
+                        [_SUPPRESSION_SEQUENCE, _PRIVACY_SEQUENCE],
                         list(_PUBLIC_COLUMNS),
+                        list(_PRIVACY_FUNCTION_ARGUMENTS),
                     ),
                 )
                 objects: dict[str, dict[str, Mapping[str, Any]]] = {}
@@ -752,9 +973,28 @@ def bounded_readiness_check(
                     not bool(details.get("valid")) for details in indexes.values()
                 ):
                     reasons.append("required_index_missing")
+                if _PRIVACY_INDEXES - set(indexes):
+                    reasons.append("candidate_privacy_index_missing")
                 functions = objects.get("function", {})
                 if _REQUIRED_FUNCTIONS - set(functions):
                     reasons.append("required_function_missing")
+                if _PRIVACY_FUNCTIONS - set(functions):
+                    reasons.append("candidate_privacy_function_missing")
+                for name in _PRIVACY_FUNCTIONS - {"candidate_privacy_append_only"}:
+                    function = functions.get(name)
+                    if function is None:
+                        continue
+                    configs = {str(value) for value in function.get("config", [])}
+                    if (
+                        not bool(function.get("security_definer"))
+                        or bool(function.get("owned_by_runtime"))
+                        or "search_path=pg_catalog, public" not in configs
+                    ):
+                        reasons.append("candidate_privacy_function_posture_unsafe")
+                        break
+                    if int(function.get("arguments", -1)) != _PRIVACY_FUNCTION_ARGUMENTS[name]:
+                        reasons.append("candidate_privacy_function_signature_unexpected")
+                        break
                 append_only = functions.get(_APPEND_ONLY_FUNCTION)
                 if append_only is not None and (
                     int(append_only.get("arguments", -1)) != 0
@@ -766,6 +1006,17 @@ def bounded_readiness_check(
                     or (not allow_owner and bool(append_only.get("owned_by_runtime")))
                 ):
                     reasons.append("append_only_function_definition_unexpected")
+                privacy_append_only = functions.get(_PRIVACY_APPEND_ONLY_FUNCTION)
+                if privacy_append_only is not None and (
+                    int(privacy_append_only.get("arguments", -1)) != 0
+                    or not bool(privacy_append_only.get("returns_trigger"))
+                    or privacy_append_only.get("language") != "plpgsql"
+                    or bool(privacy_append_only.get("security_definer"))
+                    or _normalize_sql_definition(str(privacy_append_only.get("source", "")))
+                    != _PRIVACY_APPEND_ONLY_FUNCTION_BODY
+                    or (not allow_owner and bool(privacy_append_only.get("owned_by_runtime")))
+                ):
+                    reasons.append("candidate_privacy_append_only_function_unexpected")
 
                 constraints = objects.get("constraint", {})
                 expected_constraint_keys = {
@@ -797,17 +1048,34 @@ def bounded_readiness_check(
                         break
 
                 triggers = objects.get("trigger", {})
-                for table, name, function, trigger_type in _SUPPRESSION_TRIGGERS:
-                    trigger = triggers.get(f"{table}.{name}")
+                for (
+                    table,
+                    trigger_name,
+                    trigger_function_name,
+                    trigger_type,
+                ) in _SUPPRESSION_TRIGGERS:
+                    trigger = triggers.get(f"{table}.{trigger_name}")
                     if trigger is None:
                         reasons.append("required_trigger_missing")
                         break
                     if (
-                        trigger.get("function") != function
+                        trigger.get("function") != trigger_function_name
                         or int(trigger.get("type", -1)) != trigger_type
                         or trigger.get("enabled") not in {"O", "A"}
                     ):
                         reasons.append("trigger_definition_unexpected")
+                        break
+                for table, trigger_name, trigger_function_name, trigger_type in _PRIVACY_TRIGGERS:
+                    trigger = triggers.get(f"{table}.{trigger_name}")
+                    if trigger is None:
+                        reasons.append("candidate_privacy_trigger_missing")
+                        break
+                    if (
+                        trigger.get("function") != trigger_function_name
+                        or int(trigger.get("type", -1)) != trigger_type
+                        or trigger.get("enabled") not in {"O", "A"}
+                    ):
+                        reasons.append("candidate_privacy_trigger_unexpected")
                         break
 
                 sequence = objects.get("sequence", {}).get(_SUPPRESSION_SEQUENCE)
@@ -819,6 +1087,13 @@ def bounded_readiness_check(
                     or (not allow_owner and bool(sequence.get("owned_by_runtime")))
                 ):
                     reasons.append("sequence_posture_unexpected")
+                privacy_sequence = objects.get("sequence", {}).get(_PRIVACY_SEQUENCE)
+                if privacy_sequence is None:
+                    reasons.append("candidate_privacy_sequence_missing")
+                elif bool(privacy_sequence.get("usage")) or (
+                    not allow_owner and bool(privacy_sequence.get("owned_by_runtime"))
+                ):
+                    reasons.append("candidate_privacy_sequence_posture_unsafe")
 
                 public_columns = set(objects.get("public_column", {}))
                 if _PUBLIC_COLUMNS - public_columns:
@@ -842,6 +1117,29 @@ def bounded_readiness_check(
                     )
                 ):
                     reasons.append("suppression_table_privileges_unsafe")
+                privacy_privileges = objects.get("privacy_privilege", {}).get("runtime")
+                if privacy_privileges is None or (
+                    not bool(privacy_privileges.get("events_select"))
+                    or bool(privacy_privileges.get("events_write"))
+                    or not bool(privacy_privileges.get("directives_select"))
+                    or bool(privacy_privileges.get("directives_write"))
+                    or bool(privacy_privileges.get("tokens_select"))
+                    or bool(privacy_privileges.get("tokens_write"))
+                ):
+                    reasons.append("candidate_privacy_privileges_unsafe")
+                stored_privacy_versions = {
+                    int(version) for version in objects.get("privacy_key_version", {})
+                }
+                if privacy_key_versions is not None and not stored_privacy_versions.issubset(
+                    privacy_key_versions
+                ):
+                    reasons.append("candidate_privacy_hmac_version_missing")
+                privacy_function_privileges = objects.get("privacy_function_privilege", {})
+                if set(_PRIVACY_FUNCTION_ARGUMENTS) - set(privacy_function_privileges) or any(
+                    not bool(details.get("execute"))
+                    for details in privacy_function_privileges.values()
+                ):
+                    reasons.append("candidate_privacy_function_privilege_missing")
         _check_budget(started_at)
     except TimeoutError:
         reasons.append("readiness_timeout")

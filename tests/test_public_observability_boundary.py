@@ -49,7 +49,7 @@ def test_control_plane_verifier_fails_closed_and_compares_exact_bearer() -> None
 def test_route_registration_count_and_public_retirement_contract() -> None:
     routes = [route for route in main.app.routes if isinstance(route, APIRoute)]
     registrations = {(method, route.path) for route in routes for method in route.methods}
-    assert len(routes) == 70
+    assert len(routes) == 75
     assert {
         ("GET", "/openapi.json"),
         ("GET", "/docs"),
@@ -188,6 +188,9 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     "schema_migrations",
                     "activekg_schema_control.target_identity",
                     "activekg_schema_control.release_attempts",
+                    "candidate_privacy_directive_events",
+                    "candidate_privacy_directives",
+                    "candidate_privacy_identity_tokens",
                 )
             if "FROM activekg_schema_control.target_identity" in self.last:
                 return (
@@ -211,7 +214,10 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     for name in operational.MIGRATIONS
                 ]
             if "SELECT 'index'" in self.last:
-                rows = [("index", name, {"valid": True}) for name in operational._REQUIRED_INDEXES]
+                rows = [
+                    ("index", name, {"valid": True})
+                    for name in operational._REQUIRED_INDEXES | operational._PRIVACY_INDEXES
+                ]
                 for name in operational._REQUIRED_FUNCTIONS:
                     details = {}
                     if name == operational._APPEND_ONLY_FUNCTION:
@@ -221,6 +227,27 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                             "language": "plpgsql",
                             "security_definer": False,
                             "source": operational._APPEND_ONLY_FUNCTION_BODY,
+                            "owned_by_runtime": False,
+                        }
+                    rows.append(("function", name, details))
+                for name in operational._PRIVACY_FUNCTIONS:
+                    if name == operational._PRIVACY_APPEND_ONLY_FUNCTION:
+                        details = {
+                            "arguments": 0,
+                            "returns_trigger": True,
+                            "language": "plpgsql",
+                            "security_definer": False,
+                            "source": operational._PRIVACY_APPEND_ONLY_FUNCTION_BODY,
+                            "owned_by_runtime": False,
+                        }
+                    else:
+                        details = {
+                            "arguments": operational._PRIVACY_FUNCTION_ARGUMENTS[name],
+                            "returns_trigger": False,
+                            "language": "sql",
+                            "security_definer": True,
+                            "config": ["search_path=pg_catalog, public"],
+                            "source": "synthetic",
                             "owned_by_runtime": False,
                         }
                     rows.append(("function", name, details))
@@ -250,11 +277,26 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     )
                     for table, name, function, trigger_type in operational._SUPPRESSION_TRIGGERS
                 )
+                rows.extend(
+                    (
+                        "trigger",
+                        f"{table}.{name}",
+                        {"function": function, "type": trigger_type, "enabled": "O"},
+                    )
+                    for table, name, function, trigger_type in operational._PRIVACY_TRIGGERS
+                )
                 rows.append(
                     (
                         "sequence",
                         operational._SUPPRESSION_SEQUENCE,
                         {"kind": "S", "usage": True, "owned_by_runtime": False},
+                    )
+                )
+                rows.append(
+                    (
+                        "sequence",
+                        operational._PRIVACY_SEQUENCE,
+                        {"kind": "S", "usage": False, "owned_by_runtime": False},
                     )
                 )
                 rows.extend(("public_column", name, {}) for name in operational._PUBLIC_COLUMNS)
@@ -275,11 +317,31 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                         },
                     )
                 )
+                rows.append(
+                    (
+                        "privacy_privilege",
+                        "runtime",
+                        {
+                            "events_select": True,
+                            "events_write": False,
+                            "directives_select": True,
+                            "directives_write": False,
+                            "tokens_select": False,
+                            "tokens_write": False,
+                        },
+                    )
+                )
+                rows.extend(
+                    ("privacy_function_privilege", name, {"execute": True})
+                    for name in operational._PRIVACY_FUNCTION_ARGUMENTS
+                )
                 return rows
             if "FROM pg_class c" in self.last:
                 return [
                     (name, True, name == "candidate_contact_evidence", "owner", "runtime")
-                    for name in operational._CANDIDATE_TABLES + operational._SHARED_TABLES
+                    for name in operational._CANDIDATE_TABLES
+                    + operational._SHARED_TABLES
+                    + operational._PRIVACY_TABLES
                 ]
             if "FROM pg_policies" in self.last:
                 tenant_expression = (
@@ -310,6 +372,28 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                             ),
                         ]
                     )
+                rows.extend(
+                    [
+                        (
+                            "candidate_privacy_directive_events",
+                            "candidate_privacy_events_runtime_read",
+                            "PERMISSIVE",
+                            "{public}",
+                            "SELECT",
+                            "true",
+                            None,
+                        ),
+                        (
+                            "candidate_privacy_directives",
+                            "candidate_privacy_directives_runtime_read",
+                            "PERMISSIVE",
+                            "{public}",
+                            "SELECT",
+                            "true",
+                            None,
+                        ),
+                    ]
+                )
                 return rows
             raise AssertionError(self.last)
 

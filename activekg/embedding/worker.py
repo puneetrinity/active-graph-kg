@@ -27,6 +27,8 @@ from activekg.embedding.queue import (
 )
 from activekg.engine.embedding_provider import EmbeddingProvider
 from activekg.graph.repository import GraphRepository
+from activekg.privacy.models import CandidatePrivacyDecision
+from activekg.privacy.repository import CandidatePrivacyRepository, CandidatePrivacyUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,7 @@ class EmbeddingWorker:
         retry_base_seconds: float = 10.0,
         retry_max_seconds: float = 300.0,
         global_candidate_embedder=None,
+        privacy_repository: CandidatePrivacyRepository | None = None,
     ):
         self.redis_client = redis_client
         self.repo = repo
@@ -65,6 +68,7 @@ class EmbeddingWorker:
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.global_candidate_embedder = global_candidate_embedder
+        self.privacy_repository = privacy_repository
         self.running = True
 
         signal.signal(signal.SIGINT, self._shutdown_handler)
@@ -100,15 +104,32 @@ class EmbeddingWorker:
             logger.error("Job missing node_id")
             return
 
-        attempts = self.repo.mark_embedding_processing(node_id, tenant_id=tenant_id)
-        job["attempts"] = attempts
-
         try:
+            if self.privacy_repository is None:
+                raise CandidatePrivacyUnavailable("candidate privacy authority is unavailable")
+            decision = self.privacy_repository.node_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self.repo.mark_embedding_skipped(node_id, "privacy_restricted", tenant_id=tenant_id)
+                clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
             node = self.repo.get_node(node_id, tenant_id=tenant_id)
             if not node:
                 self.repo.mark_embedding_failed(node_id, "node_not_found", tenant_id=tenant_id)
                 clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
                 return
+
+            decision = self.privacy_repository.node_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self.repo.mark_embedding_skipped(node_id, "privacy_restricted", tenant_id=tenant_id)
+                clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
+
+            attempts = self.repo.mark_embedding_processing(node_id, tenant_id=tenant_id)
+            if attempts <= 0:
+                self.repo.mark_embedding_skipped(node_id, "privacy_restricted", tenant_id=tenant_id)
+                clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
+            job["attempts"] = attempts
 
             current_version = os.getenv("EXTRACTION_VERSION", "1.0.0")
             node_version = (node.props or {}).get("extraction_version")
@@ -131,6 +152,12 @@ class EmbeddingWorker:
             new = self.embedder.encode([text])[0]
             drift = _compute_drift(node.embedding, new)
             ts = datetime.now(timezone.utc).isoformat()
+
+            decision = self.privacy_repository.node_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self.repo.mark_embedding_skipped(node_id, "privacy_restricted", tenant_id=tenant_id)
+                clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
 
             self.repo.update_node_embedding(
                 node_id,
@@ -159,12 +186,23 @@ class EmbeddingWorker:
                 )
 
             clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+        except (CandidatePrivacyUnavailable, PermissionError):
+            try:
+                self.repo.mark_embedding_skipped(node_id, "privacy_restricted", tenant_id=tenant_id)
+            except Exception:
+                # A database outage can make the status write impossible.  The
+                # privacy-safe outcome is still to settle the Redis job rather
+                # than retry provider work under uncertainty.
+                pass
+            clear_pending(self.redis_client, node_id, tenant_id=tenant_id)
+            return
         except Exception as e:
             error_msg = str(e)
             logger.error(
                 "Embedding job failed",
                 extra={"node_id": node_id, "tenant_id": tenant_id, "error": error_msg},
             )
+            attempts = int(job.get("attempts", 0))
             if attempts >= self.max_attempts:
                 self.repo.mark_embedding_failed(node_id, error_msg, tenant_id=tenant_id)
                 job["error"] = error_msg
@@ -179,6 +217,14 @@ class EmbeddingWorker:
             self.repo.mark_embedding_queued(node_id, tenant_id=tenant_id)
             job["error"] = error_msg
             schedule_retry(self.redis_client, job, delay_seconds=delay)
+
+    @staticmethod
+    def _privacy_blocks_node(decision: CandidatePrivacyDecision, tenant_id: str | None) -> bool:
+        """Global opt-out blocks public work while preserving owned tenant work."""
+        return decision in {
+            CandidatePrivacyDecision.BLOCK_ALL,
+            CandidatePrivacyDecision.REVIEW,
+        } or (decision is CandidatePrivacyDecision.BLOCK_GLOBAL and tenant_id is None)
 
     def run(self) -> None:
         while self.running:
@@ -208,13 +254,14 @@ def start_worker() -> None:
     )
 
     try:
-        dsn = assert_startup_schema_ready()
+        dsn = assert_startup_schema_ready(require_privacy_hmac=False)
     except SchemaControlError as exc:
         logger.error("Schema readiness refused", extra={"error_type": type(exc).__name__})
         sys.exit(1)
 
     redis_client = get_redis_client()
     repo = GraphRepository(dsn)
+    privacy_repository = CandidatePrivacyRepository(dsn)
     embedder = EmbeddingProvider(
         backend=os.getenv("EMBEDDING_BACKEND", "sentence-transformers"),
         model_name=os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
@@ -240,6 +287,7 @@ def start_worker() -> None:
         retry_base_seconds=float(os.getenv("EMBEDDING_RETRY_BASE_SECONDS", "10")),
         retry_max_seconds=float(os.getenv("EMBEDDING_RETRY_MAX_SECONDS", "300")),
         global_candidate_embedder=global_candidate_embedder,
+        privacy_repository=privacy_repository,
     )
     worker.run()
 

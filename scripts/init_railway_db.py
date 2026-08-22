@@ -93,6 +93,8 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("unique", table, constraint, comma-separated-columns)
 #        | ("column_type", table, column, format_type)
 #        | ("default", table, column, normalized-expression)
+#        | ("rls", table)
+#        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
     "004_add_external_id_index.sql": [
@@ -574,6 +576,161 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
         ),
         ("forcerls", "candidate_contact_evidence"),
     ],
+    "023_candidate_privacy_directives.sql": [
+        ("table", "candidate_privacy_directive_events"),
+        ("column", "candidate_privacy_directive_events", "cursor"),
+        ("column", "candidate_privacy_directive_events", "event_id"),
+        ("column", "candidate_privacy_directive_events", "directive_id"),
+        ("column", "candidate_privacy_directive_events", "directive_version"),
+        ("column", "candidate_privacy_directive_events", "request_id"),
+        ("column", "candidate_privacy_directive_events", "event_type"),
+        ("column", "candidate_privacy_directive_events", "action"),
+        ("column", "candidate_privacy_directive_events", "scope"),
+        ("column", "candidate_privacy_directive_events", "resulting_state"),
+        ("column", "candidate_privacy_directive_events", "authority_type"),
+        ("column", "candidate_privacy_directive_events", "evidence_ref"),
+        ("column", "candidate_privacy_directive_events", "reason_code"),
+        ("column", "candidate_privacy_directive_events", "issuer"),
+        ("column", "candidate_privacy_directive_events", "actor_id"),
+        ("column", "candidate_privacy_directive_events", "actor_type"),
+        ("column", "candidate_privacy_directive_events", "global_candidate_id"),
+        ("column", "candidate_privacy_directive_events", "candidate_tenant_id"),
+        ("column", "candidate_privacy_directive_events", "candidate_id"),
+        ("column", "candidate_privacy_directive_events", "key_version"),
+        ("column", "candidate_privacy_directive_events", "schema_version"),
+        ("column", "candidate_privacy_directive_events", "effective_at"),
+        ("column", "candidate_privacy_directive_events", "created_at"),
+        ("table", "candidate_privacy_directives"),
+        ("column", "candidate_privacy_directives", "directive_id"),
+        ("column", "candidate_privacy_directives", "action"),
+        ("column", "candidate_privacy_directives", "scope"),
+        ("column", "candidate_privacy_directives", "state"),
+        ("column", "candidate_privacy_directives", "version"),
+        ("column", "candidate_privacy_directives", "authority_type"),
+        ("column", "candidate_privacy_directives", "reason_code"),
+        ("column", "candidate_privacy_directives", "global_candidate_id"),
+        ("column", "candidate_privacy_directives", "candidate_tenant_id"),
+        ("column", "candidate_privacy_directives", "candidate_id"),
+        ("column", "candidate_privacy_directives", "last_event_cursor"),
+        ("column", "candidate_privacy_directives", "effective_at"),
+        ("column", "candidate_privacy_directives", "created_at"),
+        ("column", "candidate_privacy_directives", "updated_at"),
+        ("table", "candidate_privacy_identity_tokens"),
+        ("column", "candidate_privacy_identity_tokens", "directive_id"),
+        ("column", "candidate_privacy_identity_tokens", "identifier_type"),
+        ("column", "candidate_privacy_identity_tokens", "key_version"),
+        ("column", "candidate_privacy_identity_tokens", "token"),
+        ("column", "candidate_privacy_identity_tokens", "created_at"),
+        ("sequence", "candidate_privacy_directive_events_cursor_seq"),
+        (
+            "serial",
+            "candidate_privacy_directive_events",
+            "cursor",
+            "candidate_privacy_directive_events_cursor_seq",
+        ),
+        ("index", "candidate_privacy_events_cursor_idx"),
+        ("index", "candidate_privacy_events_directive_idx"),
+        ("index", "candidate_privacy_directives_global_idx"),
+        ("index", "candidate_privacy_directives_candidate_idx"),
+        ("index", "candidate_privacy_identity_tokens_lookup_idx"),
+        ("constraint", "candidate_privacy_directive_events_pkey"),
+        ("constraint", "candidate_privacy_directive_events_event_id_key"),
+        ("constraint", "candidate_privacy_directive_events_directive_version_check"),
+        ("constraint", "candidate_privacy_directive_events_event_type_check"),
+        ("constraint", "candidate_privacy_directive_events_action_check"),
+        ("constraint", "candidate_privacy_directive_events_scope_check"),
+        ("constraint", "candidate_privacy_directive_events_resulting_state_check"),
+        ("constraint", "candidate_privacy_directive_events_authority_type_check"),
+        ("constraint", "candidate_privacy_directive_events_reason_code_check"),
+        ("constraint", "candidate_privacy_directive_events_issuer_check"),
+        ("constraint", "candidate_privacy_directive_events_actor_id_check"),
+        ("constraint", "candidate_privacy_directive_events_actor_type_check"),
+        ("constraint", "candidate_privacy_directive_events_key_version_check"),
+        ("constraint", "candidate_privacy_directive_events_schema_version_check"),
+        ("constraint", "candidate_privacy_directive_events_global_candidate_id_fkey"),
+        ("constraint", "candidate_privacy_event_action_scope_check"),
+        ("constraint", "candidate_privacy_event_candidate_pair_check"),
+        ("constraint", "candidate_privacy_event_candidate_fkey"),
+        ("constraint", "candidate_privacy_event_directive_version_unique"),
+        ("constraint", "candidate_privacy_event_request_type_unique"),
+        ("constraint", "candidate_privacy_directives_pkey"),
+        ("constraint", "candidate_privacy_directives_action_check"),
+        ("constraint", "candidate_privacy_directives_scope_check"),
+        ("constraint", "candidate_privacy_directives_state_check"),
+        ("constraint", "candidate_privacy_directives_version_check"),
+        ("constraint", "candidate_privacy_directives_authority_type_check"),
+        ("constraint", "candidate_privacy_directives_reason_code_check"),
+        ("constraint", "candidate_privacy_directives_global_candidate_id_fkey"),
+        ("constraint", "candidate_privacy_directives_last_event_cursor_key"),
+        ("constraint", "candidate_privacy_directives_last_event_cursor_fkey"),
+        ("constraint", "candidate_privacy_directive_action_scope_check"),
+        ("constraint", "candidate_privacy_directive_candidate_pair_check"),
+        ("constraint", "candidate_privacy_directive_candidate_fkey"),
+        ("constraint", "candidate_privacy_identity_tokens_pkey"),
+        ("constraint", "candidate_privacy_identity_tokens_directive_id_fkey"),
+        ("constraint", "candidate_privacy_identity_tokens_identifier_type_check"),
+        ("constraint", "candidate_privacy_identity_tokens_key_version_check"),
+        ("constraint", "candidate_privacy_identity_tokens_token_check"),
+        ("rls", "candidate_privacy_directive_events"),
+        ("rls", "candidate_privacy_directives"),
+        ("rls", "candidate_privacy_identity_tokens"),
+        ("policy", "candidate_privacy_directive_events", "candidate_privacy_events_runtime_read"),
+        ("policy", "candidate_privacy_directives", "candidate_privacy_directives_runtime_read"),
+        ("trigger_function", "candidate_privacy_append_only"),
+        (
+            "trigger",
+            "candidate_privacy_directive_events",
+            "candidate_privacy_events_no_mutation",
+            "candidate_privacy_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "candidate_privacy_directive_events",
+            "candidate_privacy_events_no_truncate",
+            "candidate_privacy_append_only",
+            "34",
+        ),
+        (
+            "trigger",
+            "candidate_privacy_identity_tokens",
+            "candidate_privacy_tokens_no_mutation",
+            "candidate_privacy_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "candidate_privacy_identity_tokens",
+            "candidate_privacy_tokens_no_truncate",
+            "candidate_privacy_append_only",
+            "34",
+        ),
+        (
+            "security_definer_function",
+            "candidate_privacy_decision_for(uuid,text,uuid)",
+        ),
+        ("security_definer_function", "candidate_privacy_global_decision(uuid)"),
+        ("security_definer_function", "candidate_privacy_candidate_decision(text,uuid)"),
+        ("security_definer_function", "candidate_privacy_node_decision(uuid)"),
+        ("security_definer_function", "candidate_privacy_resolve_subject(text,bytea)"),
+        (
+            "security_definer_function",
+            "candidate_privacy_resolve_canonical(uuid,text,uuid)",
+        ),
+        (
+            "security_definer_function",
+            "candidate_privacy_match(jsonb,uuid,text,uuid)",
+        ),
+        ("security_definer_function", "candidate_privacy_token_key_versions()"),
+        (
+            "security_definer_function",
+            "candidate_privacy_create_directive(uuid,uuid,text,text,text,uuid,text,text,text,uuid,text,uuid,integer,jsonb,boolean,timestamp with time zone)",
+        ),
+        (
+            "security_definer_function",
+            "candidate_privacy_transition_directive(uuid,bigint,uuid,text,uuid,text,text,text,timestamp with time zone)",
+        ),
+    ],
 }
 
 
@@ -694,6 +851,19 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
             "AND c.relrowsecurity AND c.relforcerowsecurity",
             (check[1],),
         )
+    elif kind == "rls":
+        cur.execute(
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relname = %s AND c.relrowsecurity",
+            (check[1],),
+        )
+    elif kind == "security_definer_function":
+        cur.execute(
+            "SELECT p.prosecdef, p.proconfig FROM pg_proc p WHERE p.oid = to_regprocedure(%s)",
+            (check[1],),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0] and row[1] == ["search_path=pg_catalog, public"])
     elif kind == "sequence":
         cur.execute(
             "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -1105,6 +1275,119 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
     print(f"✓ Runtime role {role} granted table access (no ownership; ledger/receipts hardened)")
 
 
+CANDIDATE_PRIVACY_RUNTIME_FUNCTIONS = (
+    "candidate_privacy_decision_for(uuid,text,uuid)",
+    "candidate_privacy_global_decision(uuid)",
+    "candidate_privacy_candidate_decision(text,uuid)",
+    "candidate_privacy_node_decision(uuid)",
+    "candidate_privacy_resolve_subject(text,bytea)",
+    "candidate_privacy_resolve_canonical(uuid,text,uuid)",
+    "candidate_privacy_match(jsonb,uuid,text,uuid)",
+    "candidate_privacy_token_key_versions()",
+    (
+        "candidate_privacy_create_directive(uuid,uuid,text,text,text,uuid,text,text,text,"
+        "uuid,text,uuid,integer,jsonb,boolean,timestamp with time zone)"
+    ),
+    (
+        "candidate_privacy_transition_directive(uuid,bigint,uuid,text,uuid,text,text,text,"
+        "timestamp with time zone)"
+    ),
+)
+
+
+def _harden_candidate_privacy_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    """Restore the exact 023 runtime privilege boundary after blanket app grants."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    migration_user = cur.fetchone()[0]
+    if role in {migration_user, "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    role_ident = sql.Identifier(role)
+    cur.execute("SELECT to_regclass('public.candidate_privacy_directives')")
+    if cur.fetchone()[0] is None:
+        raise SchemaControlError("candidate privacy authority is missing")
+
+    cur.execute(
+        sql.SQL(
+            "REVOKE ALL ON candidate_privacy_directive_events, "
+            "candidate_privacy_directives, candidate_privacy_identity_tokens FROM {}"
+        ).format(role_ident)
+    )
+    cur.execute(
+        sql.SQL(
+            "REVOKE ALL ON SEQUENCE candidate_privacy_directive_events_cursor_seq FROM {}"
+        ).format(role_ident)
+    )
+    cur.execute(
+        sql.SQL(
+            "GRANT SELECT ON candidate_privacy_directive_events, candidate_privacy_directives TO {}"
+        ).format(role_ident)
+    )
+    for function_signature in CANDIDATE_PRIVACY_RUNTIME_FUNCTIONS:
+        function_sql = sql.SQL(function_signature)
+        cur.execute(sql.SQL("REVOKE ALL ON FUNCTION {} FROM {}").format(function_sql, role_ident))
+        cur.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(function_sql, role_ident))
+    cur.execute(
+        sql.SQL("REVOKE ALL ON FUNCTION candidate_privacy_append_only() FROM {}").format(role_ident)
+    )
+
+
+def _assert_candidate_privacy_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    checks: list[tuple[str, str, bool]] = []
+    for relation in (
+        "candidate_privacy_directive_events",
+        "candidate_privacy_directives",
+    ):
+        checks.append(("table", f"public.{relation}", True))
+    checks.append(("token_table", "public.candidate_privacy_identity_tokens", False))
+
+    for kind, relation, select_expected in checks:
+        cur.execute(
+            "SELECT has_table_privilege(%s,%s,'SELECT'), "
+            "has_table_privilege(%s,%s,'INSERT'), "
+            "has_table_privilege(%s,%s,'UPDATE'), "
+            "has_table_privilege(%s,%s,'DELETE'), "
+            "has_table_privilege(%s,%s,'TRUNCATE'), "
+            "has_table_privilege(%s,%s,'REFERENCES'), "
+            "has_table_privilege(%s,%s,'TRIGGER')",
+            tuple(value for _ in range(7) for value in (role, relation)),
+        )
+        privileges = cur.fetchone()
+        if privileges != (select_expected, False, False, False, False, False, False):
+            raise SchemaControlError(f"candidate privacy {kind} privileges are invalid")
+
+    cur.execute(
+        "SELECT has_sequence_privilege(%s,"
+        "'public.candidate_privacy_directive_events_cursor_seq','USAGE'), "
+        "has_sequence_privilege(%s,"
+        "'public.candidate_privacy_directive_events_cursor_seq','SELECT'), "
+        "has_sequence_privilege(%s,"
+        "'public.candidate_privacy_directive_events_cursor_seq','UPDATE')",
+        (role, role, role),
+    )
+    if cur.fetchone() != (False, False, False):
+        raise SchemaControlError("candidate privacy sequence privileges are invalid")
+
+    for function_signature in CANDIDATE_PRIVACY_RUNTIME_FUNCTIONS:
+        cur.execute(
+            "SELECT has_function_privilege(%s,%s,'EXECUTE')",
+            (role, f"public.{function_signature}"),
+        )
+        if cur.fetchone() != (True,):
+            raise SchemaControlError("candidate privacy function privileges are invalid")
+    cur.execute(
+        "SELECT has_function_privilege(%s,'public.candidate_privacy_append_only()','EXECUTE')",
+        (role,),
+    )
+    if cur.fetchone() != (False,):
+        raise SchemaControlError("candidate privacy trigger function privilege is invalid")
+
+
 def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
     """Disable the app_user role older installs created with a known password."""
     cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'app_user'")
@@ -1238,11 +1521,12 @@ def main():
                     grant_control_read(
                         cur, os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
                     )
+                runtime_role = os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
+                _harden_candidate_privacy_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
-                _assert_runtime_role_catalog(
-                    cur, os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
-                )
+                _assert_runtime_role_catalog(cur, runtime_role)
+                _assert_candidate_privacy_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

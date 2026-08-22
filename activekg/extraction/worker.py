@@ -41,6 +41,8 @@ from activekg.extraction.queue import (
 )
 from activekg.extraction.schema import ExtractionStatus
 from activekg.graph.repository import GraphRepository
+from activekg.privacy.models import CandidatePrivacyDecision
+from activekg.privacy.repository import CandidatePrivacyRepository, CandidatePrivacyUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +161,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        state = cast(WorkerHealthState, self.server.health_state)  # type: ignore[attr-defined]
+        state = cast(WorkerHealthState, self.server.health_state)
         status, payload = worker_health_response(path, self.headers.get("Authorization"), state)
         if payload is None:
             self.send_response(status)
@@ -230,6 +232,7 @@ class ExtractionWorker:
         repo: GraphRepository,
         extraction_client: ExtractionClient,
         health_state: WorkerHealthState,
+        privacy_repository: CandidatePrivacyRepository | None = None,
         *,
         poll_interval_seconds: float = 1.0,
         max_attempts: int = 2,  # Only one fallback attempt
@@ -251,6 +254,7 @@ class ExtractionWorker:
         self.repo = repo
         self.extraction_client = extraction_client
         self.health_state = health_state
+        self.privacy_repository = privacy_repository
         self.poll_interval = poll_interval_seconds
         self.max_attempts = max_attempts
         self.retry_base_seconds = retry_base_seconds
@@ -293,10 +297,17 @@ class ExtractionWorker:
             logger.error("Job missing node_id")
             return
 
-        # Mark as processing
-        self._update_extraction_status(node_id, tenant_id, ExtractionStatus(status="processing"))
-
         try:
+            decision = self._privacy_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self._update_extraction_status(
+                    node_id,
+                    tenant_id,
+                    ExtractionStatus(status="skipped", error="privacy_restricted"),
+                    enforce_privacy=False,
+                )
+                clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
             # Get node
             node = self.repo.get_node(node_id, tenant_id=tenant_id)
             if not node:
@@ -307,6 +318,21 @@ class ExtractionWorker:
                 )
                 clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
                 return
+
+            decision = self._privacy_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self._update_extraction_status(
+                    node_id,
+                    tenant_id,
+                    ExtractionStatus(status="skipped", error="privacy_restricted"),
+                    enforce_privacy=False,
+                )
+                clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
+
+            self._update_extraction_status(
+                node_id, tenant_id, ExtractionStatus(status="processing")
+            )
 
             # Get raw text for extraction (not embedding text with prefix)
             text = self.repo.load_payload_text(node)
@@ -338,6 +364,16 @@ class ExtractionWorker:
             status_props = status.to_props()
             all_props = {**extracted_props, **status_props}
 
+            decision = self._privacy_decision(node_id)
+            if self._privacy_blocks_node(decision, tenant_id):
+                self._update_extraction_status(
+                    node_id,
+                    tenant_id,
+                    ExtractionStatus(status="skipped", error="privacy_restricted"),
+                    enforce_privacy=False,
+                )
+                clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
+                return
             self._update_node_props(node_id, tenant_id, all_props)
 
             logger.info(
@@ -361,6 +397,21 @@ class ExtractionWorker:
 
             clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
 
+        except CandidatePrivacyUnavailable:
+            try:
+                self._update_extraction_status(
+                    node_id,
+                    tenant_id,
+                    ExtractionStatus(status="skipped", error="privacy_restricted"),
+                    enforce_privacy=False,
+                )
+            except Exception:
+                # If the authority database is unavailable, do not turn
+                # uncertainty into provider retries.  Redis settlement is the
+                # privacy-safe operation that remains available.
+                pass
+            clear_extraction_pending(self.redis_client, node_id, tenant_id=tenant_id)
+            return
         except ExtractionError as e:
             self.health_state.provider_failure()
             error_msg = str(e)
@@ -419,26 +470,54 @@ class ExtractionWorker:
             schedule_extraction_retry(self.redis_client, job, delay_seconds=delay)
 
     def _update_extraction_status(
-        self, node_id: str, tenant_id: str | None, status: ExtractionStatus
+        self,
+        node_id: str,
+        tenant_id: str | None,
+        status: ExtractionStatus,
+        *,
+        enforce_privacy: bool = True,
     ) -> None:
         """Update extraction status in node props."""
-        self._update_node_props(node_id, tenant_id, status.to_props())
+        self._update_node_props(
+            node_id,
+            tenant_id,
+            status.to_props(),
+            enforce_privacy=enforce_privacy,
+        )
 
     def _update_node_props(
-        self, node_id: str, tenant_id: str | None, props: dict[str, Any]
+        self,
+        node_id: str,
+        tenant_id: str | None,
+        props: dict[str, Any],
+        *,
+        enforce_privacy: bool = True,
     ) -> None:
         """Merge props into node."""
         with self.repo._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                privacy_sql = (
+                    "AND (candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                    if enforce_privacy
+                    else ""
+                )
+                params: tuple[Any, ...] = (json.dumps(props), node_id)
+                if enforce_privacy:
+                    params = (*params, tenant_id)
                 cur.execute(
-                    """
+                    f"""
                     UPDATE nodes
-                    SET props = COALESCE(props, '{}'::jsonb) || %s::jsonb,
+                    SET props = COALESCE(props, '{{}}'::jsonb) || %s::jsonb,
                         updated_at = now()
                     WHERE id = %s
+                    {privacy_sql}
                     """,
-                    (json.dumps(props), node_id),
+                    params,
                 )
+                if enforce_privacy and cur.rowcount != 1:
+                    raise CandidatePrivacyUnavailable("candidate privacy restriction applies")
 
     def _maybe_sync_to_global_memory(
         self,
@@ -458,6 +537,9 @@ class ExtractionWorker:
             return
 
         try:
+            decision = self._privacy_decision(node_id)
+            if decision is not CandidatePrivacyDecision.ALLOW:
+                return
             from activekg.api.global_memory import sync_applicant_to_global_memory
 
             sync_applicant_to_global_memory(
@@ -471,7 +553,16 @@ class ExtractionWorker:
                 "Synced applicant to global memory",
                 extra={"node_id": node_id, "tenant_id": tenant_id},
             )
+        except CandidatePrivacyUnavailable:
+            raise
         except Exception as e:
+            if getattr(e, "detail", None) in {
+                "candidate_privacy_restricted",
+                "candidate_privacy_unavailable",
+            }:
+                raise CandidatePrivacyUnavailable(
+                    "candidate privacy authority is unavailable"
+                ) from e
             # Non-blocking: global memory sync failure must not break extraction
             logger.warning(
                 "Failed to sync applicant to global memory (non-blocking)",
@@ -480,6 +571,9 @@ class ExtractionWorker:
 
     def _trigger_reembed(self, node_id: str, tenant_id: str | None) -> None:
         """Enqueue re-embed job for node."""
+        decision = self._privacy_decision(node_id)
+        if self._privacy_blocks_node(decision, tenant_id):
+            return
         job_id = enqueue_embedding_job(
             self.redis_client,
             node_id,
@@ -492,6 +586,19 @@ class ExtractionWorker:
                 "Triggered re-embed after extraction",
                 extra={"node_id": node_id, "embed_job_id": job_id},
             )
+
+    def _privacy_decision(self, node_id: str) -> CandidatePrivacyDecision:
+        if self.privacy_repository is None:
+            raise CandidatePrivacyUnavailable("candidate privacy authority is unavailable")
+        return self.privacy_repository.node_decision(node_id)
+
+    @staticmethod
+    def _privacy_blocks_node(decision: CandidatePrivacyDecision, tenant_id: str | None) -> bool:
+        """Global opt-out blocks public work while preserving owned tenant work."""
+        return decision in {
+            CandidatePrivacyDecision.BLOCK_ALL,
+            CandidatePrivacyDecision.REVIEW,
+        } or (decision is CandidatePrivacyDecision.BLOCK_GLOBAL and tenant_id is None)
 
     def run(self) -> None:
         """Main worker loop."""
@@ -564,7 +671,7 @@ def start_extraction_worker() -> None:
     )
 
     try:
-        dsn = assert_startup_schema_ready()
+        dsn = assert_startup_schema_ready(require_privacy_hmac=False)
     except SchemaControlError as exc:
         logger.error("Schema readiness refused", extra={"error_type": type(exc).__name__})
         sys.exit(1)
@@ -586,6 +693,7 @@ def start_extraction_worker() -> None:
 
     redis_client = get_redis_client()
     repo = GraphRepository(dsn)
+    privacy_repository = CandidatePrivacyRepository(dsn)
     extraction_client = ExtractionClient(api_key=groq_key)
 
     worker = ExtractionWorker(
@@ -593,6 +701,7 @@ def start_extraction_worker() -> None:
         repo=repo,
         extraction_client=extraction_client,
         health_state=health_state,
+        privacy_repository=privacy_repository,
         poll_interval_seconds=poll_interval,
         max_attempts=int(os.getenv("EXTRACTION_MAX_ATTEMPTS", "2")),
         retry_base_seconds=float(os.getenv("EXTRACTION_RETRY_BASE_SECONDS", "10")),

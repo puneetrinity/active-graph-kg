@@ -35,7 +35,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
     manifest = json.loads((ROOT / "scripts/schema_control_callers.json").read_text())
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
-    assert len(MIGRATIONS) == 22 == len(set(MIGRATIONS))
+    assert len(MIGRATIONS) == 23 == len(set(MIGRATIONS))
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
     )
@@ -176,15 +176,15 @@ def test_all_runtime_entrypoints_admit_schema_before_dependencies() -> None:
     embedding = (
         (ROOT / "activekg/embedding/worker.py").read_text().split("def start_worker()", 1)[1]
     )
-    assert embedding.index("dsn = assert_startup_schema_ready()") < embedding.index(
-        "redis_client = get_redis_client()"
-    )
+    assert embedding.index(
+        "dsn = assert_startup_schema_ready(require_privacy_hmac=False)"
+    ) < embedding.index("redis_client = get_redis_client()")
     extraction = (
         (ROOT / "activekg/extraction/worker.py")
         .read_text()
         .split("def start_extraction_worker()", 1)[1]
     )
-    readiness = extraction.index("dsn = assert_startup_schema_ready()")
+    readiness = extraction.index("dsn = assert_startup_schema_ready(require_privacy_hmac=False)")
     for dependency in (
         "assert_extraction_models_configured()",
         'groq_key = os.getenv("GROQ_API_KEY")',
@@ -251,6 +251,19 @@ def test_guard_is_green_and_mutations_restore_from_saved_bytes(tmp_path: Path) -
     assert any("one-shot/no-healthcheck" in finding for finding in findings)
     descriptor.write_bytes(descriptor_saved)
     assert descriptor.read_bytes() == descriptor_saved
+
+    workflow = copied / ".github/workflows/ci.yml"
+    workflow_saved = workflow.read_bytes()
+    workflow.write_text(
+        workflow.read_text().replace(
+            "postgresql://activekg_unit_test:activekg@127.0.0.1:5432/memory_unit_test",
+            "postgresql://activekg:activekg@127.0.0.1:5432/memory_unit_test",
+        )
+    )
+    findings = schema_control_guard.check(copied)
+    assert any("CI fresh-init migration role is not disposable" in finding for finding in findings)
+    workflow.write_bytes(workflow_saved)
+    assert workflow.read_bytes() == workflow_saved
 
     retired = copied / "scripts/db_bootstrap.sh"
     retired.write_text('#!/bin/sh\npsql "$DATABASE_URL"\n')

@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
@@ -35,10 +36,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # JWT authentication and rate limiting
 from activekg.api.auth import (
     JWT_ENABLED,
+    JWT_ISSUER,
+    SIGNAL_JWT_ISSUER,
     JWTClaims,
     get_jwt_claims,
     require_scope,
     verification_key_problems,
+)
+from activekg.api.candidate_privacy import (
+    router as candidate_privacy_router,
+)
+from activekg.api.candidate_privacy import (
+    set_repository as set_candidate_privacy_repository,
 )
 from activekg.api.global_memory import (
     LEGACY_GLOBAL_SEARCH_ENABLED,
@@ -101,6 +110,21 @@ from activekg.graph.repository import GraphRepository
 # Prometheus observability
 from activekg.observability import track_embedding_health, track_search_request
 from activekg.observability.metrics import record_api_error
+from activekg.privacy.config import (
+    candidate_privacy_configuration_problems,
+    candidate_privacy_key_versions_for_readiness,
+    load_candidate_privacy_config,
+)
+from activekg.privacy.identity import (
+    PRIVACY_IDENTIFIER_TYPES,
+    CandidatePrivacyIdentityError,
+    normalize_privacy_identifier,
+)
+from activekg.privacy.models import CandidatePrivacyDecision
+from activekg.privacy.repository import (
+    CandidatePrivacyRepository,
+    CandidatePrivacyUnavailable,
+)
 from activekg.refresh.scheduler import RefreshScheduler
 
 # Metrics enabled flag
@@ -337,6 +361,7 @@ if TEST_MODE:
     embedder = None
     scheduler: RefreshScheduler | None = None
     candidate_repo: CandidateRepository | None = None
+    candidate_privacy_repo: CandidatePrivacyRepository | None = None
     logger.warning("Running in TEST_MODE - DB connections deferred")
 else:
     # Normal mode: eager initialization
@@ -344,12 +369,98 @@ else:
     embedder = EmbeddingProvider(backend=EMBEDDING_BACKEND, model_name=EMBEDDING_MODEL)
     scheduler = None
     candidate_repo = CandidateRepository(DSN)
+    candidate_privacy_repo = CandidatePrivacyRepository(
+        DSN,
+        pool=candidate_repo.pool,
+        config=load_candidate_privacy_config(require_hmac=True),
+    )
+    candidate_repo.set_privacy_repository(candidate_privacy_repo)
 
 app.include_router(global_memory_router)
+app.include_router(candidate_privacy_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
 app.include_router(grounded_qa_retirement_router)
 app.include_router(public_observability_retirement_router)
+set_candidate_privacy_repository(candidate_privacy_repo)
+
+
+def _candidate_bearing_node(
+    classes: list[str], props: dict[str, Any], metadata: dict[str, Any]
+) -> bool:
+    class_names = {value.strip().lower() for value in classes}
+    return bool(
+        class_names & {"candidate", "person", "resume", "applicant"}
+        or metadata.get("provenance_type") in {"platform_applicant", "org_upload"}
+        or any(
+            key in props or key in metadata
+            for key in ("candidate_id", "global_candidate_id", "primary_email", "email")
+        )
+    )
+
+
+def _require_candidate_node_write_allowed(
+    *,
+    classes: list[str],
+    props: dict[str, Any],
+    metadata: dict[str, Any],
+    tenant_id: str | None,
+    global_use: bool = False,
+) -> None:
+    """Check transient/canonical candidate evidence before the first node write."""
+    if not _candidate_bearing_node(classes, props, metadata):
+        return
+    if candidate_privacy_repo is None:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable")
+
+    identifiers = []
+    field_types = {
+        "email": "email",
+        "primary_email": "email",
+        "phone": "phone",
+        "primary_phone": "phone",
+        "linkedin_url": "linkedin_url",
+        "github_url": "github_url",
+        "signal_candidate_id": "signal_candidate_id",
+        "vantahire_application_id": "vantahire_application_id",
+        "vantahire_resume_id": "vantahire_resume_id",
+    }
+    try:
+        for source in (props, metadata):
+            for field, identifier_type in field_types.items():
+                value = source.get(field)
+                if isinstance(value, str) and value.strip():
+                    identifiers.append(normalize_privacy_identifier(identifier_type, value))
+        for identifier_type, raw in _candidate_payload_identifiers(props, metadata):
+            identifiers.append(normalize_privacy_identifier(identifier_type, raw))
+    except CandidatePrivacyIdentityError as exc:
+        raise HTTPException(status_code=422, detail="candidate_privacy_identifier_invalid") from exc
+    identifiers = list(
+        {
+            (identifier.identifier_type, identifier.normalized): identifier
+            for identifier in identifiers
+        }.values()
+    )
+
+    global_candidate_id = props.get("global_candidate_id") or metadata.get("global_candidate_id")
+    candidate_id = props.get("candidate_id") or metadata.get("candidate_id")
+    candidate_tenant_id = (
+        props.get("candidate_tenant_id") or metadata.get("candidate_tenant_id") or tenant_id
+    )
+    try:
+        decision = candidate_privacy_repo.evaluate(
+            identifiers=identifiers,
+            global_candidate_id=global_candidate_id,
+            candidate_tenant_id=candidate_tenant_id if candidate_id else None,
+            candidate_id=candidate_id,
+        )
+    except CandidatePrivacyUnavailable as exc:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
+    if decision in {CandidatePrivacyDecision.BLOCK_ALL, CandidatePrivacyDecision.REVIEW} or (
+        global_use and decision is CandidatePrivacyDecision.BLOCK_GLOBAL
+    ):
+        raise HTTPException(status_code=409, detail="candidate_privacy_restricted")
+
 
 # Global-candidate vector search reuses the process-wide embedding model.
 if embedder is not None:
@@ -499,6 +610,12 @@ def readyz(
                 ),
                 jwt_enabled=JWT_ENABLED,
                 jwt_problems=verification_key_problems(),
+                privacy_problems=candidate_privacy_configuration_problems(
+                    require_hmac=True,
+                    trusted_flow_issuer=JWT_ISSUER or "",
+                    trusted_signal_issuer=SIGNAL_JWT_ISSUER or "",
+                ),
+                privacy_key_versions=candidate_privacy_key_versions_for_readiness(),
             ),
             force_refresh=force_refresh,
         )
@@ -643,38 +760,61 @@ def debug_search_sanity(claims: JWTClaims | None = Depends(get_jwt_claims)):
     try:
         with repo._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                visibility = (
+                    "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
                 # Total visible nodes
-                cur.execute("SELECT COUNT(*) FROM nodes")
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE {visibility}",
+                    (tenant_id,),
+                )
                 total_nodes = cur.fetchone()[0]
 
                 # Nodes with embeddings
-                cur.execute("SELECT COUNT(*) FROM nodes WHERE embedding IS NOT NULL")
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE embedding IS NOT NULL AND {visibility}",
+                    (tenant_id,),
+                )
                 nodes_with_embeddings = cur.fetchone()[0]
 
                 # Nodes with text_search_vector
-                cur.execute("SELECT COUNT(*) FROM nodes WHERE text_search_vector IS NOT NULL")
+                cur.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE text_search_vector IS NOT NULL AND "
+                    f"{visibility}",
+                    (tenant_id,),
+                )
                 nodes_with_text_search = cur.fetchone()[0]
 
                 # Sample nodes WITH embeddings (up to 5)
-                cur.execute("""
+                cur.execute(
+                    f"""
                     SELECT id, classes, (props->>'text' IS NOT NULL AND props->>'text' != '') as has_text
                     FROM nodes
                     WHERE embedding IS NOT NULL
+                      AND {visibility}
                     ORDER BY created_at DESC
                     LIMIT 5
-                """)
+                """,
+                    (tenant_id,),
+                )
                 sample_with_embedding = [
                     {"id": row[0], "classes": row[1], "has_text": row[2]} for row in cur.fetchall()
                 ]
 
                 # Sample nodes WITHOUT embeddings (up to 5)
-                cur.execute("""
+                cur.execute(
+                    f"""
                     SELECT id, classes, (props->>'text' IS NOT NULL AND props->>'text' != '') as has_text
                     FROM nodes
                     WHERE embedding IS NULL
+                      AND {visibility}
                     ORDER BY created_at DESC
                     LIMIT 5
-                """)
+                """,
+                    (tenant_id,),
+                )
                 sample_without_embedding = [
                     {"id": row[0], "classes": row[1], "has_text": row[2]} for row in cur.fetchall()
                 ]
@@ -746,11 +886,22 @@ def debug_embed_info(claims: JWTClaims | None = Depends(get_jwt_claims)):
 
         with repo._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                visibility = (
+                    "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
                 # Counts
-                cur.execute("SELECT COUNT(*) FROM nodes")
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE {visibility}",
+                    (tenant_id,),
+                )
                 total_nodes = int(cur.fetchone()[0])
 
-                cur.execute("SELECT COUNT(*) FROM nodes WHERE embedding IS NOT NULL")
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE embedding IS NOT NULL AND {visibility}",
+                    (tenant_id,),
+                )
                 with_embedding = int(cur.fetchone()[0])
                 without_embedding = max(0, total_nodes - with_embedding)
 
@@ -775,7 +926,11 @@ def debug_embed_info(claims: JWTClaims | None = Depends(get_jwt_claims)):
                     pass
 
                 # Sample up to 100 embeddings for norm and dimension checks
-                cur.execute("SELECT id, embedding FROM nodes WHERE embedding IS NOT NULL LIMIT 100")
+                cur.execute(
+                    "SELECT id, embedding FROM nodes WHERE embedding IS NOT NULL AND "
+                    f"{visibility} LIMIT 100",
+                    (tenant_id,),
+                )
                 rows = cur.fetchall()
                 for rid, remb in rows:
                     try:
@@ -792,7 +947,7 @@ def debug_embed_info(claims: JWTClaims | None = Depends(get_jwt_claims)):
                 # last_refreshed stats for nodes with embeddings
                 try:
                     cur.execute(
-                        """
+                        f"""
                         SELECT
                           COUNT(last_refreshed) AS n,
                           MIN(EXTRACT(EPOCH FROM (now() - last_refreshed))) AS age_min,
@@ -800,7 +955,9 @@ def debug_embed_info(claims: JWTClaims | None = Depends(get_jwt_claims)):
                           MAX(EXTRACT(EPOCH FROM (now() - last_refreshed))) AS age_max
                         FROM nodes
                         WHERE embedding IS NOT NULL AND last_refreshed IS NOT NULL
-                        """
+                          AND {visibility}
+                        """,
+                        (tenant_id,),
                     )
                     row = cur.fetchone()
                     if row:
@@ -1050,6 +1207,13 @@ def create_node(
     else:
         tenant_id = node.tenant_id or "default"
 
+    _require_candidate_node_write_allowed(
+        classes=node.classes,
+        props=node.props,
+        metadata=node.metadata,
+        tenant_id=tenant_id,
+    )
+
     redis_client = None
     if AUTO_EMBED_ON_CREATE and EMBEDDING_ASYNC:
         redis_client = _get_embedding_redis()
@@ -1168,8 +1332,12 @@ def _update_extraction_status(node_id: str, tenant_id: str | None, status: str) 
                 SET props = COALESCE(props, '{}'::jsonb) || %s::jsonb,
                     updated_at = now()
                 WHERE id = %s
+                  AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                       candidate_privacy_node_decision(id) = 'block_global'
+                       AND tenant_id IS NOT NULL
+                       AND tenant_id IS NOT DISTINCT FROM %s))
                 """,
-                (json.dumps({"extraction_status": status}), node_id),
+                (json.dumps({"extraction_status": status}), node_id, tenant_id),
             )
 
 
@@ -1239,6 +1407,12 @@ def create_nodes_batch(
             tenant_id = item.tenant_id or "default"
 
         try:
+            _require_candidate_node_write_allowed(
+                classes=item.classes,
+                props=item.props,
+                metadata=item.metadata,
+                tenant_id=tenant_id,
+            )
             n = Node(
                 classes=item.classes,
                 props=item.props,
@@ -1361,8 +1535,12 @@ def list_nodes(
     with repo._conn(tenant_id=effective_tenant_id) as conn:
         with conn.cursor() as cur:
             # Build query based on filter
-            where_parts: list[str] = []
-            params: list[Any] = []
+            where_parts: list[str] = [
+                "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                "candidate_privacy_node_decision(id) = 'block_global' "
+                "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+            ]
+            params: list[Any] = [effective_tenant_id]
             if not JWT_ENABLED and tenant_id:
                 logger.info(
                     "Dev tenant filter applied for /nodes",
@@ -1578,6 +1756,59 @@ _EXT_MIME: dict[str, str] = {
     ".htm": "text/html",
     ".txt": "text/plain",
 }
+_UPLOAD_EMAIL_RE = re.compile(r"(?i)(?<![\w.+-])[\w.+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+")
+_UPLOAD_LINKEDIN_RE = re.compile(r"(?i)https?://(?:www\.)?linkedin\.com/in/[^\s<>\"']+")
+_UPLOAD_GITHUB_RE = re.compile(r"(?i)https?://(?:www\.)?github\.com/[^\s<>\"']+")
+_UPLOAD_PHONE_RE = re.compile(r"(?<!\w)\+?[0-9][0-9().\s-]{7,}[0-9](?!\w)")
+
+
+def _iter_candidate_payload_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_candidate_payload_strings(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _iter_candidate_payload_strings(nested)
+
+
+def _candidate_payload_identifiers(*values: Any) -> list[tuple[str, str]]:
+    """Extract bounded strong identifiers transiently; never persist or log them."""
+    normalized: dict[tuple[str, str], tuple[str, str]] = {}
+    for value in values:
+        for text in _iter_candidate_payload_strings(value):
+            candidates = (
+                [("email", match.group(0)) for match in _UPLOAD_EMAIL_RE.finditer(text)]
+                + [
+                    ("linkedin_url", match.group(0).rstrip(".,;:)]}"))
+                    for match in _UPLOAD_LINKEDIN_RE.finditer(text)
+                ]
+                + [
+                    ("github_url", match.group(0).rstrip(".,;:)]}"))
+                    for match in _UPLOAD_GITHUB_RE.finditer(text)
+                ]
+                + [("phone", match.group(0)) for match in _UPLOAD_PHONE_RE.finditer(text)]
+            )
+            for identifier_type, raw in candidates:
+                try:
+                    identifier = normalize_privacy_identifier(identifier_type, raw)
+                except CandidatePrivacyIdentityError:
+                    continue
+                normalized[(identifier.identifier_type, identifier.normalized)] = (
+                    identifier_type,
+                    raw,
+                )
+                if len(normalized) > 8:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="candidate_privacy_subject_too_many_identifiers",
+                    )
+    return list(normalized.values())
+
+
+def _candidate_upload_identifiers(text: str) -> list[tuple[str, str]]:
+    return _candidate_payload_identifiers(text)
 
 
 @app.post("/upload", response_model=None, dependencies=[Depends(require_scope("kg:write"))])
@@ -1658,6 +1889,14 @@ async def upload_files(
                 file_results.append({"filename": fname, "chunks": 0, "status": "skipped"})
                 skipped += 1
                 continue
+
+            if _candidate_bearing_node(class_list, {}, {}):
+                _require_candidate_ingest_allowed(
+                    _candidate_upload_identifiers(text),
+                    tenant_id=None,
+                    candidate_id=None,
+                    global_use=True,
+                )
 
             content_hash = sha256(text.encode()).hexdigest()[:16]
             external_id = f"upload:{effective_tenant}:{fname}:{content_hash}"
@@ -2072,6 +2311,8 @@ def create_edge(
         )
         repo.create_edge(e)
         return {"status": "created", "src": e.src, "rel": e.rel, "dst": e.dst}
+    except PermissionError as ex:
+        raise HTTPException(status_code=409, detail="candidate_privacy_restricted") from ex
     except Exception as ex:
         logger.error("Edge creation failed", extra_fields={"error": str(ex)})
         raise HTTPException(status_code=500, detail=f"Edge creation failed: {str(ex)}")
@@ -2103,8 +2344,15 @@ def list_events(
         # Use repo connection for RLS support
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                query = "SELECT id, node_id, type, payload, created_at FROM events WHERE 1=1"
-                params = []
+                query = (
+                    "SELECT id, node_id, type, payload, created_at FROM events WHERE 1=1 "
+                    "AND (node_id IS NULL OR candidate_privacy_node_decision(node_id) = 'allow' "
+                    "OR (candidate_privacy_node_decision(node_id) = 'block_global' AND EXISTS ("
+                    "SELECT 1 FROM nodes privacy_node WHERE privacy_node.id = events.node_id "
+                    "AND privacy_node.tenant_id IS NOT NULL "
+                    "AND privacy_node.tenant_id IS NOT DISTINCT FROM %s)))"
+                )
+                params = [effective_tenant_id]
 
                 if node_id:
                     query += " AND node_id = %s"
@@ -2161,12 +2409,16 @@ def get_lineage(
         effective_tenant_id = tenant_id if tenant_id else "default"  # Dev mode only
 
     try:
+        if repo.get_node(node_id, tenant_id=effective_tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Node not found")
         lineage = repo.get_lineage(node_id, max_depth, tenant_id=effective_tenant_id)
         return {
             "node_id": node_id,
             "ancestors": lineage,
             "depth": len(lineage),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Lineage retrieval failed", extra_fields={"error": str(e), "node_id": node_id})
         raise HTTPException(status_code=500, detail=f"Lineage retrieval failed: {str(e)}")
@@ -2321,10 +2573,14 @@ def embedding_status(
     status_counts: dict[str, int] = {}
     with repo._conn(tenant_id=effective_tenant_id) as conn:
         with conn.cursor() as cur:
-            where = ""
-            params: list[Any] = []
+            where = (
+                "WHERE (candidate_privacy_node_decision(id) = 'allow' OR ("
+                "candidate_privacy_node_decision(id) = 'block_global' "
+                "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+            )
+            params: list[Any] = [effective_tenant_id]
             if effective_tenant_id:
-                where = "WHERE tenant_id = %s"
+                where += " AND tenant_id = %s"
                 params.append(effective_tenant_id)
             cur.execute(
                 f"""
@@ -2375,10 +2631,14 @@ def extraction_status(
     status_counts: dict[str, int] = {}
     with repo._conn(tenant_id=effective_tenant_id) as conn:
         with conn.cursor() as cur:
-            where = ""
-            params: list[Any] = []
+            where = (
+                "WHERE (candidate_privacy_node_decision(id) = 'allow' OR ("
+                "candidate_privacy_node_decision(id) = 'block_global' "
+                "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+            )
+            params: list[Any] = [effective_tenant_id]
             if effective_tenant_id:
-                where = "WHERE tenant_id = %s"
+                where += " AND tenant_id = %s"
                 params.append(effective_tenant_id)
             cur.execute(
                 f"""
@@ -2453,6 +2713,8 @@ def extraction_requeue(
                         FROM nodes
                         WHERE id = ANY(%s)
                           AND tenant_id = %s
+                          AND candidate_privacy_node_decision(id)
+                              NOT IN ('block_all', 'review')
                         """,
                         (request.node_ids, effective_tenant_id),
                     )
@@ -2462,6 +2724,7 @@ def extraction_requeue(
                         SELECT id, tenant_id
                         FROM nodes
                         WHERE id = ANY(%s)
+                          AND candidate_privacy_node_decision(id) = 'allow'
                         """,
                         (request.node_ids,),
                     )
@@ -2471,8 +2734,12 @@ def extraction_requeue(
         # Query nodes by extraction_status
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                where = "WHERE 1=1"
-                filter_params: list[Any] = []
+                where = (
+                    "WHERE (candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
+                filter_params: list[Any] = [effective_tenant_id]
 
                 if effective_tenant_id:
                     where += " AND tenant_id = %s"
@@ -2554,8 +2821,13 @@ def embedding_requeue(
     if request.backfill_ready:
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                where = "WHERE embedding IS NOT NULL AND embedding_status != 'ready'"
-                params: list[Any] = []
+                where = (
+                    "WHERE embedding IS NOT NULL AND embedding_status != 'ready' "
+                    "AND (candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
+                params: list[Any] = [effective_tenant_id]
                 if effective_tenant_id:
                     where += " AND tenant_id = %s"
                     params.append(effective_tenant_id)
@@ -2583,8 +2855,12 @@ def embedding_requeue(
                     SELECT id, tenant_id, embedding IS NULL AS missing
                     FROM nodes
                     WHERE id = ANY(%s)
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     """,
-                    (request.node_ids,),
+                    (request.node_ids, effective_tenant_id),
                 )
                 for row in cur.fetchall():
                     missing = bool(row[2])
@@ -2594,8 +2870,12 @@ def embedding_requeue(
     else:
         with repo._conn(tenant_id=effective_tenant_id) as conn:
             with conn.cursor() as cur:
-                where = "WHERE 1=1"
-                filter_params: list[Any] = []
+                where = (
+                    "WHERE (candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
+                filter_params: list[Any] = [effective_tenant_id]
 
                 if request.status and request.status.lower() != "all":
                     where += " AND embedding_status = %s"
@@ -2755,10 +3035,14 @@ def get_node_versions(
         else:
             tenant_id = None
 
+        if repo.get_node(node_id, tenant_id=tenant_id) is None:
+            raise HTTPException(status_code=404, detail="Node not found")
         versions = repo.get_node_versions(node_id, limit=limit, tenant_id=tenant_id)
 
         return {"node_id": node_id, "versions": versions, "count": len(versions)}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(
             "Node versions query failed", extra_fields={"node_id": node_id, "error": str(e)}
@@ -3135,6 +3419,17 @@ def _execute_candidate_resolve(
             warnings=warnings,
         )
 
+    matched_candidate_id = next(iter(seen_candidate_ids)) if seen_candidate_ids else None
+    existing_private_vantahire = bool(
+        payload.source == "vantahire" and tenant_id and matched_candidate_id
+    )
+    _require_candidate_ingest_allowed(
+        [(itype, raw) for itype, raw, _norm, _conf, _meta in normalized],
+        tenant_id=tenant_id if matched_candidate_id else None,
+        candidate_id=matched_candidate_id,
+        global_use=not existing_private_vantahire,
+    )
+
     profile = payload.profile or CandidateProfileInput()
 
     # Identifiers blocked from attachment due to a tolerated strong-signal mismatch.
@@ -3363,6 +3658,39 @@ def _execute_candidate_resolve(
         conflicts=[],
         warnings=warnings,
     )
+
+
+def _require_candidate_ingest_allowed(
+    identifiers: list[tuple[str, str]],
+    *,
+    tenant_id: str | None,
+    candidate_id: str | None,
+    global_use: bool,
+) -> None:
+    if not identifiers and candidate_id is None:
+        return
+    if candidate_privacy_repo is None:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable")
+    try:
+        privacy_identifiers = [
+            normalize_privacy_identifier(identifier_type, raw)
+            for identifier_type, raw in identifiers
+            if identifier_type in PRIVACY_IDENTIFIER_TYPES
+        ]
+        privacy_decision = candidate_privacy_repo.evaluate(
+            identifiers=privacy_identifiers,
+            candidate_tenant_id=tenant_id if candidate_id else None,
+            candidate_id=candidate_id,
+        )
+    except CandidatePrivacyIdentityError as exc:
+        raise HTTPException(status_code=422, detail="candidate_privacy_identifier_invalid") from exc
+    except CandidatePrivacyUnavailable as exc:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
+    if privacy_decision in {
+        CandidatePrivacyDecision.BLOCK_ALL,
+        CandidatePrivacyDecision.REVIEW,
+    } or (global_use and privacy_decision is CandidatePrivacyDecision.BLOCK_GLOBAL):
+        raise HTTPException(status_code=409, detail="candidate_privacy_restricted")
 
 
 # ----------------------------------------------------------------------
@@ -3773,6 +4101,11 @@ def _mirror_signal_candidate_to_global(
         finally:
             gm_conn.close()
     except Exception as gm_err:
+        if getattr(gm_err, "detail", None) in {
+            "candidate_privacy_restricted",
+            "candidate_privacy_unavailable",
+        }:
+            raise
         logger.warning(
             "Global-memory mirror failed for signal candidate",
             extra_fields={
@@ -3903,6 +4236,12 @@ def resolve_candidate_from_signal(
         )
 
     identifiers, skipped = _collect_signal_identifiers(payload)
+    _require_candidate_ingest_allowed(
+        [(item.identifier_type, item.value) for item in identifiers],
+        tenant_id=None,
+        candidate_id=None,
+        global_use=True,
+    )
 
     source_payload: dict[str, Any] = payload.model_dump(mode="json", exclude_none=False)
     if skipped:
@@ -4017,6 +4356,13 @@ def resolve_candidate_from_signal(
             source="signal",
             source_record_id=payload.signal_candidate_id,
         )
+        if latest_record is not None:
+            _require_candidate_ingest_allowed(
+                [(item.identifier_type, item.value) for item in identifiers],
+                tenant_id=tenant_id,
+                candidate_id=latest_record.candidate_id,
+                global_use=True,
+            )
         mirror_payload = payload
         if _signal_observation_is_not_newer(payload.profile_observed_at, latest_record):
             assert latest_record is not None

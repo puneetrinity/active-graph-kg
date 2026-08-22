@@ -428,7 +428,11 @@ def assert_no_product_row_mutation(cur: psycopg.Cursor[Any]) -> None:
         raise SchemaControlError("schema-control transaction modified a non-control relation")
 
 
-def assert_startup_schema_ready(dsn: str | None = None) -> str:
+def assert_startup_schema_ready(
+    dsn: str | None = None,
+    *,
+    require_privacy_hmac: bool = True,
+) -> str:
     """Prove schema/control/role readiness before any runtime dependency starts."""
 
     runtime_dsn = dsn or resolve_runtime_dsn()
@@ -436,7 +440,21 @@ def assert_startup_schema_ready(dsn: str | None = None) -> str:
         raise SchemaControlError("ACTIVEKG_DSN is not configured")
     # Local import prevents the common module from importing API machinery at
     # module-import time while still sharing the exact /readyz catalog core.
+    from activekg.api.auth import JWT_ISSUER, SIGNAL_JWT_ISSUER
     from activekg.api.operational import bounded_readiness_check
+    from activekg.privacy.config import (
+        candidate_privacy_configuration_problems,
+        candidate_privacy_key_versions,
+    )
+
+    privacy_problems = candidate_privacy_configuration_problems(
+        require_hmac=require_privacy_hmac,
+        trusted_flow_issuer=JWT_ISSUER or "",
+        trusted_signal_issuer=SIGNAL_JWT_ISSUER or "",
+    )
+    privacy_versions = (
+        candidate_privacy_key_versions() if require_privacy_hmac and not privacy_problems else None
+    )
 
     pool = ConnectionPool(
         runtime_dsn,
@@ -453,6 +471,8 @@ def assert_startup_schema_ready(dsn: str | None = None) -> str:
             unsafe_search_configuration=False,
             jwt_enabled=True,
             jwt_problems=[],
+            privacy_problems=privacy_problems,
+            privacy_key_versions=privacy_versions,
         )
     finally:
         pool.close()

@@ -66,6 +66,7 @@ export SECOND_TOKEN='<optional, for cross-tenant governance tests>'
 | `init_railway_db.py` | Manual release-service migration runner |
 | `adopt_schema_control.py` | One-time metadata-only existing-target adoption |
 | `schema_control_guard.py` | CI caller/authority/migration immutability guard |
+| `candidate_privacy_surface_guard.py` | CI census for every candidate reader, writer, worker fence and explicit exclusion |
 
 ---
 
@@ -104,6 +105,6 @@ make demo-run && make open-grafana
 ## Notes
 
 - All scripts assume standard port 5432 for Postgres, 8000 for API
-- Scripts use `ACTIVEKG_DSN` or `DATABASE_URL` fallback
+- Runtime scripts use `ACTIVEKG_DSN`; production never falls back to `DATABASE_URL`
 - Most bash scripts are executable (`chmod +x`)
 - Python scripts require venv activation

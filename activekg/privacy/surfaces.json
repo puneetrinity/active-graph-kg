@@ -1,0 +1,2350 @@
+{
+  "version": 1,
+  "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
+  "generated_contract": {
+    "discovered_rows": 122,
+    "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
+  },
+  "explicit_exclusions": [
+    {
+      "id": "retained-feedback-event-audit",
+      "file": "activekg/api/global_memory.py",
+      "symbol": "ingest_feedback_events",
+      "reason": "Retained tenant audit/decision evidence only; it is not a candidate-profile read."
+    },
+    {
+      "id": "restrictive-contact-suppression",
+      "file": "activekg/api/global_memory.py",
+      "symbol": "suppress_contact_evidence",
+      "reason": "Restrictive-only suppression can reduce contact use and cannot expose or expand a profile."
+    },
+    {
+      "id": "migration-and-health-catalog",
+      "files": [
+        "activekg/common/schema_control.py",
+        "activekg/api/operational.py"
+      ],
+      "reason": "Bounded schema/health metadata only; product rows are not returned."
+    },
+    {
+      "id": "retired-products",
+      "files": [
+        "activekg/api/retirement.py",
+        "activekg/api/admin_connectors.py",
+        "activekg/triggers/trigger_engine.py"
+      ],
+      "reason": "Connector, semantic-trigger, and grounded-Q&A registrations remain 410/unwired."
+    }
+  ],
+  "references": [
+    {
+      "file": "activekg/api/admin_connectors.py",
+      "symbol": "ingest",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Retired connector registration is a 410 tombstone; its dormant implementation is not a reachable ingest authority."
+    },
+    {
+      "file": "activekg/api/candidate_privacy.py",
+      "symbol": "create_directive",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidate-privacy/directives"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and CandidatePrivacyRepository command/read contract.",
+      "test_id": "privacy-api-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/candidate_privacy.py",
+      "symbol": "transition_directive",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidate-privacy/directives/{directive_id}/transitions"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and CandidatePrivacyRepository command/read contract.",
+      "test_id": "privacy-api-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/candidate_privacy.py",
+      "symbol": "eligibility_batch",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidate-privacy/eligibility/batch"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and CandidatePrivacyRepository command/read contract.",
+      "test_id": "privacy-api-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/candidate_privacy.py",
+      "symbol": "changes",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /candidate-privacy/changes"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and CandidatePrivacyRepository command/read contract.",
+      "test_id": "privacy-api-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/candidate_privacy.py",
+      "symbol": "snapshot",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /candidate-privacy/snapshot"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and CandidatePrivacyRepository command/read contract.",
+      "test_id": "privacy-api-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "_find_existing_all",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "_resolve_suppression_candidate",
+      "tables": [
+        "candidate_identifiers",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "public_global",
+      "actions": [],
+      "reason": "Restrictive-only contact suppression lookup is preserved and cannot expose or expand a candidate profile."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "_assert_public_candidate_visible",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates",
+        "tenant_candidate_access"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "upsert_global_candidate",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/upsert"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "get_by_anchor",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates",
+        "tenant_candidate_access"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /global-candidates/by-anchor"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "create_provenance",
+      "tables": [
+        "candidate_provenance"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/{candidate_id}/provenance"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "upsert_access",
+      "tables": [
+        "tenant_candidate_access"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/{candidate_id}/access"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "sync_applicant_to_global_memory",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates",
+        "tenant_candidate_access"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "upsert_signal_candidate_to_global",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "public_candidate_exclusions",
+      "tables": [
+        "candidate_provenance",
+        "candidates",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /public-candidates/exclusions"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "resolve_public_identities",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/public-identities"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "search_global_candidates",
+      "tables": [
+        "candidate_identifiers",
+        "candidate_provenance",
+        "candidates",
+        "global_candidates",
+        "tenant_candidate_access"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/search"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/global_memory.py",
+      "symbol": "resume_refs",
+      "tables": [
+        "candidate_provenance",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /global-candidates/resume-refs"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "<module>",
+      "tables": [],
+      "calls": [
+        "CandidateRepository"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_route_name",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Route-label mapping contains a SQL-like nodes token but performs no candidate data access."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "debug_search_sanity",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "debug_embed_info",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "_background_embed",
+      "tables": [],
+      "calls": [
+        "append_event",
+        "update_node_embedding",
+        "write_embedding_history"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "create_node",
+      "tables": [],
+      "calls": [
+        "enqueue_embedding_job",
+        "enqueue_extraction_job"
+      ],
+      "routes": [
+        "POST /nodes"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Strong-identifier decision is checked before the first node write; repository candidate-link fences remain authoritative.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "_update_extraction_status",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "create_nodes_batch",
+      "tables": [],
+      "calls": [
+        "enqueue_embedding_job",
+        "enqueue_extraction_job"
+      ],
+      "routes": [
+        "POST /nodes/batch"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Every candidate-bearing item is checked before its first node write; repository candidate-link fences remain authoritative.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "list_nodes",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /nodes"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_node_by_external_id",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /nodes/by-external-id"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository read invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_node",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /nodes/{node_id}"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository read invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "refresh_node",
+      "tables": [
+        "events"
+      ],
+      "calls": [
+        "append_event",
+        "enqueue_embedding_job",
+        "update_node_embedding",
+        "write_embedding_history"
+      ],
+      "routes": [
+        "POST /nodes/{node_id}/refresh"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "upload_files",
+      "tables": [],
+      "calls": [
+        "enqueue_embedding_job"
+      ],
+      "routes": [
+        "POST /upload"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Transient strong identifiers are checked before chunk-node creation; raw values are neither persisted nor logged by the privacy authority.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "search_nodes",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /search"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "create_edge",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /edges"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "list_events",
+      "tables": [
+        "events",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /events"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_lineage",
+      "tables": [
+        "edges"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /lineage/{node_id}"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "admin_refresh",
+      "tables": [],
+      "calls": [
+        "append_event",
+        "update_node_embedding",
+        "write_embedding_history"
+      ],
+      "routes": [
+        "POST /admin/refresh"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "embedding_status",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /admin/embedding/status"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "extraction_status",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [
+        "GET /admin/extraction/status"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "extraction_requeue",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [
+        "enqueue_extraction_job"
+      ],
+      "routes": [
+        "POST /admin/extraction/requeue"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "embedding_requeue",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [
+        "enqueue_embedding_job"
+      ],
+      "routes": [
+        "POST /admin/embedding/requeue"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_anomalies",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /admin/anomalies"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository anomaly readers invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "get_node_versions",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "GET /nodes/{node_id}/versions"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "The candidate-aware node lookup must succeed before repository version history can be returned.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "resolve_candidate",
+      "tables": [
+        "candidate_source_records",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /candidates/resolve"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "resolve_candidate_from_vantahire_application",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [],
+      "routes": [
+        "POST /candidates/resolve/vantahire/application"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "_mirror_signal_candidate_to_global",
+      "tables": [
+        "candidates"
+      ],
+      "calls": [
+        "upsert_signal_candidate_to_global"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "resolve_candidate_from_signal",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [
+        "_mirror_signal_candidate_to_global"
+      ],
+      "routes": [
+        "POST /candidates/resolve/signal/candidate"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "search_candidates_by_tags",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidates/search/by-tags"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/main.py",
+      "symbol": "search_tenant_private_candidates",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidates/search/private"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "dependency",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Enforcement is inherited from the classified repository or sink invoked by this surface.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/operational.py",
+      "symbol": "bounded_readiness_check",
+      "tables": [
+        "candidate_privacy_directive_events",
+        "candidate_privacy_directives",
+        "candidate_privacy_identity_tokens",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "schema_readiness",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Eight-statement bounded catalog, privilege, function, key-version, and RLS readiness proof.",
+      "test_id": "privacy-readiness-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/connectors/ingest.py",
+      "symbol": "IngestionProcessor._get_existing_node",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Connector product is quarantined and unreachable behind 410 tombstones."
+    },
+    {
+      "file": "activekg/connectors/ingest.py",
+      "symbol": "IngestionProcessor._update_metadata_only",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Connector product is quarantined and unreachable behind 410 tombstones."
+    },
+    {
+      "file": "activekg/connectors/ingest.py",
+      "symbol": "IngestionProcessor._ingest_document",
+      "tables": [],
+      "calls": [
+        "enqueue_embedding_job"
+      ],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Connector product is quarantined and unreachable behind 410 tombstones."
+    },
+    {
+      "file": "activekg/connectors/ingest.py",
+      "symbol": "IngestionProcessor._delete_existing_chunks",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Connector product is quarantined and unreachable behind 410 tombstones."
+    },
+    {
+      "file": "activekg/connectors/ingest.py",
+      "symbol": "IngestionProcessor._handle_deletion",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Connector product is quarantined and unreachable behind 410 tombstones."
+    },
+    {
+      "file": "activekg/embedding/global_candidates.py",
+      "symbol": "build_public_candidate_embedding_text",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [],
+      "reason": "Pure text projection receives only rows already selected by the privacy-fenced sweep; it performs no read, write or publication itself."
+    },
+    {
+      "file": "activekg/embedding/global_candidates.py",
+      "symbol": "GlobalCandidateEmbedder._sweep_once",
+      "tables": [
+        "candidates",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/embedding/global_candidates.py",
+      "symbol": "GlobalCandidateEmbedder._sweep_public_once",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_match/global_decision check before global read, enrichment, projection, or publication.",
+      "test_id": "privacy-global-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/embedding/worker.py",
+      "symbol": "EmbeddingWorker._process_job",
+      "tables": [],
+      "calls": [
+        "append_event",
+        "update_node_embedding",
+        "write_embedding_history"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check before provider/model work and an immediate recheck before derived publication.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/extraction/worker.py",
+      "symbol": "ExtractionWorker._process_job",
+      "tables": [],
+      "calls": [
+        "_trigger_reembed",
+        "_update_node_props"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check before provider/model work and an immediate recheck before derived publication.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/extraction/worker.py",
+      "symbol": "ExtractionWorker._update_extraction_status",
+      "tables": [],
+      "calls": [
+        "_update_node_props"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check before provider/model work and an immediate recheck before derived publication.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/extraction/worker.py",
+      "symbol": "ExtractionWorker._update_node_props",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check before provider/model work and an immediate recheck before derived publication.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/extraction/worker.py",
+      "symbol": "ExtractionWorker._maybe_sync_to_global_memory",
+      "tables": [],
+      "calls": [
+        "sync_applicant_to_global_memory"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check before provider/model work and an immediate recheck before derived publication.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/extraction/worker.py",
+      "symbol": "ExtractionWorker._trigger_reembed",
+      "tables": [],
+      "calls": [
+        "enqueue_embedding_job"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Fail-closed privacy check immediately before a derived re-embed enqueue.",
+      "test_id": "privacy-stale-worker-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.create_candidate",
+      "tables": [
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.get_candidate",
+      "tables": [
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.update_candidate",
+      "tables": [
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.delete_candidate",
+      "tables": [
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [],
+      "reason": "Pre-existing destructive helper is byte-preserved and remains uncalled by Phase 1AM."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.add_identifier",
+      "tables": [
+        "candidate_identifiers"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.list_identifiers",
+      "tables": [
+        "candidate_identifiers"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.find_candidate_by_identifier",
+      "tables": [
+        "candidate_identifiers",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.remove_identifier",
+      "tables": [
+        "candidate_identifiers"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [],
+      "reason": "Pre-existing identifier removal helper is byte-preserved and remains uncalled by Phase 1AM."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.get_source_record",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.get_latest_source_record",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.upsert_source_record",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.list_source_records",
+      "tables": [
+        "candidate_source_records"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.find_candidates_by_vantahire_org",
+      "tables": [
+        "candidate_source_records",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.find_candidates_by_vantahire_recruiter",
+      "tables": [
+        "candidate_source_records",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.find_candidates_by_vantahire_uploader",
+      "tables": [
+        "candidate_source_records",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.search_candidates_by_signal_tags",
+      "tables": [
+        "candidate_source_records",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository.search_tenant_private_candidates",
+      "tables": [
+        "candidate_identifiers",
+        "candidate_provenance",
+        "candidate_source_records",
+        "candidates",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/candidate_repository.py",
+      "symbol": "CandidateRepository._find_candidate_by_normalized",
+      "tables": [
+        "candidate_identifiers",
+        "candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "tenant_candidate",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Repository-level transient/canonical authority check or candidate_privacy_candidate_decision SQL predicate before rows, limits, or writes.",
+      "test_id": "privacy-candidate-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository._detect_rls",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Schema capability probe only; it does not read candidate rows."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository._resolve_rls_mode",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Schema capability probe only; it does not read candidate rows."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.ensure_vector_index",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Index maintenance only; it does not materialize candidate rows."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.list_vector_indexes",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Index catalog inspection only; it does not materialize candidate rows."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.list_nodes",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.create_node",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.get_node",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.get_node_by_external_id",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.update_node",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.delete_node",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Pre-existing destructive helper is byte-preserved and remains uncalled by Phase 1AM."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.update_node_embedding",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.mark_embedding_queued",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.mark_embedding_processing",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.mark_embedding_failed",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Terminal failure metadata is restrictive operational state and publishes no candidate derivative."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.mark_embedding_skipped",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Terminal skipped metadata is restrictive operational state and publishes no candidate derivative."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.mark_embedding_ready",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository._privacy_filtered_vector_rows",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "The filtered candidate relation is evaluated before LIMIT; ANN under-fill forces a materialized exact rescan so an empty result is authoritative.",
+      "test_id": "privacy-vector-recall",
+      "reason": "Shared vector retrieval boundary preserves privacy filtering and exact under-fill semantics."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.vector_search",
+      "tables": [],
+      "calls": [
+        "_privacy_filtered_vector_rows"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.hybrid_search",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [
+        "_privacy_filtered_vector_rows"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.write_embedding_history",
+      "tables": [
+        "embedding_history",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.get_lineage",
+      "tables": [
+        "edges",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.find_nodes_due_for_refresh",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.all_nodes",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.create_edge",
+      "tables": [
+        "edges",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.append_event",
+      "tables": [
+        "events",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.detect_drift_spikes",
+      "tables": [
+        "embedding_history",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.detect_trigger_storms",
+      "tables": [
+        "events",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.detect_scheduler_lag",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.get_node_versions",
+      "tables": [
+        "embedding_history",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "candidate_privacy_node_decision SQL predicate or endpoint decision check before rows, limits, queues, or derived sinks.",
+      "test_id": "privacy-node-fences",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.list_open_positions",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Job-only class predicate; it does not return candidate/profile/resume nodes."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.list_performance_issues",
+      "tables": [
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Incident-only class predicate; it does not return candidate/profile/resume nodes."
+    },
+    {
+      "file": "activekg/graph/repository.py",
+      "symbol": "GraphRepository.purge_deleted_nodes",
+      "tables": [
+        "candidates",
+        "nodes"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Broken legacy purge is unchanged, unscheduled, and uncalled; F401/CP159 remain open."
+    },
+    {
+      "file": "activekg/privacy/repository.py",
+      "symbol": "CandidatePrivacyRepository.create_directive",
+      "tables": [
+        "candidate_privacy_directive_events"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "The request advisory lock and original key-version lookup preserve exact idempotency across HMAC rotation before the security-definer command executes.",
+      "test_id": "privacy-postgres-authority",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/privacy/repository.py",
+      "symbol": "CandidatePrivacyRepository.changes",
+      "tables": [
+        "candidate_privacy_directive_events"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Single-transaction security-definer authority over the append-only event ledger and deterministic snapshot/feed reads.",
+      "test_id": "privacy-postgres-authority",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/privacy/repository.py",
+      "symbol": "CandidatePrivacyRepository.snapshot",
+      "tables": [
+        "candidate_privacy_directive_events"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Single-transaction security-definer authority over the append-only event ledger and deterministic snapshot/feed reads.",
+      "test_id": "privacy-postgres-authority",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/refresh/scheduler.py",
+      "symbol": "RefreshScheduler.run_cycle",
+      "tables": [],
+      "calls": [
+        "append_event",
+        "update_node_embedding",
+        "write_embedding_history"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Privacy-filtered repository enumeration and immediately-before-write repository sinks.",
+      "test_id": "privacy-surface-dependency",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/refresh/scheduler.py",
+      "symbol": "RefreshScheduler.run_drive_poller",
+      "tables": [
+        "events"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Connector poller is not registered; dormant body remains quarantined."
+    },
+    {
+      "file": "activekg/refresh/scheduler.py",
+      "symbol": "RefreshScheduler.run_gcs_poller",
+      "tables": [
+        "events"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "write",
+      "candidate_scope": "candidate_linked_node",
+      "actions": [],
+      "reason": "Connector poller is not registered; dormant body remains quarantined."
+    },
+    {
+      "file": "activekg/triggers/trigger_engine.py",
+      "symbol": "TriggerEngine.run",
+      "tables": [],
+      "calls": [
+        "append_event"
+      ],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Semantic trigger engine remains quarantined and unconstructed; its repository dependencies are independently fenced."
+    },
+    {
+      "file": "activekg/triggers/trigger_engine.py",
+      "symbol": "TriggerEngine.run_for",
+      "tables": [],
+      "calls": [
+        "append_event"
+      ],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read_write",
+      "candidate_scope": "dependency",
+      "actions": [],
+      "reason": "Semantic trigger engine remains quarantined and unconstructed; its repository sinks are independently fenced."
+    }
+  ]
+}

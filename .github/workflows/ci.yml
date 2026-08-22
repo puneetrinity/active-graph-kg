@@ -44,6 +44,7 @@ jobs:
       - name: Enforce schema-control authority and caller census
         run: |
           python scripts/schema_control_guard.py
+          python scripts/candidate_privacy_surface_guard.py
 
       - name: Run type checking
         run: |
@@ -86,6 +87,11 @@ jobs:
             tests/test_contact_suppression_authority.py \
             tests/test_public_observability_boundary.py \
             tests/test_schema_control.py \
+            tests/test_candidate_privacy_identity.py \
+            tests/test_candidate_privacy_authority.py \
+            tests/test_candidate_privacy_api.py \
+            tests/test_candidate_privacy_fences.py \
+            tests/test_candidate_privacy_surface_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -102,9 +108,9 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg${{ matrix.postgres }}
         env:
-          POSTGRES_USER: activekg
+          POSTGRES_USER: activekg_unit_test
           POSTGRES_PASSWORD: activekg
-          POSTGRES_DB: activekg
+          POSTGRES_DB: memory_unit_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -129,18 +135,30 @@ jobs:
 
       - name: Wait for PostgreSQL and initialize schema
         env:
-          PGPASSWORD: activekg
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_unit_test:activekg@127.0.0.1:5432/memory_unit_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "22222222-2222-4222-8222-222222222222"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          until pg_isready -h localhost -p 5432 -U activekg; do
+          until pg_isready -h localhost -p 5432 -U activekg_unit_test -d memory_unit_test; do
             echo "Waiting for PostgreSQL..."; sleep 2; done
-          psql -h localhost -U activekg -d activekg -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
-          psql -h localhost -U activekg -d activekg -f db/migrations/add_text_search.sql || true
+          python scripts/init_railway_db.py
       
       - name: Run unit tests
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_unit_test:activekg@localhost:5432/memory_unit_test
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           pytest \
             tests/test_phase1_complete.py \
@@ -160,6 +178,13 @@ jobs:
       ACTIVEKG_SCHEMA_TARGET_ID: "11111111-1111-4111-8111-111111111111"
       ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
       ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+      CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+      CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+      CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+      CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+      CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+      CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+      CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
     services:
       redis:
         image: redis:7-alpine
@@ -249,11 +274,11 @@ jobs:
           done
           ledger=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "22|0" ]; then
-            echo "FAIL: ledger should have exactly 22 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "23|0" ]; then
+            echo "FAIL: ledger should have exactly 23 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 22 applied, 0 baselined"
+          echo "OK: migration ledger has 23 applied, 0 baselined"
           posture=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -268,6 +293,13 @@ jobs:
           ACTIVEKG_SCHEMA_CONTROL_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
         run: |
           pytest tests/test_schema_control_postgres.py -v --tb=short --timeout=240
+
+      - name: Run disposable candidate-privacy authority matrix
+        env:
+          ACTIVEKG_PRIVACY_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_PRIVACY_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
+        run: |
+          pytest tests/test_candidate_privacy_postgres.py -v --tb=short --timeout=240
 
       - name: Run RLS enforcement tests as the restricted runtime role
         env:
@@ -556,9 +588,9 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: activekg
+          POSTGRES_USER: activekg_e2e_test
           POSTGRES_PASSWORD: activekg_test_password
-          POSTGRES_DB: activekg
+          POSTGRES_DB: memory_e2e_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -611,22 +643,27 @@ jobs:
       
       - name: Wait for PostgreSQL
         run: |
-          until pg_isready -h localhost -p 5432 -U activekg; do
+          until pg_isready -h localhost -p 5432 -U activekg_e2e_test -d memory_e2e_test; do
             echo "Waiting for PostgreSQL..."
             sleep 2
           done
       
       - name: Initialize database schema
         env:
-          PGPASSWORD: activekg_test_password
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_e2e_test:activekg_test_password@127.0.0.1:5432/memory_e2e_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "33333333-3333-4333-8333-333333333333"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
-          psql -h localhost -U activekg -d activekg -f db/migrations/add_text_search.sql || true
+          python scripts/init_railway_db.py
       
       - name: Start API server in background
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg_test_password@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_e2e_test:activekg_test_password@localhost:5432/memory_e2e_test
           JWT_ENABLED: "true"
           JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
           JWT_ALGORITHM: HS256
@@ -638,6 +675,13 @@ jobs:
           RUN_SCHEDULER: "false"
           EMBEDDING_BACKEND: sentence-transformers
           EMBEDDING_MODEL: all-MiniLM-L6-v2
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid
@@ -709,9 +753,9 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: activekg
+          POSTGRES_USER: activekg_benchmark_test
           POSTGRES_PASSWORD: activekg_bench_password
-          POSTGRES_DB: activekg
+          POSTGRES_DB: memory_benchmark_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -741,17 +785,30 @@ jobs:
       
       - name: Initialize database
         env:
-          PGPASSWORD: activekg_bench_password
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_benchmark_test:activekg_bench_password@127.0.0.1:5432/memory_benchmark_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "44444444-4444-4444-8444-444444444444"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
+          python scripts/init_railway_db.py
       
       - name: Start API server
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg_bench_password@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_benchmark_test:activekg_bench_password@localhost:5432/memory_benchmark_test
           JWT_ENABLED: "false"
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid

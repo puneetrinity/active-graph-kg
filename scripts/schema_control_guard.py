@@ -7,6 +7,7 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -93,12 +94,12 @@ def check(root: Path) -> list[str]:
     worker_requirements = {
         "activekg/embedding/worker.py": (
             "def start_worker()",
-            "dsn = assert_startup_schema_ready()",
+            "dsn = assert_startup_schema_ready(require_privacy_hmac=False)",
             "redis_client =",
         ),
         "activekg/extraction/worker.py": (
             "def start_extraction_worker()",
-            "dsn = assert_startup_schema_ready()",
+            "dsn = assert_startup_schema_ready(require_privacy_hmac=False)",
             "assert_extraction_models_configured()",
         ),
     }
@@ -177,6 +178,20 @@ def check(root: Path) -> list[str]:
     ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     if "python scripts/schema_control_guard.py" not in ci:
         findings.append("CI does not enforce the schema-control guard")
+    if "python scripts/candidate_privacy_surface_guard.py" not in ci:
+        findings.append("CI does not enforce the candidate-privacy surface guard")
+    fresh_init_roles = re.findall(
+        r"ACTIVEKG_MIGRATE_DSN:\s*postgresql://([^:\s]+):[^\n]+\n"
+        r"\s*ACTIVEKG_MIGRATION_APPLY:\s*[\"']?1[\"']?\n"
+        r"\s*ACTIVEKG_SCHEMA_FRESH_INIT:\s*[\"']?1[\"']?",
+        ci,
+    )
+    fresh_init_count = ci.count('ACTIVEKG_SCHEMA_FRESH_INIT: "1"')
+    if len(fresh_init_roles) != fresh_init_count:
+        findings.append("CI fresh-init migration roles cannot be completely classified")
+    for role in fresh_init_roles:
+        if not role.endswith("_test"):
+            findings.append(f"CI fresh-init migration role is not disposable: {role}")
     return sorted(set(findings))
 
 
