@@ -265,6 +265,26 @@ def test_guard_is_green_and_mutations_restore_from_saved_bytes(tmp_path: Path) -
     workflow.write_bytes(workflow_saved)
     assert workflow.read_bytes() == workflow_saved
 
+    workflow.write_text(workflow.read_text().replace("fetch-depth: 0", "fetch-depth: 1", 1))
+    findings = schema_control_guard.check(copied)
+    assert any("pinned-base tests use a shallow checkout" in finding for finding in findings)
+    workflow.write_bytes(workflow_saved)
+    assert workflow.read_bytes() == workflow_saved
+
+    scoring_workflow = copied / ".github/workflows/test-scoring-modes.yml"
+    scoring_saved = scoring_workflow.read_bytes()
+    scoring_workflow.write_text(
+        scoring_workflow.read_text().replace(
+            "    services:\n",
+            "    services:\n      postgres:\n        image: pgvector/pgvector:pg16\n",
+            1,
+        )
+    )
+    findings = schema_control_guard.check(copied)
+    assert any("fresh-init PostgreSQL is not runner-local" in finding for finding in findings)
+    scoring_workflow.write_bytes(scoring_saved)
+    assert scoring_workflow.read_bytes() == scoring_saved
+
     retired = copied / "scripts/db_bootstrap.sh"
     retired.write_text('#!/bin/sh\npsql "$DATABASE_URL"\n')
     findings = schema_control_guard.check(copied)

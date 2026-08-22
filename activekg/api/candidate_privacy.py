@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal, Self, get_args
+from typing import Annotated, Any, Literal, get_args
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from typing_extensions import Self
 
 from activekg.api import auth
 from activekg.api.auth import JWTClaims, get_jwt_claims

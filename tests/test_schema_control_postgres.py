@@ -42,6 +42,15 @@ def _runtime_dsn(database: str) -> str:
     return make_conninfo(RUNTIME_DSN, dbname=database)
 
 
+def _runtime_password() -> str:
+    assert RUNTIME_DSN is not None
+    password = conninfo_to_dict(RUNTIME_DSN).get("password")
+    assert isinstance(password, str) and password, (
+        "the disposable runtime DSN must contain a password"
+    )
+    return password
+
+
 def _run(script: Path, dsn: str, **extra: str) -> subprocess.CompletedProcess[str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("ACTIVEKG_")}
     env.update(
@@ -381,7 +390,10 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
             dsn,
             ACTIVEKG_MIGRATION_APPLY="1",
             ACTIVEKG_SCHEMA_FRESH_INIT="1",
-            ACTIVEKG_RUNTIME_PASSWORD="activekg_app_upgrade_test",
+            # PostgreSQL roles are cluster-wide. Reassert the password already
+            # carried by the shared disposable runtime DSN so this cloned-DB
+            # test cannot poison the tests that follow it.
+            ACTIVEKG_RUNTIME_PASSWORD=_runtime_password(),
         )
         assert legacy_install.returncode == 0, legacy_install.stdout + legacy_install.stderr
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -410,6 +422,9 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
             cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
             assert cur.fetchone() == (23, 0)
             _assert_candidate_privacy_runtime_privileges(cur)
+        with psycopg.connect(_runtime_dsn(name)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            assert cur.fetchone() == ("activekg_app",)
     finally:
         _drop_database(name)
 
