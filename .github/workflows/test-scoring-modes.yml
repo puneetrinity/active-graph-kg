@@ -18,21 +18,6 @@ jobs:
       fail-fast: false
 
     services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: activekg
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
       redis:
         image: redis:7-alpine
         options: >-
@@ -59,18 +44,46 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-asyncio
 
-      - name: Set up database
-        env:
-          PGPASSWORD: postgres
+      - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          # Enable pgvector extension
-          psql -h localhost -U postgres -d activekg -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          psql -h localhost -U postgres -d activekg -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16-pgvector
+            sudo systemctl restart postgresql
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS memory_scoring_test WITH (FORCE);
+          DROP ROLE IF EXISTS activekg_app;
+          DROP ROLE IF EXISTS activekg_scoring_test;
+          CREATE ROLE activekg_scoring_test LOGIN SUPERUSER PASSWORD 'activekg-scoring-owner';
+          CREATE DATABASE memory_scoring_test OWNER activekg_scoring_test;
+          SQL
+          identity="$(PGPASSWORD=activekg-scoring-owner psql -h 127.0.0.1 \
+            -U activekg_scoring_test -d memory_scoring_test -Atqc \
+            "SELECT current_database() || '|' || current_user || '|' || host(inet_server_addr())")"
+          if [ "$identity" != "memory_scoring_test|activekg_scoring_test|127.0.0.1" ]; then
+            echo "Runner-local PostgreSQL identity proof failed" >&2
+            exit 1
+          fi
 
-          # Initialize database schema
-          psql -h localhost -U postgres -d activekg -f db/init.sql
-          psql -h localhost -U postgres -d activekg -f enable_rls_policies.sql
-          psql -h localhost -U postgres -d activekg -f db/migrations/add_text_search.sql || true
+      - name: Initialize database through the release authority
+        env:
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_scoring_test:activekg-scoring-owner@127.0.0.1:5432/memory_scoring_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "55555555-5555-4555-8555-555555555555"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: development
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
+        run: |
+          python scripts/init_railway_db.py
 
       - name: Configure RRF mode
         if: matrix.mode == 'rrf'
@@ -94,7 +107,7 @@ jobs:
 
       - name: Set common environment
         run: |
-          echo "ACTIVEKG_DSN=postgresql://postgres:postgres@localhost:5432/activekg" >> $GITHUB_ENV
+          echo "ACTIVEKG_DSN=postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_scoring_test" >> $GITHUB_ENV
           echo "REDIS_URL=redis://localhost:6379/0" >> $GITHUB_ENV
           echo "JWT_ENABLED=false" >> $GITHUB_ENV
           echo "RATE_LIMIT_ENABLED=false" >> $GITHUB_ENV
@@ -112,6 +125,13 @@ jobs:
           echo "PYTHONDONTWRITEBYTECODE=1" >> $GITHUB_ENV
           echo "EMBEDDING_BACKEND=sentence-transformers" >> $GITHUB_ENV
           echo "EMBEDDING_MODEL=all-MiniLM-L6-v2" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION=1" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_HMAC_KEY_V1=Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ==" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_INTAKE_ENABLED=false" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_FLOW_ISSUER=vantahire" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_FLOW_ACTOR_ID=vantahire-backend" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_SIGNAL_ISSUER=signal" >> $GITHUB_ENV
+          echo "CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID=signal-backend" >> $GITHUB_ENV
 
       - name: Start API server
         run: |

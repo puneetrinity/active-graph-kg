@@ -220,11 +220,14 @@ class GlobalCandidateEmbedder:
                         ORDER BY c.updated_at DESC
                         LIMIT 1
                     ) tc ON true
-                    WHERE gc.embedding_status = 'queued'
-                       OR (
-                            gc.embedding_status IN ('ready', 'skipped_empty')
-                            AND gc.embed_version < %s
+                    WHERE (
+                            gc.embedding_status = 'queued'
+                            OR (
+                             gc.embedding_status IN ('ready', 'skipped_empty')
+                             AND gc.embed_version < %s
+                            )
                           )
+                      AND candidate_privacy_global_decision(gc.id) = 'allow'
                     ORDER BY (gc.embedding_status = 'queued') DESC, gc.updated_at ASC
                     LIMIT %s
                     FOR UPDATE OF gc SKIP LOCKED
@@ -249,14 +252,17 @@ class GlobalCandidateEmbedder:
                     else:
                         empty_ids.append(str(d["id"]))
 
+                skipped_empty = 0
                 if empty_ids:
                     # Nothing embeddable — skip, don't loop forever.
                     cur.execute(
                         "UPDATE global_candidates"
                         " SET embedding_status = 'skipped_empty', embed_version = %s"
-                        " WHERE id = ANY(%s::uuid[])",
+                        " WHERE id = ANY(%s::uuid[])"
+                        " AND candidate_privacy_global_decision(id) = 'allow'",
                         (EMBED_VERSION, empty_ids),
                     )
+                    skipped_empty = cur.rowcount
 
                 done = 0
                 if embeddable:
@@ -267,16 +273,16 @@ class GlobalCandidateEmbedder:
                             "UPDATE global_candidates"
                             " SET embedding = %s::vector, embedding_status = 'ready',"
                             "     embed_version = %s, updated_at = now()"
-                            " WHERE id = %s",
+                            " WHERE id = %s AND candidate_privacy_global_decision(id) = 'allow'",
                             (vec_literal, EMBED_VERSION, d["id"]),
                         )
-                        done += 1
+                        done += cur.rowcount
 
             conn.commit()
-            if done or empty_ids:
+            if done or skipped_empty:
                 logger.info(
                     "global_candidates embedding sweep",
-                    extra={"embedded": done, "skipped_empty": len(empty_ids)},
+                    extra={"embedded": done, "skipped_empty": skipped_empty},
                 )
             return done
         except Exception:
@@ -294,6 +300,7 @@ class GlobalCandidateEmbedder:
                     SELECT {_PUBLIC_SELECT_COLS}
                     FROM global_candidates gc
                     WHERE gc.public_profile <> '{{}}'::jsonb
+                      AND candidate_privacy_global_decision(gc.id) = 'allow'
                       AND (
                             gc.public_embedding_status = 'queued'
                             OR (
@@ -325,13 +332,16 @@ class GlobalCandidateEmbedder:
                     else:
                         empty_ids.append(str(row["id"]))
 
+                skipped_empty = 0
                 if empty_ids:
                     cur.execute(
                         "UPDATE global_candidates "
                         "SET public_embedding_status = 'skipped_empty', public_embed_version = %s "
-                        "WHERE id = ANY(%s::uuid[])",
+                        "WHERE id = ANY(%s::uuid[]) "
+                        "AND candidate_privacy_global_decision(id) = 'allow'",
                         (PUBLIC_EMBED_VERSION, empty_ids),
                     )
+                    skipped_empty = cur.rowcount
 
                 done = 0
                 if embeddable:
@@ -341,15 +351,16 @@ class GlobalCandidateEmbedder:
                         cur.execute(
                             "UPDATE global_candidates "
                             "SET public_embedding = %s::vector, public_embedding_status = 'ready', "
-                            "public_embed_version = %s, updated_at = now() WHERE id = %s",
+                            "public_embed_version = %s, updated_at = now() WHERE id = %s "
+                            "AND candidate_privacy_global_decision(id) = 'allow'",
                             (vec_literal, PUBLIC_EMBED_VERSION, row["id"]),
                         )
-                        done += 1
+                        done += cur.rowcount
             conn.commit()
-            if done or empty_ids:
+            if done or skipped_empty:
                 logger.info(
                     "public global-candidate embedding sweep",
-                    extra={"embedded": done, "skipped_empty": len(empty_ids)},
+                    extra={"embedded": done, "skipped_empty": skipped_empty},
                 )
             return done
         except Exception:

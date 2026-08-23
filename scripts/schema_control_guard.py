@@ -7,6 +7,7 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ def _assignment(tree: ast.Module, name: str) -> Any:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                if node.value is None:
+                    continue
                 return ast.literal_eval(node.value)
     raise ValueError(f"missing literal assignment: {name}")
 
@@ -93,12 +96,12 @@ def check(root: Path) -> list[str]:
     worker_requirements = {
         "activekg/embedding/worker.py": (
             "def start_worker()",
-            "dsn = assert_startup_schema_ready()",
+            "dsn = assert_startup_schema_ready(require_privacy_hmac=False)",
             "redis_client =",
         ),
         "activekg/extraction/worker.py": (
             "def start_extraction_worker()",
-            "dsn = assert_startup_schema_ready()",
+            "dsn = assert_startup_schema_ready(require_privacy_hmac=False)",
             "assert_extraction_models_configured()",
         ),
     }
@@ -147,13 +150,16 @@ def check(root: Path) -> list[str]:
     allowed_release_reference = {
         ".env.example",
         ".github/workflows/ci.yml",
+        ".github/workflows/test-scoring-modes.yml",
         "README.md",
         "enable_rls_policies.sql",
         "railway.schema-release.json",
         "scripts/README.md",
     }
     for path in root.rglob("*"):
-        if not path.is_file() or ".git" in path.parts:
+        if not path.is_file() or any(
+            part in {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache"} for part in path.parts
+        ):
             continue
         relative = path.relative_to(root).as_posix()
         if (
@@ -175,8 +181,32 @@ def check(root: Path) -> list[str]:
             findings.append(f"retired bootstrap reference: {relative}")
 
     ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    scoring_ci = (root / ".github/workflows/test-scoring-modes.yml").read_text(encoding="utf-8")
     if "python scripts/schema_control_guard.py" not in ci:
         findings.append("CI does not enforce the schema-control guard")
+    if "python scripts/candidate_privacy_surface_guard.py" not in ci:
+        findings.append("CI does not enforce the candidate-privacy surface guard")
+    if "fetch-depth: 0" not in ci.split("fast-unit-tests:", 1)[1].split("unit-tests:", 1)[0]:
+        findings.append("CI pinned-base tests use a shallow checkout")
+    for relative, workflow in (
+        (".github/workflows/ci.yml", ci),
+        (".github/workflows/test-scoring-modes.yml", scoring_ci),
+    ):
+        if "image: pgvector/pgvector:" in workflow:
+            findings.append(f"CI fresh-init PostgreSQL is not runner-local: {relative}")
+    fresh_init_workflows = f"{ci}\n{scoring_ci}"
+    fresh_init_roles = re.findall(
+        r"ACTIVEKG_MIGRATE_DSN:\s*postgresql://([^:\s]+):[^\n]+\n"
+        r"\s*ACTIVEKG_MIGRATION_APPLY:\s*[\"']?1[\"']?\n"
+        r"\s*ACTIVEKG_SCHEMA_FRESH_INIT:\s*[\"']?1[\"']?",
+        fresh_init_workflows,
+    )
+    fresh_init_count = fresh_init_workflows.count('ACTIVEKG_SCHEMA_FRESH_INIT: "1"')
+    if len(fresh_init_roles) != fresh_init_count:
+        findings.append("CI fresh-init migration roles cannot be completely classified")
+    for role in fresh_init_roles:
+        if not role.endswith("_test"):
+            findings.append(f"CI fresh-init migration role is not disposable: {role}")
     return sorted(set(findings))
 
 

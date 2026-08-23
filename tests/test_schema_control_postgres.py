@@ -16,6 +16,17 @@ RUNTIME_DSN = os.getenv("ACTIVEKG_SCHEMA_CONTROL_TEST_RUNTIME_DSN")
 ROOT = Path(__file__).resolve().parents[1]
 TARGET_ID = "11111111-1111-4111-8111-111111111111"
 SOURCE_COMMIT = "0" * 40
+PRIVACY_READINESS_ENV = {
+    "JWT_ISSUER": "flow-test",
+    "SIGNAL_JWT_ISSUER": "signal-test",
+    "CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION": "1",
+    "CANDIDATE_PRIVACY_HMAC_KEY_V1": ("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="),
+    "CANDIDATE_PRIVACY_INTAKE_ENABLED": "false",
+    "CANDIDATE_PRIVACY_FLOW_ISSUER": "flow-test",
+    "CANDIDATE_PRIVACY_FLOW_ACTOR_ID": "flow-service-test",
+    "CANDIDATE_PRIVACY_SIGNAL_ISSUER": "signal-test",
+    "CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID": "signal-service-test",
+}
 
 pytestmark = pytest.mark.skipif(
     not OWNER_DSN or not RUNTIME_DSN,
@@ -29,6 +40,15 @@ def _dsn(database: str) -> str:
 
 def _runtime_dsn(database: str) -> str:
     return make_conninfo(RUNTIME_DSN, dbname=database)
+
+
+def _runtime_password() -> str:
+    assert RUNTIME_DSN is not None
+    password = conninfo_to_dict(RUNTIME_DSN).get("password")
+    assert isinstance(password, str) and password, (
+        "the disposable runtime DSN must contain a password"
+    )
+    return password
 
 
 def _run(script: Path, dsn: str, **extra: str) -> subprocess.CompletedProcess[str]:
@@ -91,9 +111,9 @@ def _copy_with_tail_migration(
     manifest = copied / "activekg/common/migration_manifest.py"
     content = manifest.read_text()
     content = content.replace(
-        '    "022_contact_suppression_person_and_audit.sql",\n)',
-        f'    "022_contact_suppression_person_and_audit.sql",\n    "{migration_name}",\n)',
-    ).replace("len(MIGRATIONS) != 22", "len(MIGRATIONS) != 23")
+        '    "023_candidate_privacy_directives.sql",\n)',
+        f'    "023_candidate_privacy_directives.sql",\n    "{migration_name}",\n)',
+    ).replace("len(MIGRATIONS) != 23", "len(MIGRATIONS) != 24")
     manifest.write_text(content)
 
     runner = copied / "scripts/init_railway_db.py"
@@ -251,7 +271,160 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
             cur.execute("SELECT to_regclass('public.idx_global_candidates_embed_version')")
             assert cur.fetchone()[0] is None
             cur.execute("SELECT count(*) FROM schema_migrations")
+            assert cur.fetchone()[0] == 23
+    finally:
+        _drop_database(name)
+
+
+def _assert_candidate_privacy_runtime_privileges(cur: psycopg.Cursor) -> None:
+    for relation in (
+        "candidate_privacy_directive_events",
+        "candidate_privacy_directives",
+    ):
+        cur.execute(
+            "SELECT has_table_privilege('activekg_app',%s,'SELECT'), "
+            "has_table_privilege('activekg_app',%s,'INSERT'), "
+            "has_table_privilege('activekg_app',%s,'UPDATE'), "
+            "has_table_privilege('activekg_app',%s,'DELETE'), "
+            "has_table_privilege('activekg_app',%s,'TRUNCATE')",
+            tuple(f"public.{relation}" for _ in range(5)),
+        )
+        assert cur.fetchone() == (True, False, False, False, False)
+    cur.execute(
+        "SELECT has_table_privilege('activekg_app',"
+        "'public.candidate_privacy_identity_tokens','SELECT'), "
+        "has_table_privilege('activekg_app',"
+        "'public.candidate_privacy_identity_tokens','INSERT'), "
+        "has_table_privilege('activekg_app',"
+        "'public.candidate_privacy_identity_tokens','UPDATE'), "
+        "has_table_privilege('activekg_app',"
+        "'public.candidate_privacy_identity_tokens','DELETE'), "
+        "has_sequence_privilege('activekg_app',"
+        "'public.candidate_privacy_directive_events_cursor_seq','USAGE'), "
+        "has_sequence_privilege('activekg_app',"
+        "'public.candidate_privacy_directive_events_cursor_seq','SELECT'), "
+        "has_sequence_privilege('activekg_app',"
+        "'public.candidate_privacy_directive_events_cursor_seq','UPDATE'), "
+        "has_function_privilege('activekg_app',"
+        "'public.candidate_privacy_create_directive(uuid,uuid,text,text,text,uuid,text,text,"
+        "text,uuid,text,uuid,integer,jsonb,boolean,timestamp with time zone)','EXECUTE'), "
+        "has_function_privilege('activekg_app',"
+        "'public.candidate_privacy_append_only()','EXECUTE')"
+    )
+    assert cur.fetchone() == (False, False, False, False, False, False, False, True, False)
+
+
+def test_every_release_reasserts_candidate_privacy_runtime_privileges() -> None:
+    name = "memory_schema_privacy_privileges_test"
+    dsn = _clone_database(name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            _assert_candidate_privacy_runtime_privileges(cur)
+            cur.execute(
+                "GRANT ALL ON candidate_privacy_directive_events, "
+                "candidate_privacy_directives, candidate_privacy_identity_tokens "
+                "TO activekg_app"
+            )
+            cur.execute(
+                "GRANT ALL ON SEQUENCE candidate_privacy_directive_events_cursor_seq "
+                "TO activekg_app"
+            )
+            cur.execute("GRANT EXECUTE ON FUNCTION candidate_privacy_append_only() TO activekg_app")
+
+        first = _run(
+            ROOT / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+        )
+        assert first.returncode == 0, first.stdout + first.stderr
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            _assert_candidate_privacy_runtime_privileges(cur)
+
+        second = _run(
+            ROOT / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+        )
+        assert second.returncode == 0, second.stdout + second.stderr
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            _assert_candidate_privacy_runtime_privileges(cur)
+    finally:
+        _drop_database(name)
+
+
+def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
+    tmp_path: Path,
+) -> None:
+    name = "memory_schema_privacy_upgrade_test"
+    _drop_database(name)
+    with _maintenance() as conn, conn.cursor() as cur:
+        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    dsn = _dsn(name)
+    legacy = tmp_path / "legacy-22"
+    shutil.copytree(
+        ROOT,
+        legacy,
+        ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
+    )
+    manifest = legacy / "activekg/common/migration_manifest.py"
+    manifest.write_text(
+        manifest.read_text()
+        .replace('    "023_candidate_privacy_directives.sql",\n', "")
+        .replace("len(MIGRATIONS) != 23", "len(MIGRATIONS) != 22")
+    )
+    runner = legacy / "scripts/init_railway_db.py"
+    runner.write_text(
+        runner.read_text()
+        .replace(
+            "                _harden_candidate_privacy_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+        .replace(
+            "                _assert_candidate_privacy_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+    )
+    try:
+        legacy_install = _run(
+            runner,
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+            ACTIVEKG_SCHEMA_FRESH_INIT="1",
+            # PostgreSQL roles are cluster-wide. Reassert the password already
+            # carried by the shared disposable runtime DSN so this cloned-DB
+            # test cannot poison the tests that follow it.
+            ACTIVEKG_RUNTIME_PASSWORD=_runtime_password(),
+        )
+        assert legacy_install.returncode == 0, legacy_install.stdout + legacy_install.stderr
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO nodes (id, tenant_id, classes, props) "
+                "VALUES ('51515151-5151-4515-8515-515151515151',"
+                "'privacy-upgrade-test',ARRAY['Document'],"
+                '\'{"text":"unchanged sentinel"}\'::jsonb)'
+            )
+            cur.execute("SELECT count(*), min(props->>'text') FROM nodes")
+            before_nodes = cur.fetchone()
+            cur.execute("SELECT count(*) FROM schema_migrations")
             assert cur.fetchone()[0] == 22
+            cur.execute("SELECT to_regclass('public.candidate_privacy_directives')")
+            assert cur.fetchone()[0] is None
+
+        upgraded = _run(
+            ROOT / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+        )
+        assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*), min(props->>'text') FROM nodes")
+            assert cur.fetchone() == before_nodes
+            cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
+            assert cur.fetchone() == (23, 0)
+            _assert_candidate_privacy_runtime_privileges(cur)
+        with psycopg.connect(_runtime_dsn(name)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            assert cur.fetchone() == ("activekg_app",)
     finally:
         _drop_database(name)
 
@@ -259,6 +432,7 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
 def test_unfinished_attempt_blocks_runtime_readiness_without_recording_a_start() -> None:
     env = {
         **os.environ,
+        **PRIVACY_READINESS_ENV,
         "ACTIVEKG_DSN": RUNTIME_DSN,
         "ACTIVEKG_SCHEMA_TARGET_ID": TARGET_ID,
         "ACTIVEKG_SCHEMA_ENVIRONMENT": "development",
@@ -331,7 +505,7 @@ def test_failed_tail_release_blocks_readiness_and_a_corrected_release_recovers(
 ) -> None:
     name = "memory_schema_failure_test"
     dsn = _clone_database(name)
-    migration_name = "023_schema_control_failure_test.sql"
+    migration_name = "024_schema_control_failure_test.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,
@@ -361,6 +535,7 @@ def test_failed_tail_release_blocks_readiness_and_a_corrected_release_recovers(
         }
         readiness_env.update(
             {
+                **PRIVACY_READINESS_ENV,
                 "ACTIVEKG_DSN": _runtime_dsn(name),
                 "ACTIVEKG_SCHEMA_TARGET_ID": TARGET_ID,
                 "ACTIVEKG_SCHEMA_ENVIRONMENT": "development",
@@ -415,7 +590,7 @@ def test_two_concurrent_tail_releases_apply_the_new_migration_exactly_once(
 ) -> None:
     name = "memory_schema_tail_test"
     dsn = _clone_database(name)
-    migration_name = "023_schema_control_test_tail.sql"
+    migration_name = "024_schema_control_test_tail.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,

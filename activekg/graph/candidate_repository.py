@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -38,15 +39,63 @@ from activekg.graph.models import (
     TenantPrivateSearchRow,
 )
 
+if TYPE_CHECKING:
+    from activekg.privacy.identity import NormalizedIdentifier
+    from activekg.privacy.repository import CandidatePrivacyRepository
+
 
 class CandidateRepository:
     """Postgres-backed repository for canonical candidate identity."""
 
-    def __init__(self, dsn: str, *, pool: ConnectionPool | None = None):
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        pool: ConnectionPool | None = None,
+        privacy_repository: CandidatePrivacyRepository | None = None,
+    ):
         self.dsn = dsn
         self.logger = get_enhanced_logger(__name__)
         self._owns_pool = pool is None
         self.pool = pool or ConnectionPool(dsn, min_size=1, max_size=5, timeout=30.0, open=True)
+        self.privacy_repository = privacy_repository
+
+    def set_privacy_repository(self, repository: CandidatePrivacyRepository) -> None:
+        self.privacy_repository = repository
+
+    def _require_privacy_allowed(
+        self,
+        *,
+        tenant_id: str | None = None,
+        candidate_id: str | None = None,
+        global_candidate_id: str | None = None,
+        identifiers: list[NormalizedIdentifier] | None = None,
+        global_use: bool,
+    ) -> None:
+        """Fail closed in production; dev/tests may explicitly omit the authority."""
+        if self.privacy_repository is None:
+            if os.getenv("ACTIVEKG_SCHEMA_ENVIRONMENT") == "production":
+                from activekg.privacy.repository import CandidatePrivacyUnavailable
+
+                raise CandidatePrivacyUnavailable("candidate privacy authority is unavailable")
+            return
+        from activekg.privacy.repository import require_allowed
+
+        if identifiers:
+            decision = self.privacy_repository.evaluate(
+                identifiers=identifiers,
+                global_candidate_id=global_candidate_id,
+                candidate_tenant_id=tenant_id,
+                candidate_id=candidate_id,
+            )
+            require_allowed(decision, global_use=global_use)
+            return
+        decision = self.privacy_repository.canonical_decision(
+            global_candidate_id=global_candidate_id,
+            candidate_tenant_id=tenant_id,
+            candidate_id=candidate_id,
+        )
+        require_allowed(decision, global_use=global_use)
 
     def close(self) -> None:
         if self._owns_pool:
@@ -104,6 +153,27 @@ class CandidateRepository:
     # ------------------------------------------------------------------
 
     def create_candidate(self, candidate: Candidate) -> str:
+        from activekg.privacy.identity import (
+            CandidatePrivacyIdentityError,
+            normalize_privacy_identifier,
+        )
+
+        transient = []
+        for identifier_type, value in (
+            ("email", candidate.primary_email),
+            ("phone", candidate.primary_phone),
+            ("linkedin_url", candidate.linkedin_url),
+        ):
+            if value:
+                try:
+                    transient.append(normalize_privacy_identifier(identifier_type, value))
+                except CandidatePrivacyIdentityError:
+                    # Existing ingest accepts malformed optional upstream
+                    # profile URLs as skipped metadata. They cannot match an
+                    # exact suppression token and must not bypass checks for
+                    # the remaining valid identifiers.
+                    continue
+        self._require_privacy_allowed(identifiers=transient, global_use=True)
         with self._conn(candidate.tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -148,7 +218,10 @@ class CandidateRepository:
                                primary_phone, props, metadata, node_id, created_at, updated_at,
                                profile, headline, location_raw, skills, seniority_level,
                                linkedin_url, linkedin_id, profile_picture_url
-                        FROM candidates WHERE candidate_id = %s
+                        FROM candidates
+                        WHERE candidate_id = %s
+                          AND candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                              = 'allow'
                         """,
                         (candidate_id,),
                     )
@@ -161,6 +234,8 @@ class CandidateRepository:
                                linkedin_url, linkedin_id, profile_picture_url
                         FROM candidates
                         WHERE candidate_id = %s AND tenant_id IS NOT DISTINCT FROM %s
+                          AND candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                              NOT IN ('block_all', 'review')
                         """,
                         (candidate_id, tenant_id),
                     )
@@ -187,6 +262,28 @@ class CandidateRepository:
         profile_picture_url: str | None = None,
         tenant_id: str | None = None,
     ) -> bool:
+        from activekg.privacy.identity import (
+            CandidatePrivacyIdentityError,
+            normalize_privacy_identifier,
+        )
+
+        transient = []
+        for identifier_type, value in (
+            ("email", primary_email),
+            ("phone", primary_phone),
+            ("linkedin_url", linkedin_url),
+        ):
+            if value:
+                try:
+                    transient.append(normalize_privacy_identifier(identifier_type, value))
+                except CandidatePrivacyIdentityError:
+                    continue
+        self._require_privacy_allowed(
+            tenant_id=tenant_id,
+            candidate_id=candidate_id,
+            identifiers=transient,
+            global_use=tenant_id is None,
+        )
         sets: list[str] = ["updated_at = now()"]
         params: list[Any] = []
         if display_name is not None:
@@ -234,7 +331,11 @@ class CandidateRepository:
         if len(sets) == 1:
             return True
 
-        sql = f"UPDATE candidates SET {', '.join(sets)} WHERE candidate_id = %s"
+        sql = (
+            f"UPDATE candidates SET {', '.join(sets)} WHERE candidate_id = %s "
+            "AND candidate_privacy_candidate_decision(tenant_id, candidate_id) "
+            "NOT IN ('block_all', 'review')"
+        )
         params.append(candidate_id)
         if tenant_id is not None:
             sql += " AND tenant_id IS NOT DISTINCT FROM %s"
@@ -280,6 +381,23 @@ class CandidateRepository:
         :meth:`find_candidate_by_identifier` before inserting.
         """
         normalized = normalize_identifier(identifier_type, value)
+        if identifier_type in {
+            "email",
+            "phone",
+            "linkedin_url",
+            "github_url",
+            "signal_candidate_id",
+            "vantahire_application_id",
+            "vantahire_resume_id",
+        }:
+            from activekg.privacy.identity import normalize_privacy_identifier
+
+            self._require_privacy_allowed(
+                tenant_id=tenant_id,
+                candidate_id=candidate_id,
+                identifiers=[normalize_privacy_identifier(identifier_type, value)],
+                global_use=tenant_id is None,
+            )
         ident = CandidateIdentifier(
             candidate_id=candidate_id,
             identifier_type=identifier_type,
@@ -344,6 +462,8 @@ class CandidateRepository:
                                value_raw, source, confidence, metadata, created_at, updated_at
                         FROM candidate_identifiers
                         WHERE candidate_id = %s
+                          AND candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                              = 'allow'
                         ORDER BY identifier_type, value_normalized
                         """,
                         (candidate_id,),
@@ -355,6 +475,8 @@ class CandidateRepository:
                                value_raw, source, confidence, metadata, created_at, updated_at
                         FROM candidate_identifiers
                         WHERE candidate_id = %s AND tenant_id IS NOT DISTINCT FROM %s
+                          AND candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                              NOT IN ('block_all', 'review')
                         ORDER BY identifier_type, value_normalized
                         """,
                         (candidate_id, tenant_id),
@@ -370,6 +492,29 @@ class CandidateRepository:
     ) -> Candidate | None:
         """Look up a canonical candidate by any of its identifiers."""
         normalized = normalize_identifier(identifier_type, value)
+        if identifier_type in {
+            "email",
+            "phone",
+            "linkedin_url",
+            "github_url",
+            "signal_candidate_id",
+            "vantahire_application_id",
+            "vantahire_resume_id",
+        }:
+            from activekg.privacy.identity import normalize_privacy_identifier
+
+            try:
+                self._require_privacy_allowed(
+                    tenant_id=tenant_id,
+                    identifiers=[normalize_privacy_identifier(identifier_type, value)],
+                    global_use=tenant_id is None,
+                )
+            except Exception as exc:
+                from activekg.privacy.repository import CandidatePrivacyRestricted
+
+                if isinstance(exc, CandidatePrivacyRestricted):
+                    return None
+                raise
         with self._conn(tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -381,6 +526,8 @@ class CandidateRepository:
                     WHERE i.identifier_type = %s
                       AND i.value_normalized = %s
                       AND i.tenant_id IS NOT DISTINCT FROM %s
+                      AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                          NOT IN ('block_all', 'review')
                     LIMIT 1
                     """,
                     (identifier_type, normalized, tenant_id),
@@ -435,10 +582,25 @@ class CandidateRepository:
                       AND source = %s
                       AND source_record_type = %s
                       AND source_record_id = %s
+                      AND (
+                          (%s::text IS NULL AND
+                           candidate_privacy_candidate_decision(tenant_id, candidate_id) = 'allow')
+                          OR
+                          (%s::text IS NOT NULL AND
+                           candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                               NOT IN ('block_all', 'review'))
+                      )
                     ORDER BY fetched_at DESC NULLS LAST, updated_at DESC, id
                     LIMIT 1
                     """,
-                    (tenant_id, source, source_record_type, source_record_id),
+                    (
+                        tenant_id,
+                        source,
+                        source_record_type,
+                        source_record_id,
+                        tenant_id,
+                        tenant_id,
+                    ),
                 )
                 row = cur.fetchone()
                 return self._row_to_source_record(row) if row else None
@@ -463,10 +625,18 @@ class CandidateRepository:
                     WHERE tenant_id IS NOT DISTINCT FROM %s
                       AND source = %s
                       AND source_record_id = %s
+                      AND (
+                          (%s::text IS NULL AND
+                           candidate_privacy_candidate_decision(tenant_id, candidate_id) = 'allow')
+                          OR
+                          (%s::text IS NOT NULL AND
+                           candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                               NOT IN ('block_all', 'review'))
+                      )
                     ORDER BY fetched_at DESC NULLS LAST, updated_at ASC, id
                     LIMIT 1
                     """,
-                    (tenant_id, source, source_record_id),
+                    (tenant_id, source, source_record_id, tenant_id, tenant_id),
                 )
                 row = cur.fetchone()
                 return self._row_to_source_record(row) if row else None
@@ -474,6 +644,47 @@ class CandidateRepository:
     def upsert_source_record(self, record: CandidateSourceRecord) -> CandidateSourceRecord:
         """Insert or update a source record. Idempotent on
         ``(tenant_id, source, source_record_type, source_record_id)``."""
+        from activekg.privacy.identity import (
+            CandidatePrivacyIdentityError,
+            normalize_privacy_identifier,
+        )
+
+        global_use = record.source == "signal" or record.tenant_id is None
+        transient: list[NormalizedIdentifier] = []
+        if record.source == "signal":
+            transient.append(
+                normalize_privacy_identifier("signal_candidate_id", record.source_record_id)
+            )
+        elif record.source == "vantahire":
+            identifier_type = (
+                "vantahire_resume_id"
+                if "resume" in record.source_record_type.lower()
+                else "vantahire_application_id"
+            )
+            transient.append(normalize_privacy_identifier(identifier_type, record.source_record_id))
+        for field, identifier_type in (
+            ("email", "email"),
+            ("phone", "phone"),
+            ("linkedin_url", "linkedin_url"),
+            ("linkedinUrl", "linkedin_url"),
+            ("github_url", "github_url"),
+        ):
+            value = (record.payload or {}).get(field)
+            if isinstance(value, str) and value.strip():
+                try:
+                    transient.append(normalize_privacy_identifier(identifier_type, value))
+                except CandidatePrivacyIdentityError:
+                    # Resolve endpoints already classify malformed optional
+                    # upstream identity URLs as skipped.  The source-record
+                    # fence must preserve that contract; an invalid value
+                    # cannot match an exact suppression token.
+                    continue
+        self._require_privacy_allowed(
+            tenant_id=record.tenant_id,
+            candidate_id=record.candidate_id,
+            identifiers=transient,
+            global_use=global_use,
+        )
         with self._conn(record.tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -537,9 +748,17 @@ class CandidateRepository:
                    job_tags
             FROM candidate_source_records
             WHERE candidate_id = %s
+              AND (
+                  (%s::text IS NULL AND
+                   candidate_privacy_candidate_decision(tenant_id, candidate_id) = 'allow')
+                  OR
+                  (%s::text IS NOT NULL AND
+                   candidate_privacy_candidate_decision(tenant_id, candidate_id)
+                       NOT IN ('block_all', 'review'))
+              )
             """
         ]
-        params: list[Any] = [candidate_id]
+        params: list[Any] = [candidate_id, tenant_id, tenant_id]
         if source is not None:
             sql.append("AND source = %s")
             params.append(source)
@@ -572,6 +791,8 @@ class CandidateRepository:
                     WHERE sr.source = 'vantahire'
                       AND sr.org_id = %s
                       AND sr.tenant_id IS NOT DISTINCT FROM %s
+                      AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                          NOT IN ('block_all', 'review')
                     """,
                     (org_id, tenant_id),
                 )
@@ -593,6 +814,8 @@ class CandidateRepository:
                     WHERE sr.source = 'vantahire'
                       AND sr.effective_recruiter_id = %s
                       AND sr.tenant_id IS NOT DISTINCT FROM %s
+                      AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                          NOT IN ('block_all', 'review')
                     """,
                     (recruiter_id, tenant_id),
                 )
@@ -614,6 +837,8 @@ class CandidateRepository:
                     WHERE sr.source = 'vantahire'
                       AND sr.created_by_user_id = %s
                       AND sr.tenant_id IS NOT DISTINCT FROM %s
+                      AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                          NOT IN ('block_all', 'review')
                     """,
                     (user_id, tenant_id),
                 )
@@ -671,6 +896,8 @@ class CandidateRepository:
                         WHERE csr.source = 'signal'
                           AND csr.job_tags && %s::text[]
                           AND csr.tenant_id IS NOT DISTINCT FROM %s
+                          AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                              = 'allow'
                     ),
                     filtered AS (
                         SELECT * FROM tag_matches WHERE overlap_count >= %s
@@ -789,6 +1016,8 @@ class CandidateRepository:
                             LIMIT 1
                         ) linkedin ON true
                         WHERE c.tenant_id = %s
+                          AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                              NOT IN ('block_all', 'review')
                           AND EXISTS (
                               SELECT 1
                               FROM candidate_source_records csr
@@ -864,6 +1093,8 @@ class CandidateRepository:
                         WHERE cp.tenant_id = %s
                           AND n.tenant_id = %s
                           AND cp.source_type IN ('platform_applicant', 'org_upload')
+                          AND candidate_privacy_global_decision(cp.global_candidate_id)
+                              NOT IN ('block_all', 'review')
                         ORDER BY cp.global_candidate_id, n.updated_at DESC, n.id
                     ),
                     private_candidates AS (
@@ -1011,6 +1242,29 @@ class CandidateRepository:
             if existing is not None:
                 break
 
+        from activekg.privacy.identity import normalize_privacy_identifier
+
+        privacy_identifiers = [
+            normalize_privacy_identifier(itype, raw)
+            for itype, raw, _norm in normalized_ids
+            if itype
+            in {
+                "email",
+                "phone",
+                "linkedin_url",
+                "github_url",
+                "signal_candidate_id",
+                "vantahire_application_id",
+                "vantahire_resume_id",
+            }
+        ]
+        self._require_privacy_allowed(
+            tenant_id=tenant_id if existing else None,
+            candidate_id=existing.candidate_id if existing else None,
+            identifiers=privacy_identifiers,
+            global_use=source != "vantahire" or existing is None,
+        )
+
         candidate = existing or Candidate(
             tenant_id=tenant_id,
             display_name=display_name,
@@ -1084,6 +1338,8 @@ class CandidateRepository:
                     WHERE i.identifier_type = %s
                       AND i.value_normalized = %s
                       AND i.tenant_id IS NOT DISTINCT FROM %s
+                      AND candidate_privacy_candidate_decision(c.tenant_id, c.candidate_id)
+                          NOT IN ('block_all', 'review')
                     LIMIT 1
                     """,
                     (identifier_type, value_normalized, tenant_id),

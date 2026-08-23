@@ -44,6 +44,7 @@ jobs:
       - name: Enforce schema-control authority and caller census
         run: |
           python scripts/schema_control_guard.py
+          python scripts/candidate_privacy_surface_guard.py
 
       - name: Run type checking
         run: |
@@ -58,6 +59,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,6 +78,13 @@ jobs:
         env:
           ACTIVEKG_TEST_NO_DB: "true"
           JWT_ENABLED: "false"
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           pytest \
             tests/test_security_limits.py \
@@ -86,6 +96,11 @@ jobs:
             tests/test_contact_suppression_authority.py \
             tests/test_public_observability_boundary.py \
             tests/test_schema_control.py \
+            tests/test_candidate_privacy_identity.py \
+            tests/test_candidate_privacy_authority.py \
+            tests/test_candidate_privacy_api.py \
+            tests/test_candidate_privacy_fences.py \
+            tests/test_candidate_privacy_surface_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -98,20 +113,6 @@ jobs:
     strategy:
       matrix:
         postgres: ["15", "16"]
-    services:
-      postgres:
-        image: pgvector/pgvector:pg${{ matrix.postgres }}
-        env:
-          POSTGRES_USER: activekg
-          POSTGRES_PASSWORD: activekg
-          POSTGRES_DB: activekg
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       
@@ -127,20 +128,74 @@ jobs:
           pip install pytest pytest-cov pytest-timeout
           pip install -r requirements.txt
 
+      - name: Start runner-local PostgreSQL ${{ matrix.postgres }} with pgvector
+        env:
+          POSTGRES_MAJOR: ${{ matrix.postgres }}
+        run: |
+          sudo systemctl stop postgresql || true
+          if [ ! -f "/usr/share/postgresql/${POSTGRES_MAJOR}/extension/vector.control" ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-common
+            if [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then
+              sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            fi
+            sudo apt-get update
+            sudo apt-get install -y "postgresql-${POSTGRES_MAJOR}" "postgresql-${POSTGRES_MAJOR}-pgvector"
+          fi
+          while read -r version cluster _; do
+            sudo pg_ctlcluster "$version" "$cluster" stop || true
+          done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk -v version="$POSTGRES_MAJOR" \
+            '$1 == version && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop "$POSTGRES_MAJOR" main
+          fi
+          sudo pg_createcluster -p 5432 "$POSTGRES_MAJOR" main --start
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != "${POSTGRES_MAJOR}"* ]]; then
+            echo "Expected runner-local PostgreSQL ${POSTGRES_MAJOR}; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS memory_unit_test WITH (FORCE);
+          DROP ROLE IF EXISTS activekg_app;
+          DROP ROLE IF EXISTS activekg_unit_test;
+          CREATE ROLE activekg_unit_test LOGIN SUPERUSER PASSWORD 'activekg';
+          CREATE DATABASE memory_unit_test OWNER activekg_unit_test;
+          SQL
+          identity="$(PGPASSWORD=activekg psql -h 127.0.0.1 -U activekg_unit_test \
+            -d memory_unit_test -Atqc \
+            "SELECT current_database() || '|' || current_user || '|' || host(inet_server_addr())")"
+          if [ "$identity" != "memory_unit_test|activekg_unit_test|127.0.0.1" ]; then
+            echo "Runner-local PostgreSQL identity proof failed" >&2
+            exit 1
+          fi
+
       - name: Wait for PostgreSQL and initialize schema
         env:
-          PGPASSWORD: activekg
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_unit_test:activekg@127.0.0.1:5432/memory_unit_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "22222222-2222-4222-8222-222222222222"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          until pg_isready -h localhost -p 5432 -U activekg; do
+          until pg_isready -h localhost -p 5432 -U activekg_unit_test -d memory_unit_test; do
             echo "Waiting for PostgreSQL..."; sleep 2; done
-          psql -h localhost -U activekg -d activekg -c "CREATE EXTENSION IF NOT EXISTS vector;"
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
-          psql -h localhost -U activekg -d activekg -f db/migrations/add_text_search.sql || true
+          python scripts/init_railway_db.py
       
       - name: Run unit tests
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_unit_test:activekg@localhost:5432/memory_unit_test
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           pytest \
             tests/test_phase1_complete.py \
@@ -160,6 +215,13 @@ jobs:
       ACTIVEKG_SCHEMA_TARGET_ID: "11111111-1111-4111-8111-111111111111"
       ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
       ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+      CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+      CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+      CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+      CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+      CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+      CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+      CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
     services:
       redis:
         image: redis:7-alpine
@@ -172,6 +234,8 @@ jobs:
           - 6379:6379
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -249,11 +313,11 @@ jobs:
           done
           ledger=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "22|0" ]; then
-            echo "FAIL: ledger should have exactly 22 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "23|0" ]; then
+            echo "FAIL: ledger should have exactly 23 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 22 applied, 0 baselined"
+          echo "OK: migration ledger has 23 applied, 0 baselined"
           posture=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -268,6 +332,13 @@ jobs:
           ACTIVEKG_SCHEMA_CONTROL_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
         run: |
           pytest tests/test_schema_control_postgres.py -v --tb=short --timeout=240
+
+      - name: Run disposable candidate-privacy authority matrix
+        env:
+          ACTIVEKG_PRIVACY_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_PRIVACY_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
+        run: |
+          pytest tests/test_candidate_privacy_postgres.py -v --tb=short --timeout=240
 
       - name: Run RLS enforcement tests as the restricted runtime role
         env:
@@ -553,20 +624,6 @@ jobs:
     runs-on: ubuntu-latest
     
     services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: activekg
-          POSTGRES_PASSWORD: activekg_test_password
-          POSTGRES_DB: activekg
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      
       redis:
         image: redis:7-alpine
         options: >-
@@ -608,25 +665,58 @@ jobs:
           print("✓ ML dependency versions verified")
           PY
           pip show torch sentence-transformers transformers
+
+      - name: Start runner-local PostgreSQL 16 with pgvector
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16-pgvector
+            sudo systemctl restart postgresql
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS memory_e2e_test WITH (FORCE);
+          DROP ROLE IF EXISTS activekg_app;
+          DROP ROLE IF EXISTS activekg_e2e_test;
+          CREATE ROLE activekg_e2e_test LOGIN SUPERUSER PASSWORD 'activekg_test_password';
+          CREATE DATABASE memory_e2e_test OWNER activekg_e2e_test;
+          SQL
+          identity="$(PGPASSWORD=activekg_test_password psql -h 127.0.0.1 -U activekg_e2e_test \
+            -d memory_e2e_test -Atqc \
+            "SELECT current_database() || '|' || current_user || '|' || host(inet_server_addr())")"
+          if [ "$identity" != "memory_e2e_test|activekg_e2e_test|127.0.0.1" ]; then
+            echo "Runner-local PostgreSQL identity proof failed" >&2
+            exit 1
+          fi
       
       - name: Wait for PostgreSQL
         run: |
-          until pg_isready -h localhost -p 5432 -U activekg; do
+          until pg_isready -h localhost -p 5432 -U activekg_e2e_test -d memory_e2e_test; do
             echo "Waiting for PostgreSQL..."
             sleep 2
           done
       
       - name: Initialize database schema
         env:
-          PGPASSWORD: activekg_test_password
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_e2e_test:activekg_test_password@127.0.0.1:5432/memory_e2e_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "33333333-3333-4333-8333-333333333333"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
-          psql -h localhost -U activekg -d activekg -f db/migrations/add_text_search.sql || true
+          python scripts/init_railway_db.py
       
       - name: Start API server in background
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg_test_password@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_e2e_test
           JWT_ENABLED: "true"
           JWT_SECRET_KEY: "ci-test-secret-key-min-32-chars-long-for-testing-only"
           JWT_ALGORITHM: HS256
@@ -638,6 +728,13 @@ jobs:
           RUN_SCHEDULER: "false"
           EMBEDDING_BACKEND: sentence-transformers
           EMBEDDING_MODEL: all-MiniLM-L6-v2
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid
@@ -706,20 +803,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     
     services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: activekg
-          POSTGRES_PASSWORD: activekg_bench_password
-          POSTGRES_DB: activekg
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      
       redis:
         image: redis:7-alpine
         ports:
@@ -738,20 +821,61 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Start runner-local PostgreSQL 16 with pgvector
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16-pgvector
+            sudo systemctl restart postgresql
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS memory_benchmark_test WITH (FORCE);
+          DROP ROLE IF EXISTS activekg_app;
+          DROP ROLE IF EXISTS activekg_benchmark_test;
+          CREATE ROLE activekg_benchmark_test LOGIN SUPERUSER PASSWORD 'activekg_bench_password';
+          CREATE DATABASE memory_benchmark_test OWNER activekg_benchmark_test;
+          SQL
+          identity="$(PGPASSWORD=activekg_bench_password psql -h 127.0.0.1 \
+            -U activekg_benchmark_test -d memory_benchmark_test -Atqc \
+            "SELECT current_database() || '|' || current_user || '|' || host(inet_server_addr())")"
+          if [ "$identity" != "memory_benchmark_test|activekg_benchmark_test|127.0.0.1" ]; then
+            echo "Runner-local PostgreSQL identity proof failed" >&2
+            exit 1
+          fi
       
       - name: Initialize database
         env:
-          PGPASSWORD: activekg_bench_password
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_benchmark_test:activekg_bench_password@127.0.0.1:5432/memory_benchmark_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_SCHEMA_FRESH_INIT: "1"
+          ACTIVEKG_SCHEMA_TARGET_ID: "44444444-4444-4444-8444-444444444444"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: "development"
+          ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
-          psql -h localhost -U activekg -d activekg -f db/init.sql
-          psql -h localhost -U activekg -d activekg -f enable_rls_policies.sql
+          python scripts/init_railway_db.py
       
       - name: Start API server
         env:
-          ACTIVEKG_DSN: postgresql://activekg:activekg_bench_password@localhost:5432/activekg
+          ACTIVEKG_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_benchmark_test
           JWT_ENABLED: "false"
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+          CANDIDATE_PRIVACY_INTAKE_ENABLED: "false"
+          CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
+          CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
           echo $! > api_server.pid

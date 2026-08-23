@@ -742,6 +742,29 @@ openssl s_client -connect activekg.example.com:443 -servername activekg.example.
 
 ## Rollback Plan
 
+### Candidate-privacy migration 023 cutover
+
+Migration 023 and the matching API/worker release form one attended,
+forward-only cutover. Freeze runtime auto-deploys, stage the complete privacy
+configuration, run migration 023 through the manual release service, then
+deploy the exact verified code head API → embedding worker → extraction worker.
+After the ledger contains 23 rows, old code expects 22 and must not be blindly
+redeployed; forward-fix the verified head. A database restore is last-resort
+incident recovery, not the normal rollback.
+
+Production placement:
+
+- API: HMAC ring, active key version, intake flag, and exact Flow/Signal service
+  authority identifiers.
+- Workers: intake flag and authority identifiers only; any privacy HMAC key on
+  a worker is a readiness error.
+- Manual release service: migration credential only; no HMAC key or runtime
+  intake flag is needed.
+
+Ship 1AM with `CANDIDATE_PRIVACY_INTAKE_ENABLED=false`. No production directive
+or candidate probe is part of acceptance. Intake stays disabled until the
+separately approved Flow, Discover and cross-system replay gates are complete.
+
 If deployment fails:
 
 1. Stop new API instances

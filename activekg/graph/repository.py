@@ -322,6 +322,73 @@ class GraphRepository:
         # Default: cosine distance
         return "<=>", "1 - (embedding <=> %s)"
 
+    def _privacy_filtered_vector_rows(
+        self,
+        cur: Any,
+        *,
+        query_vec_param: Vector,
+        where_sql: str,
+        filter_params: Sequence[Any],
+        limit: int,
+    ) -> list[Sequence[Any]]:
+        """Return privacy-filtered vector rows without ANN under-fill.
+
+        pgvector's approximate indexes apply ordinary WHERE predicates after
+        visiting a bounded set of ANN candidates.  A selective privacy or
+        metadata predicate can therefore produce fewer than ``limit`` rows even
+        when more allowed rows exist outside the probed lists.  The initial ANN
+        query preserves the normal fast path.  If it under-fills, a MATERIALIZED
+        filtered relation is sorted exactly so the privacy fence is evaluated
+        before LIMIT and an empty result is authoritative.
+        """
+        op, sim_expr = self._distance_operator()
+        node_columns = """
+            id, tenant_id, classes, props, payload_ref, embedding,
+            metadata, refresh_policy, triggers, version,
+            last_refreshed, drift_score
+        """
+        ann_sql = f"""
+            SELECT
+                {node_columns},
+                {sim_expr} AS vector_similarity
+            FROM nodes
+            WHERE embedding IS NOT NULL{where_sql}
+            ORDER BY embedding {op} %s
+            LIMIT %s
+        """
+        cur.execute(
+            ann_sql,
+            [query_vec_param, *filter_params, query_vec_param, limit],
+        )
+        rows = list(cur.fetchall())
+        if len(rows) >= limit:
+            return rows
+
+        # MATERIALIZED is the semantic boundary: PostgreSQL cannot flatten this
+        # relation back into an ANN-ordered scan whose post-filtering under-fills.
+        exact_sql = f"""
+            WITH privacy_filtered_nodes AS MATERIALIZED (
+                SELECT {node_columns}
+                FROM nodes
+                WHERE embedding IS NOT NULL{where_sql}
+            )
+            SELECT
+                {node_columns},
+                {sim_expr} AS vector_similarity
+            FROM privacy_filtered_nodes
+            ORDER BY embedding {op} %s
+            LIMIT %s
+        """
+        self.logger.info(
+            "privacy-filtered ANN under-filled; running exact rescan",
+            extra_fields={"ann_count": len(rows), "limit": limit},
+        )
+        cur.execute(
+            exact_sql,
+            [*filter_params, query_vec_param, query_vec_param, limit],
+        )
+        return list(cur.fetchall())
+
     def _configure_connection(self, conn):
         """Configure each new connection from the pool."""
         register_vector(conn)
@@ -367,6 +434,54 @@ class GraphRepository:
             last_refreshed=cast(Any, row[10]),
             drift_score=cast(float | None, row[11]),
         )
+
+    @staticmethod
+    def _candidate_bearing_values(
+        classes: list[str], props: dict[str, Any], metadata: dict[str, Any]
+    ) -> bool:
+        class_names = {value.strip().lower() for value in classes}
+        return bool(
+            class_names & {"candidate", "person", "resume", "applicant"}
+            or metadata.get("provenance_type") in {"platform_applicant", "org_upload"}
+            or any(
+                key in props or key in metadata
+                for key in ("candidate_id", "global_candidate_id", "primary_email", "email")
+            )
+        )
+
+    def _assert_candidate_values_allowed(
+        self,
+        cur: Any,
+        *,
+        classes: list[str],
+        props: dict[str, Any],
+        metadata: dict[str, Any],
+        tenant_id: str | None,
+    ) -> None:
+        if not self._candidate_bearing_values(classes, props, metadata):
+            return
+        global_candidate_id = props.get("global_candidate_id") or metadata.get(
+            "global_candidate_id"
+        )
+        candidate_id = props.get("candidate_id") or metadata.get("candidate_id")
+        candidate_tenant_id = (
+            props.get("candidate_tenant_id") or metadata.get("candidate_tenant_id") or tenant_id
+        )
+        if global_candidate_id is None and candidate_id is None:
+            return
+        cur.execute(
+            "SELECT candidate_privacy_decision_for(%s,%s,%s)",
+            (
+                global_candidate_id,
+                candidate_tenant_id if candidate_id else None,
+                candidate_id,
+            ),
+        )
+        decision = cur.fetchone()[0]
+        if decision in {"block_all", "review"} or (
+            tenant_id is None and decision == "block_global"
+        ):
+            raise PermissionError("candidate privacy restriction applies")
 
     @contextmanager
     def _conn(self, tenant_id: str | None = None):
@@ -689,8 +804,12 @@ class GraphRepository:
                 except Exception:
                     # Savepoint creation or env parsing failed: skip tuning entirely
                     pass
-                where_clauses: list[str] = []
-                params: list[Any] = []
+                where_clauses: list[str] = [
+                    "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                ]
+                params: list[Any] = [tenant_id]
 
                 if classes_filter:
                     where_clauses.append("classes && %s::text[]")
@@ -719,6 +838,13 @@ class GraphRepository:
     def create_node(self, node: Node) -> str:
         with self._conn(tenant_id=node.tenant_id) as conn:
             with conn.cursor() as cur:
+                self._assert_candidate_values_allowed(
+                    cur,
+                    classes=node.classes or [],
+                    props=node.props or {},
+                    metadata=node.metadata or {},
+                    tenant_id=node.tenant_id,
+                )
                 emb = node.embedding.tolist() if isinstance(node.embedding, np.ndarray) else None
                 cur.execute(
                     """
@@ -756,9 +882,14 @@ class GraphRepository:
                     SELECT id, tenant_id, classes, props, payload_ref, embedding, metadata,
                            refresh_policy, triggers, version, last_refreshed, drift_score,
                            embedding_status, embedding_error, embedding_attempts, embedding_updated_at
-                    FROM nodes WHERE id = %s
+                    FROM nodes
+                    WHERE id = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     """,
-                    (node_id,),
+                    (node_id, tenant_id),
                 )
                 row = cast(NodeRow | None, cur.fetchone())
                 if not row:
@@ -775,10 +906,15 @@ class GraphRepository:
                     SELECT id, tenant_id, classes, props, payload_ref, embedding, metadata,
                            refresh_policy, triggers, version, last_refreshed, drift_score,
                            embedding_status, embedding_error, embedding_attempts, embedding_updated_at
-                    FROM nodes WHERE props->>'external_id' = %s
+                    FROM nodes
+                    WHERE props->>'external_id' = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     LIMIT 1
                     """,
-                    (external_id,),
+                    (external_id, tenant_id),
                 )
                 row = cast(NodeRow | None, cur.fetchone())
                 if not row:
@@ -829,8 +965,21 @@ class GraphRepository:
 
         with self._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
-                sql = f"UPDATE nodes SET {', '.join(sets)} WHERE id = %s"
+                self._assert_candidate_values_allowed(
+                    cur,
+                    classes=classes or [],
+                    props=props or {},
+                    metadata=metadata or {},
+                    tenant_id=tenant_id,
+                )
+                sql = (
+                    f"UPDATE nodes SET {', '.join(sets)} WHERE id = %s "
+                    "AND (candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                )
                 params.append(node_id)
+                params.append(tenant_id)
                 cur.execute(sql, params)
                 return cast(int, cur.rowcount) > 0
 
@@ -905,9 +1054,15 @@ class GraphRepository:
                     UPDATE nodes
                     SET {", ".join(sets)}
                     WHERE id = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     """,
-                    params,
+                    [*params, tenant_id],
                 )
+                if cur.rowcount != 1:
+                    raise PermissionError("candidate privacy restriction applies")
 
     def mark_embedding_queued(self, node_id: str, tenant_id: str | None = None) -> None:
         """Mark node embedding as queued."""
@@ -921,8 +1076,12 @@ class GraphRepository:
                         embedding_updated_at = now(),
                         updated_at = now()
                     WHERE id = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     """,
-                    (node_id,),
+                    (node_id, tenant_id),
                 )
 
     def mark_embedding_processing(self, node_id: str, tenant_id: str | None = None) -> int:
@@ -938,9 +1097,13 @@ class GraphRepository:
                         embedding_updated_at = now(),
                         updated_at = now()
                     WHERE id = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     RETURNING embedding_attempts
                     """,
-                    (node_id,),
+                    (node_id, tenant_id),
                 )
                 row = cur.fetchone()
                 return int(row[0]) if row else 0
@@ -991,8 +1154,12 @@ class GraphRepository:
                         embedding_updated_at = now(),
                         updated_at = now()
                     WHERE id = %s
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
                     """,
-                    (node_id,),
+                    (node_id, tenant_id),
                 )
 
     def vector_search(
@@ -1047,24 +1214,28 @@ class GraphRepository:
 
                 # Build WHERE clause for filters
                 # Note: tenant isolation is handled by RLS, not application WHERE clause
-                where_clauses: list[str] = []
-                params: list[Any] = [query_vec_param]
+                where_clauses: list[str] = [
+                    "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                ]
+                filter_params: list[Any] = [tenant_id]
 
                 if classes_filter:
                     # Array overlap: classes && ['Job', 'Resume']::text[]
                     where_clauses.append("classes && %s::text[]")
-                    params.append(classes_filter)
+                    filter_params.append(classes_filter)
 
                 if metadata_filters:
                     for key, value in metadata_filters.items():
                         # Compare stringified JSONB field to provided value
                         where_clauses.append("metadata->>%s = %s")
-                        params.extend([key, str(value)])
+                        filter_params.extend([key, str(value)])
 
                 # Compound JSONB containment filter (uses GIN index)
                 if compound_filter:
                     where_clauses.append("metadata @> %s::jsonb")
-                    params.append(json.dumps(compound_filter))
+                    filter_params.append(json.dumps(compound_filter))
 
                 where_sql = " AND " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -1072,7 +1243,6 @@ class GraphRepository:
                 # Use configurable candidate_factor (default 2.0, set via env WEIGHTED_SEARCH_CANDIDATE_FACTOR)
                 fetch_limit = int(top_k * self.candidate_factor) if use_weighted_score else top_k
 
-                # Execute with param order: select_vec, filters..., order_vec, limit
                 self.logger.info(
                     "vector_search executing",
                     extra_fields={
@@ -1081,22 +1251,16 @@ class GraphRepository:
                         "has_filters": bool(metadata_filters or compound_filter),
                     },
                 )
-                op, sim_expr = self._distance_operator()
-                sql = f"""
-                    SELECT
-                        id, tenant_id, classes, props, payload_ref, embedding,
-                        metadata, refresh_policy, triggers, version,
-                        last_refreshed, drift_score,
-                        {sim_expr} as similarity
-                    FROM nodes
-                    WHERE embedding IS NOT NULL{where_sql}
-                    ORDER BY embedding {op} %s
-                    LIMIT %s
-                """
-                cur.execute(sql, params + [query_vec_param, fetch_limit])
+                rows = self._privacy_filtered_vector_rows(
+                    cur,
+                    query_vec_param=query_vec_param,
+                    where_sql=where_sql,
+                    filter_params=filter_params,
+                    limit=fetch_limit,
+                )
 
                 results: list[tuple[Node, float]] = []
-                for row in cur.fetchall():
+                for row in rows:
                     row_t = cast(NodeVecSimRow, row)
                     node = self._build_node_from_row(cast(Sequence[Any], row_t))
                     similarity = float(row_t[12])
@@ -1226,8 +1390,12 @@ class GraphRepository:
 
                 # Build WHERE filters
                 # Note: tenant isolation is handled by RLS, not application WHERE clause
-                where_clauses: list[str] = []
-                filter_params: list[Any] = []
+                where_clauses: list[str] = [
+                    "(candidate_privacy_node_decision(id) = 'allow' OR ("
+                    "candidate_privacy_node_decision(id) = 'block_global' "
+                    "AND tenant_id IS NOT NULL AND tenant_id IS NOT DISTINCT FROM %s))"
+                ]
+                filter_params: list[Any] = [tenant_id]
 
                 if classes_filter:
                     # Array overlap: classes && ['Job', 'Resume']::text[]
@@ -1275,19 +1443,6 @@ class GraphRepository:
                     },
                 )
 
-                op, sim_expr = self._distance_operator()
-                vector_sql = f"""
-                    SELECT
-                        id, tenant_id, classes, props, payload_ref, embedding,
-                        metadata, refresh_policy, triggers, version,
-                        last_refreshed, drift_score,
-                        {sim_expr} as vec_similarity
-                    FROM nodes
-                    WHERE embedding IS NOT NULL
-                    {where_sql}
-                    ORDER BY embedding {op} %s
-                    LIMIT %s
-                """
                 text_sql = f"""
                     SELECT
                         id, tenant_id, classes, props, payload_ref, embedding,
@@ -1302,28 +1457,30 @@ class GraphRepository:
                     LIMIT %s
                 """
 
-                vector_params = [query_vec_param]
-                vector_params.extend(filter_params)
-                vector_params.extend([query_vec_param, candidate_k])
-
-                text_params = [query_text, query_text]
+                text_params: list[Any] = [query_text, query_text]
                 text_params.extend(filter_params)
                 text_params.append(candidate_k)
 
                 self.logger.info(
                     "hybrid_search SQL",
                     extra_fields={
-                        "vector_sql": vector_sql.replace("\n", " ").strip(),
+                        "vector_strategy": "ann_with_exact_underfill_rescan",
                         "text_sql": text_sql.replace("\n", " ").strip(),
                         "filter_params": str(filter_params),
                         "candidate_k": candidate_k,
                     },
                 )
 
-                cur.execute(vector_sql, vector_params)
+                vector_rows = self._privacy_filtered_vector_rows(
+                    cur,
+                    query_vec_param=query_vec_param,
+                    where_sql=where_sql,
+                    filter_params=filter_params,
+                    limit=candidate_k,
+                )
                 vector_candidates: list[tuple[Node, float]] = []
                 vector_rank: dict[str, int] = {}
-                for rank, row in enumerate(cur.fetchall(), start=1):
+                for rank, row in enumerate(vector_rows, start=1):
                     row_t = cast(NodeVecSimRow, row)
                     node = self._build_node_from_row(cast(Sequence[Any], row_t))
                     vec_sim = float(row_t[12])
@@ -1571,9 +1728,33 @@ class GraphRepository:
         with self._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO embedding_history (node_id, drift_score, embedding_ref) VALUES (%s, %s, %s)",
-                    (node_id, drift_score, embedding_ref),
+                    """
+                    INSERT INTO embedding_history (node_id, drift_score, embedding_ref)
+                    SELECT %s, %s, %s
+                    WHERE candidate_privacy_node_decision(%s) NOT IN ('block_all', 'review')
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM nodes n
+                              WHERE n.id = %s
+                                AND %s::text IS NOT NULL
+                                AND n.tenant_id IS NOT DISTINCT FROM %s
+                          )
+                          OR candidate_privacy_node_decision(%s) = 'allow'
+                      )
+                    """,
+                    (
+                        node_id,
+                        drift_score,
+                        embedding_ref,
+                        node_id,
+                        node_id,
+                        tenant_id,
+                        tenant_id,
+                        node_id,
+                    ),
                 )
+                if cur.rowcount != 1:
+                    raise PermissionError("candidate privacy restriction applies")
 
     def get_lineage(
         self, node_id: str, max_depth: int = 5, tenant_id: str | None = None
@@ -1584,6 +1765,21 @@ class GraphRepository:
         """
         with self._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT candidate_privacy_node_decision(id), tenant_id "
+                    "FROM nodes WHERE id = %s",
+                    (node_id,),
+                )
+                root = cur.fetchone()
+                if (
+                    root is None
+                    or root[0] in {"block_all", "review"}
+                    or (
+                        root[0] == "block_global"
+                        and (tenant_id is None or root[1] is None or root[1] != tenant_id)
+                    )
+                ):
+                    return []
                 # Recursive CTE to traverse lineage
                 cur.execute(
                     """
@@ -1591,7 +1787,12 @@ class GraphRepository:
                         -- Base case: direct parents
                         SELECT e.dst as node_id, 1 as depth, e.props as edge_props
                         FROM edges e
+                        JOIN nodes parent ON parent.id = e.dst
                         WHERE e.src = %s AND e.rel = 'DERIVED_FROM'
+                          AND (candidate_privacy_node_decision(parent.id) = 'allow' OR (
+                               candidate_privacy_node_decision(parent.id) = 'block_global'
+                               AND parent.tenant_id IS NOT NULL
+                               AND parent.tenant_id IS NOT DISTINCT FROM %s))
 
                         UNION ALL
 
@@ -1599,15 +1800,24 @@ class GraphRepository:
                         SELECT e.dst, l.depth + 1, e.props
                         FROM edges e
                         JOIN lineage l ON e.src = l.node_id
+                        JOIN nodes parent ON parent.id = e.dst
                         WHERE e.rel = 'DERIVED_FROM' AND l.depth < %s
+                          AND (candidate_privacy_node_decision(parent.id) = 'allow' OR (
+                               candidate_privacy_node_decision(parent.id) = 'block_global'
+                               AND parent.tenant_id IS NOT NULL
+                               AND parent.tenant_id IS NOT DISTINCT FROM %s))
                     )
                     SELECT DISTINCT l.node_id, l.depth, l.edge_props,
                            n.classes, n.props, n.created_at
                     FROM lineage l
                     JOIN nodes n ON l.node_id = n.id
+                    WHERE candidate_privacy_node_decision(n.id) = 'allow' OR (
+                          candidate_privacy_node_decision(n.id) = 'block_global'
+                          AND n.tenant_id IS NOT NULL
+                          AND n.tenant_id IS NOT DISTINCT FROM %s)
                     ORDER BY l.depth
                     """,
-                    (node_id, max_depth),
+                    (node_id, tenant_id, max_depth, tenant_id, tenant_id),
                 )
 
                 out: list[LineageRecordTD] = []
@@ -1643,6 +1853,9 @@ class GraphRepository:
                     FROM nodes
                     WHERE refresh_policy IS NOT NULL
                       AND refresh_policy != '{}'::jsonb
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL))
                     """
                 )
 
@@ -1754,6 +1967,9 @@ class GraphRepository:
                     SELECT id, tenant_id, classes, props, payload_ref, embedding, metadata,
                            refresh_policy, triggers, version, last_refreshed, drift_score
                     FROM nodes
+                    WHERE candidate_privacy_node_decision(id) = 'allow' OR (
+                          candidate_privacy_node_decision(id) = 'block_global'
+                          AND tenant_id IS NOT NULL)
                     """
                 )
                 out: list[Node] = []
@@ -1765,6 +1981,31 @@ class GraphRepository:
     def create_edge(self, edge: Edge) -> None:
         with self._conn(tenant_id=edge.tenant_id) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT candidate_privacy_node_decision(src.id), src.tenant_id, "
+                    "candidate_privacy_node_decision(dst.id), dst.tenant_id "
+                    "FROM nodes src CROSS JOIN nodes dst WHERE src.id = %s AND dst.id = %s",
+                    (edge.src, edge.dst),
+                )
+                endpoints = cur.fetchone()
+                if endpoints is None:
+                    raise PermissionError("candidate privacy endpoint is unavailable")
+                if any(
+                    decision in {"block_all", "review"}
+                    or (
+                        decision == "block_global"
+                        and (
+                            edge.tenant_id is None
+                            or endpoint_tenant is None
+                            or endpoint_tenant != edge.tenant_id
+                        )
+                    )
+                    for decision, endpoint_tenant in (
+                        (endpoints[0], endpoints[1]),
+                        (endpoints[2], endpoints[3]),
+                    )
+                ):
+                    raise PermissionError("candidate privacy restriction applies")
                 cur.execute(
                     "INSERT INTO edges (src, rel, dst, props, tenant_id) VALUES (%s, %s, %s, %s, %s)",
                     (edge.src, edge.rel, edge.dst, json.dumps(edge.props), edge.tenant_id),
@@ -1798,12 +2039,37 @@ class GraphRepository:
                 cur.execute(
                     """
                     INSERT INTO events (node_id, type, payload, tenant_id, actor_id, actor_type)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    SELECT %s, %s, %s, %s, %s, %s
+                    WHERE candidate_privacy_node_decision(%s) NOT IN ('block_all', 'review')
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM nodes n
+                              WHERE n.id = %s
+                                AND %s::text IS NOT NULL
+                                AND n.tenant_id IS NOT DISTINCT FROM %s
+                          )
+                          OR candidate_privacy_node_decision(%s) = 'allow'
+                      )
                     RETURNING id
                     """,
-                    (node_id, event_type, json.dumps(payload), tenant_id, actor_id, actor_type),
+                    (
+                        node_id,
+                        event_type,
+                        json.dumps(payload),
+                        tenant_id,
+                        actor_id,
+                        actor_type,
+                        node_id,
+                        node_id,
+                        tenant_id,
+                        tenant_id,
+                        node_id,
+                    ),
                 )
-                event_id = cur.fetchone()[0]
+                row = cur.fetchone()
+                if row is None:
+                    raise PermissionError("candidate privacy restriction applies")
+                event_id = row[0]
                 return str(event_id)
 
     # --- Payload loading ---
@@ -1950,10 +2216,18 @@ class GraphRepository:
                 cur.execute(
                     """
                     SELECT AVG(drift_score) as mean_drift
-                    FROM embedding_history
-                    WHERE created_at > NOW() - INTERVAL '%s hours'
+                    FROM embedding_history eh
+                    WHERE eh.created_at > NOW() - INTERVAL '%s hours'
+                      AND (candidate_privacy_node_decision(eh.node_id) = 'allow' OR (
+                           candidate_privacy_node_decision(eh.node_id) = 'block_global'
+                           AND EXISTS (
+                               SELECT 1 FROM nodes privacy_node
+                               WHERE privacy_node.id = eh.node_id
+                                 AND privacy_node.tenant_id IS NOT NULL
+                                 AND privacy_node.tenant_id IS NOT DISTINCT FROM %s
+                           )))
                     """,
-                    (lookback_hours,),
+                    (lookback_hours, tenant_id),
                 )
                 result = cur.fetchone()
                 mean_drift = (
@@ -1967,13 +2241,23 @@ class GraphRepository:
                     """
                     WITH recent_history AS (
                         SELECT
-                            node_id,
-                            drift_score,
-                            created_at,
-                            ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY created_at DESC) as rn
-                        FROM embedding_history
-                        WHERE created_at > NOW() - INTERVAL '%s hours'
-                          AND drift_score > %s
+                            eh.node_id,
+                            eh.drift_score,
+                            eh.created_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY eh.node_id ORDER BY eh.created_at DESC
+                            ) as rn
+                        FROM embedding_history eh
+                        WHERE eh.created_at > NOW() - INTERVAL '%s hours'
+                          AND eh.drift_score > %s
+                          AND (candidate_privacy_node_decision(eh.node_id) = 'allow' OR (
+                               candidate_privacy_node_decision(eh.node_id) = 'block_global'
+                               AND EXISTS (
+                                   SELECT 1 FROM nodes privacy_node
+                                   WHERE privacy_node.id = eh.node_id
+                                     AND privacy_node.tenant_id IS NOT NULL
+                                     AND privacy_node.tenant_id IS NOT DISTINCT FROM %s
+                               )))
                     ),
                     consecutive_spikes AS (
                         SELECT
@@ -1997,7 +2281,13 @@ class GraphRepository:
                     JOIN nodes n ON cs.node_id = n.id
                     ORDER BY cs.avg_drift DESC
                     """,
-                    (lookback_hours, spike_cutoff, min_refreshes, min_refreshes),
+                    (
+                        lookback_hours,
+                        spike_cutoff,
+                        tenant_id,
+                        min_refreshes,
+                        min_refreshes,
+                    ),
                 )
 
                 anomalies: list[DriftSpikeAnomalyTD] = []
@@ -2044,19 +2334,26 @@ class GraphRepository:
                             COUNT(*) as event_count,
                             MIN(created_at) as first_event,
                             MAX(created_at) as last_event,
-                            ARRAY_AGG(
+                            (ARRAY_AGG(
                                 jsonb_build_object(
-                                    'type', type,
-                                    'created_at', created_at,
-                                    'payload', payload
+                                    'type', e.type,
+                                    'created_at', e.created_at,
+                                    'payload', e.payload
                                 )
-                                ORDER BY created_at DESC
-                                LIMIT 10
-                            ) as recent_events
-                        FROM events
-                        WHERE created_at > NOW() - INTERVAL '%s hours'
-                          AND type = 'trigger_fired'
-                        GROUP BY node_id
+                                ORDER BY e.created_at DESC
+                            ))[1:10] as recent_events
+                        FROM events e
+                        WHERE e.created_at > NOW() - INTERVAL '%s hours'
+                          AND e.type = 'trigger_fired'
+                          AND (candidate_privacy_node_decision(e.node_id) = 'allow' OR (
+                               candidate_privacy_node_decision(e.node_id) = 'block_global'
+                               AND EXISTS (
+                                   SELECT 1 FROM nodes privacy_node
+                                   WHERE privacy_node.id = e.node_id
+                                     AND privacy_node.tenant_id IS NOT NULL
+                                     AND privacy_node.tenant_id IS NOT DISTINCT FROM %s
+                               )))
+                        GROUP BY e.node_id
                         HAVING COUNT(*) > %s
                     )
                     SELECT
@@ -2071,7 +2368,7 @@ class GraphRepository:
                     JOIN nodes n ON tc.node_id = n.id
                     ORDER BY tc.event_count DESC
                     """,
-                    (lookback_hours, event_threshold),
+                    (lookback_hours, tenant_id, event_threshold),
                 )
 
                 anomalies: list[TriggerStormAnomalyTD] = []
@@ -2150,7 +2447,12 @@ class GraphRepository:
                     FROM nodes
                     WHERE refresh_policy IS NOT NULL
                       AND refresh_policy != '{}'::jsonb
-                    """
+                      AND (candidate_privacy_node_decision(id) = 'allow' OR (
+                           candidate_privacy_node_decision(id) = 'block_global'
+                           AND tenant_id IS NOT NULL
+                           AND tenant_id IS NOT DISTINCT FROM %s))
+                    """,
+                    (tenant_id,),
                 )
 
                 anomalies = []
@@ -2251,6 +2553,21 @@ class GraphRepository:
         """
         with self._conn(tenant_id=tenant_id) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT candidate_privacy_node_decision(id), tenant_id "
+                    "FROM nodes WHERE id = %s",
+                    (node_id,),
+                )
+                root = cur.fetchone()
+                if (
+                    root is None
+                    or root[0] in {"block_all", "review"}
+                    or (
+                        root[0] == "block_global"
+                        and (tenant_id is None or root[1] is None or root[1] != tenant_id)
+                    )
+                ):
+                    return []
                 cur.execute(
                     """
                     SELECT

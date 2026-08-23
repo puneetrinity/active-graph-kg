@@ -263,7 +263,7 @@ make open-grafana            # opens http://localhost:3000/d/activekg-ops
 ## Railway schema releases
 
 Ordinary API and worker starts are read-only: each proves the adopted target,
-the exact 22-file migration ledger, release health, RLS and restricted-role
+the exact 23-file migration ledger, release health, RLS and restricted-role
 posture before serving or consuming work. Schema changes run only through the
 manual, auto-deploy-disabled service configured with
 `railway.schema-release.json`. That service alone receives the privileged DSN
@@ -638,8 +638,28 @@ Required on API and workers:
 - Optional: `PGVECTOR_INDEXES=ivfflat,hnsw`, `RUN_SCHEDULER=true`, `AUTO_INDEX_ON_STARTUP=false`
 
 Migrations never run at runtime boot. Operators use the manual release service;
-the API and workers fail closed if its adopted identity or 22-row ledger is not
+the API and workers fail closed if its adopted identity or 23-row ledger is not
 ready. `DATABASE_URL` fallback is development-only.
+
+Candidate-privacy authority configuration is intentionally asymmetric:
+
+- API only: `CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION` and one or more
+  `CANDIDATE_PRIVACY_HMAC_KEY_V<n>` values. Decoded keys are at least 32 random
+  bytes; the highest version is the single write key and referenced older keys
+  remain available for matching.
+- API and workers: `CANDIDATE_PRIVACY_INTAKE_ENABLED=false` plus the exact Flow
+  and Signal issuer/actor variables documented in `.env.example`.
+- Workers and the manual release service must not receive any privacy HMAC key.
+
+Phase 1AM is reversible quarantine authority, not deletion. It hides or blocks
+candidate-bearing reads, ingest and derived publication according to the stored
+directive while preserving existing rows. Hard purge, retention and legal-hold
+handling remain outside this phase.
+
+The five `/candidate-privacy/*` routes are internal service APIs. Flow alone may
+create/transition directives; Flow and Signal may read eligibility/change feeds.
+User and recruiter JWTs are always denied, request bodies are bounded, and raw
+identifiers/evidence are never returned.
 
 Run the demo bundle against Railway:
 ```bash

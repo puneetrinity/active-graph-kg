@@ -83,24 +83,25 @@ def test_create_and_get_candidate(candidate_repo: CandidateRepository, tenant: s
 def test_add_identifier_is_idempotent(candidate_repo: CandidateRepository, tenant: str):
     candidate = Candidate(tenant_id=tenant)
     candidate_repo.create_candidate(candidate)
+    email = f"Alice+{uuid.uuid4().hex}@Example.com"
 
     ident_a = candidate_repo.add_identifier(
         candidate.candidate_id,
         "email",
-        "Alice@Example.com",
+        email,
         tenant_id=tenant,
         source="vantahire",
     )
     ident_b = candidate_repo.add_identifier(
         candidate.candidate_id,
         "email",
-        "alice@example.com",
+        email.lower(),
         tenant_id=tenant,
         source="signal",
     )
 
-    assert ident_a.value_normalized == "alice@example.com"
-    assert ident_b.value_normalized == "alice@example.com"
+    assert ident_a.value_normalized == email.lower()
+    assert ident_b.value_normalized == email.lower()
     idents = candidate_repo.list_identifiers(candidate.candidate_id, tenant_id=tenant)
     assert len(idents) == 1
 
@@ -175,14 +176,19 @@ def test_source_record_preserves_provenance(candidate_repo: CandidateRepository,
 def test_upsert_candidate_from_source_merges_across_sources(
     candidate_repo: CandidateRepository, tenant: str
 ):
+    suffix = uuid.uuid4().hex
+    email = f"dana+{suffix}@example.com"
+    vantahire_id = f"VH-42-{suffix}"
+    signal_id = f"SIG-99-{suffix}"
+    github_url = f"https://github.com/dana-{suffix}"
     # VantaHire sees the candidate first, by email + vantahire application id.
     first = candidate_repo.upsert_candidate_from_source(
         source="vantahire",
         source_record_type="application",
-        source_record_id="VH-42",
+        source_record_id=vantahire_id,
         identifiers=[
-            ("email", "dana@example.com"),
-            ("vantahire_application_id", "VH-42"),
+            ("email", email),
+            ("vantahire_application_id", vantahire_id),
         ],
         payload={"role": "swe"},
         tenant_id=tenant,
@@ -194,11 +200,11 @@ def test_upsert_candidate_from_source_merges_across_sources(
     second = candidate_repo.upsert_candidate_from_source(
         source="signal",
         source_record_type="profile",
-        source_record_id="SIG-99",
+        source_record_id=signal_id,
         identifiers=[
-            ("email", "Dana@Example.com"),
-            ("signal_candidate_id", "SIG-99"),
-            ("github_url", "https://github.com/dana"),
+            ("email", email.upper()),
+            ("signal_candidate_id", signal_id),
+            ("github_url", github_url),
         ],
         payload={"score": 0.87},
         tenant_id=tenant,
@@ -217,8 +223,8 @@ def test_upsert_candidate_from_source_merges_across_sources(
 
     records = candidate_repo.list_source_records(first.candidate_id, tenant_id=tenant)
     sources = {(r.source, r.source_record_type, r.source_record_id) for r in records}
-    assert ("vantahire", "application", "VH-42") in sources
-    assert ("signal", "profile", "SIG-99") in sources
+    assert ("vantahire", "application", vantahire_id) in sources
+    assert ("signal", "profile", signal_id) in sources
 
 
 # ---------------------------------------------------------------------------

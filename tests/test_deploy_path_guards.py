@@ -122,6 +122,37 @@ def _restore_runtime_posture() -> None:
         )
 
 
+def _rewind_021_tail() -> bool:
+    """Temporarily remove both tail ledger rows so 022 remains a valid prefix upgrade."""
+
+    (privacy_was_baselined,) = _sql(
+        "SELECT baselined FROM schema_migrations "
+        "WHERE filename='023_candidate_privacy_directives.sql'"
+    )[0]
+    _sql(
+        "DELETE FROM schema_migrations WHERE filename = ANY(%s)",
+        (
+            [
+                "022_contact_suppression_person_and_audit.sql",
+                "023_candidate_privacy_directives.sql",
+            ],
+        ),
+    )
+    return privacy_was_baselined
+
+
+def _restore_023_ledger_posture(privacy_was_baselined: bool) -> None:
+    if not _sql(
+        "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
+    ):
+        _assert_release_ok()
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s "
+        "WHERE filename='023_candidate_privacy_directives.sql'",
+        (privacy_was_baselined,),
+    )
+
+
 def _contact_evidence_owner_sql(query: str, params: tuple = ()) -> None:
     """Run one owner-only fixture mutation while restoring FORCE RLS atomically."""
     with psycopg.connect(OWNER_DSN) as conn:
@@ -276,11 +307,8 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
     expected_evidence_event_hash = sha256(
         f"legacy-021-evidence-complaint|{evidence_d}".encode()
     ).hexdigest()
+    privacy_was_baselined = _rewind_021_tail()
     try:
-        _sql(
-            "DELETE FROM schema_migrations "
-            "WHERE filename = '022_contact_suppression_person_and_audit.sql'"
-        )
         _sql("DROP TABLE IF EXISTS contact_person_suppressions")
         _sql("DROP TABLE IF EXISTS contact_suppression_receipts")
         _sql("DROP FUNCTION IF EXISTS contact_suppression_receipts_append_only()")
@@ -396,16 +424,14 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
+        _restore_023_ledger_posture(privacy_was_baselined)
         _restore_runtime_posture()
 
 
 def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
     email_hash = sha256(b"legacy-unresolved-complaint@example.com").hexdigest()
+    privacy_was_baselined = _rewind_021_tail()
     try:
-        _sql(
-            "DELETE FROM schema_migrations "
-            "WHERE filename = '022_contact_suppression_person_and_audit.sql'"
-        )
         _sql("DROP TABLE IF EXISTS contact_person_suppressions")
         _sql("DROP TABLE IF EXISTS contact_suppression_receipts")
         _sql("DROP FUNCTION IF EXISTS contact_suppression_receipts_append_only()")
@@ -443,16 +469,14 @@ def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
+        _restore_023_ledger_posture(privacy_was_baselined)
         _restore_runtime_posture()
 
 
 def test_022_partial_if_not_exists_schema_is_not_recorded():
     """A missing serial default survives CREATE TABLE IF NOT EXISTS and must fail."""
+    privacy_was_baselined = _rewind_021_tail()
     try:
-        _sql(
-            "DELETE FROM schema_migrations "
-            "WHERE filename = '022_contact_suppression_person_and_audit.sql'"
-        )
         _sql("ALTER TABLE contact_suppression_receipts ALTER COLUMN id DROP DEFAULT")
 
         result = _run_init()
@@ -478,6 +502,7 @@ def test_022_partial_if_not_exists_schema_is_not_recorded():
         if not rows:
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
+        _restore_023_ledger_posture(privacy_was_baselined)
 
 
 def test_022_baseline_rejects_replica_only_audit_trigger():
