@@ -388,6 +388,7 @@ def _validate_raw_output_ban() -> None:
         if any(pattern.search(source) for pattern in RAW_OUTPUT_PATTERNS):
             raise GuardError(f"raw-output primitive is forbidden in {path.relative_to(ROOT)}")
     api_source = paths[-1].read_text(encoding="utf-8")
+    repository_source = paths[-2].read_text(encoding="utf-8")
     required_minimal_response = {
         '"request_id"',
         '"directive_id"',
@@ -406,6 +407,24 @@ def _validate_raw_output_ban() -> None:
     for forbidden in ('"canonical"', '"tenant_id"', '"evidence_ref"', '"identifiers"', '"token"'):
         if forbidden in response_block:
             raise GuardError("candidate privacy directive response exposes a forbidden field")
+    eligibility_block = api_source[
+        api_source.index("async def eligibility_batch(") : api_source.index(
+            '@router.get("/candidate-privacy/changes"'
+        )
+    ]
+    if "repository.evaluate_many(prepared)" not in eligibility_block:
+        raise GuardError("candidate privacy eligibility lost its one-call batch boundary")
+    evaluate_many_block = repository_source[
+        repository_source.index("    def evaluate_many(") : repository_source.index(
+            "    def canonical_decision("
+        )
+    ]
+    if (
+        evaluate_many_block.count("with self._conn()") != 1
+        or "self.evaluate(" in evaluate_many_block
+        or "self._evaluate_on_cursor(" not in evaluate_many_block
+    ):
+        raise GuardError("candidate privacy eligibility batch no longer reuses one connection")
 
 
 def validate() -> None:

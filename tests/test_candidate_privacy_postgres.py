@@ -149,6 +149,33 @@ def test_privacy_objects_and_runtime_privileges_are_exact() -> None:
         assert cur.fetchall() == []
 
 
+def test_eligibility_batch_reuses_one_database_connection() -> None:
+    repository = CandidatePrivacyRepository(RUNTIME_DSN, config=_config(1))
+    try:
+        subjects = [
+            (
+                [
+                    normalize_privacy_identifier(
+                        "signal_candidate_id",
+                        f"candidate-privacy-batch-{index}",
+                    )
+                ],
+                CanonicalSubject(),
+            )
+            for index in range(200)
+        ]
+        with patch.object(
+            repository.pool,
+            "connection",
+            wraps=repository.pool.connection,
+        ) as connection:
+            decisions = repository.evaluate_many(subjects)
+        assert decisions == [CandidatePrivacyDecision.ALLOW] * 200
+        assert connection.call_count == 1
+    finally:
+        repository.close()
+
+
 def test_three_event_activation_exact_replay_cas_release_and_append_only() -> None:
     owner_dsn, runtime_dsn = _clone_database("memory_privacy_lifecycle_test")
     repository = CandidatePrivacyRepository(runtime_dsn, config=_config(1))
