@@ -419,12 +419,22 @@ def _validate_raw_output_ban() -> None:
             "    def canonical_decision("
         )
     ]
+    set_based_required = (
+        "jsonb_array_elements",
+        "candidate_privacy_resolve_subject(",
+        "candidate_privacy_resolve_canonical(",
+        "candidate_privacy_match(",
+    )
     if (
         evaluate_many_block.count("with self._conn()") != 1
+        or evaluate_many_block.count("cur.execute(") != 3
         or "self.evaluate(" in evaluate_many_block
-        or "self._evaluate_on_cursor(" not in evaluate_many_block
+        or "self._evaluate_on_cursor(" in evaluate_many_block
+        or any(anchor not in evaluate_many_block for anchor in set_based_required)
     ):
-        raise GuardError("candidate privacy eligibility batch no longer reuses one connection")
+        raise GuardError(
+            "candidate privacy eligibility batch lost its three-query set-based boundary"
+        )
 
 
 def validate() -> None:

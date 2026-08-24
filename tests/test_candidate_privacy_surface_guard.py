@@ -61,6 +61,17 @@ def test_guard_rejects_non_materialized_ann_underfill_fallback() -> None:
     guard.validate()
 
 
+def test_guard_rejects_per_subject_batch_regression() -> None:
+    with _temporary_mutation(
+        "activekg/privacy/repository.py",
+        b"CROSS JOIN LATERAL candidate_privacy_resolve_subject(",
+        b"CROSS JOIN LATERAL candidate_privacy_resolve_subject /* mutation */ (",
+    ):
+        with pytest.raises(guard.GuardError, match="three-query set-based boundary"):
+            guard.validate()
+    guard.validate()
+
+
 def test_guard_rejects_an_unclassified_writer_and_restores_exact_bytes() -> None:
     path = ROOT / "activekg/graph/repository.py"
     original = path.read_bytes()

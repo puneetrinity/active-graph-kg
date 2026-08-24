@@ -82,26 +82,9 @@ class CandidatePrivacyRepository:
         )
 
     @staticmethod
-    def _resolve_subject_on_cursor(
-        cur: Any,
-        identifiers: Sequence[NormalizedIdentifier],
+    def _subject_from_matches(
+        matches: set[tuple[UUID | None, str | None, UUID | None]],
     ) -> CanonicalSubject:
-        matches: set[tuple[UUID | None, str | None, UUID | None]] = set()
-        for identifier in identifiers:
-            for digest in identifier.lookup_digests:
-                cur.execute(
-                    "SELECT global_candidate_id, candidate_tenant_id, candidate_id "
-                    "FROM candidate_privacy_resolve_subject(%s, %s)",
-                    (identifier.identifier_type, digest),
-                )
-                for global_id, tenant_id, candidate_id in cur.fetchall():
-                    matches.add(
-                        (
-                            UUID(str(global_id)) if global_id else None,
-                            str(tenant_id) if tenant_id else None,
-                            UUID(str(candidate_id)) if candidate_id else None,
-                        )
-                    )
         if not matches:
             return CanonicalSubject()
 
@@ -126,6 +109,30 @@ class CandidatePrivacyRepository:
             candidate_id=first[2] if len(candidate_pairs) <= 1 else None,
             needs_review=needs_review,
         )
+
+    @classmethod
+    def _resolve_subject_on_cursor(
+        cls,
+        cur: Any,
+        identifiers: Sequence[NormalizedIdentifier],
+    ) -> CanonicalSubject:
+        matches: set[tuple[UUID | None, str | None, UUID | None]] = set()
+        for identifier in identifiers:
+            for digest in identifier.lookup_digests:
+                cur.execute(
+                    "SELECT global_candidate_id, candidate_tenant_id, candidate_id "
+                    "FROM candidate_privacy_resolve_subject(%s, %s)",
+                    (identifier.identifier_type, digest),
+                )
+                for global_id, tenant_id, candidate_id in cur.fetchall():
+                    matches.add(
+                        (
+                            UUID(str(global_id)) if global_id else None,
+                            str(tenant_id) if tenant_id else None,
+                            UUID(str(candidate_id)) if candidate_id else None,
+                        )
+                    )
+        return cls._subject_from_matches(matches)
 
     def resolve_subject(self, identifiers: Sequence[NormalizedIdentifier]) -> CanonicalSubject:
         with self._conn() as conn, conn.cursor() as cur:
@@ -443,18 +450,236 @@ class CandidatePrivacyRepository:
         self,
         subjects: Sequence[tuple[Sequence[NormalizedIdentifier], CanonicalSubject]],
     ) -> list[CandidatePrivacyDecision]:
-        """Evaluate one bounded API batch through one connection and transaction."""
+        """Evaluate one bounded API batch with three set-based database round trips."""
+        if not subjects:
+            return []
+
+        identifier_inputs = [
+            {
+                "subject_index": subject_index,
+                "identifier_type": identifier.identifier_type,
+                "lookup_digest": digest.hex(),
+            }
+            for subject_index, (identifiers, _canonical) in enumerate(subjects)
+            for identifier in identifiers
+            for digest in identifier.lookup_digests
+        ]
+        supplied = [
+            CanonicalSubject(
+                global_candidate_id=(
+                    UUID(str(canonical.global_candidate_id))
+                    if canonical.global_candidate_id is not None
+                    else None
+                ),
+                candidate_tenant_id=(
+                    canonical.candidate_tenant_id if canonical.candidate_id is not None else None
+                ),
+                candidate_id=(
+                    UUID(str(canonical.candidate_id))
+                    if canonical.candidate_id is not None
+                    else None
+                ),
+            )
+            for _identifiers, canonical in subjects
+        ]
+
         with self._conn() as conn, conn.cursor() as cur:
-            return [
-                self._evaluate_on_cursor(
-                    cur,
-                    identifiers=identifiers,
-                    global_candidate_id=canonical.global_candidate_id,
-                    candidate_tenant_id=canonical.candidate_tenant_id,
-                    candidate_id=canonical.candidate_id,
-                )
-                for identifiers, canonical in subjects
+            matches_by_subject: list[set[tuple[UUID | None, str | None, UUID | None]]] = [
+                set() for _subject in subjects
             ]
+            if identifier_inputs:
+                cur.execute(
+                    """
+                    WITH supplied AS (
+                        SELECT
+                            (item ->> 'subject_index')::integer AS subject_index,
+                            item ->> 'identifier_type' AS identifier_type,
+                            decode(item ->> 'lookup_digest', 'hex') AS lookup_digest
+                        FROM jsonb_array_elements(%s::jsonb) item
+                    )
+                    SELECT
+                        supplied.subject_index,
+                        resolved.global_candidate_id,
+                        resolved.candidate_tenant_id,
+                        resolved.candidate_id
+                    FROM supplied
+                    CROSS JOIN LATERAL candidate_privacy_resolve_subject(
+                        supplied.identifier_type,
+                        supplied.lookup_digest
+                    ) resolved
+                    ORDER BY supplied.subject_index
+                    """,
+                    (json.dumps(identifier_inputs),),
+                )
+                for subject_index, global_id, tenant_id, candidate_id in cur.fetchall():
+                    if not 0 <= subject_index < len(subjects):
+                        raise CandidatePrivacyUnavailable(
+                            "candidate privacy batch resolver is inconsistent"
+                        )
+                    matches_by_subject[subject_index].add(
+                        (
+                            UUID(str(global_id)) if global_id else None,
+                            str(tenant_id) if tenant_id else None,
+                            UUID(str(candidate_id)) if candidate_id else None,
+                        )
+                    )
+
+            canonical_inputs = [
+                {
+                    "subject_index": subject_index,
+                    "global_candidate_id": (
+                        str(canonical.global_candidate_id)
+                        if canonical.global_candidate_id is not None
+                        else None
+                    ),
+                    "candidate_tenant_id": canonical.candidate_tenant_id,
+                    "candidate_id": (
+                        str(canonical.candidate_id) if canonical.candidate_id is not None else None
+                    ),
+                }
+                for subject_index, canonical in enumerate(supplied)
+            ]
+            cur.execute(
+                """
+                WITH supplied AS (
+                    SELECT
+                        (item ->> 'subject_index')::integer AS subject_index,
+                        (item ->> 'global_candidate_id')::uuid AS global_candidate_id,
+                        item ->> 'candidate_tenant_id' AS candidate_tenant_id,
+                        (item ->> 'candidate_id')::uuid AS candidate_id
+                    FROM jsonb_array_elements(%s::jsonb) item
+                )
+                SELECT
+                    supplied.subject_index,
+                    resolved.global_candidate_id,
+                    resolved.candidate_tenant_id,
+                    resolved.candidate_id,
+                    resolved.needs_review
+                FROM supplied
+                CROSS JOIN LATERAL candidate_privacy_resolve_canonical(
+                    supplied.global_candidate_id,
+                    supplied.candidate_tenant_id,
+                    supplied.candidate_id
+                ) resolved
+                ORDER BY supplied.subject_index
+                """,
+                (json.dumps(canonical_inputs),),
+            )
+            canonical_rows = cur.fetchall()
+            if len(canonical_rows) != len(subjects):
+                raise CandidatePrivacyUnavailable(
+                    "candidate privacy batch canonical resolver is inconsistent"
+                )
+            decisions: list[CandidatePrivacyDecision | None] = [None] * len(subjects)
+            match_inputs: list[dict[str, Any]] = []
+            for expected_index, row in enumerate(canonical_rows):
+                subject_index, global_id, tenant_id, candidate_id, needs_review = row
+                if subject_index != expected_index:
+                    raise CandidatePrivacyUnavailable(
+                        "candidate privacy batch canonical resolver is inconsistent"
+                    )
+                resolved = self._subject_from_matches(matches_by_subject[subject_index])
+                canonical = self._merge_subjects(
+                    resolved,
+                    CanonicalSubject(
+                        global_candidate_id=UUID(str(global_id)) if global_id else None,
+                        candidate_tenant_id=str(tenant_id) if tenant_id else None,
+                        candidate_id=UUID(str(candidate_id)) if candidate_id else None,
+                        needs_review=bool(needs_review),
+                    ),
+                )
+                if canonical.needs_review:
+                    decisions[subject_index] = CandidatePrivacyDecision.REVIEW
+                    continue
+                identifiers, _supplied_canonical = subjects[subject_index]
+                match_inputs.append(
+                    {
+                        "subject_index": subject_index,
+                        "tokens": self._match_payloads(identifiers) if identifiers else [],
+                        "global_candidate_id": (
+                            str(canonical.global_candidate_id)
+                            if canonical.global_candidate_id is not None
+                            else None
+                        ),
+                        "candidate_tenant_id": canonical.candidate_tenant_id,
+                        "candidate_id": (
+                            str(canonical.candidate_id)
+                            if canonical.candidate_id is not None
+                            else None
+                        ),
+                    }
+                )
+
+            if match_inputs:
+                cur.execute(
+                    """
+                    WITH supplied AS (
+                        SELECT
+                            (item ->> 'subject_index')::integer AS subject_index,
+                            COALESCE(item -> 'tokens', '[]'::jsonb) AS tokens,
+                            (item ->> 'global_candidate_id')::uuid AS global_candidate_id,
+                            item ->> 'candidate_tenant_id' AS candidate_tenant_id,
+                            (item ->> 'candidate_id')::uuid AS candidate_id
+                        FROM jsonb_array_elements(%s::jsonb) item
+                    )
+                    SELECT
+                        supplied.subject_index,
+                        matched.directive_id,
+                        matched.action,
+                        matched.scope,
+                        matched.state,
+                        matched.version,
+                        matched.effective_at,
+                        matched.decision
+                    FROM supplied
+                    LEFT JOIN LATERAL (
+                        SELECT *
+                        FROM candidate_privacy_match(
+                            supplied.tokens,
+                            supplied.global_candidate_id,
+                            supplied.candidate_tenant_id,
+                            supplied.candidate_id
+                        )
+                        ORDER BY
+                            CASE decision
+                                WHEN 'review' THEN 4
+                                WHEN 'block_all' THEN 3
+                                WHEN 'block_global' THEN 2
+                                ELSE 1
+                            END DESC,
+                            effective_at DESC,
+                            version DESC
+                        LIMIT 1
+                    ) matched ON true
+                    ORDER BY supplied.subject_index
+                    """,
+                    (json.dumps(match_inputs),),
+                )
+                match_rows = cur.fetchall()
+                if len(match_rows) != len(match_inputs):
+                    raise CandidatePrivacyUnavailable(
+                        "candidate privacy batch matcher is inconsistent"
+                    )
+                for expected_input, row in zip(match_inputs, match_rows, strict=True):
+                    subject_index = row[0]
+                    if subject_index != expected_input["subject_index"]:
+                        raise CandidatePrivacyUnavailable(
+                            "candidate privacy batch matcher is inconsistent"
+                        )
+                    if row[1] is None:
+                        decisions[subject_index] = CandidatePrivacyDecision.ALLOW
+                        continue
+                    record = self._record(row[1:7])
+                    database_decision = CandidatePrivacyDecision(row[7])
+                    if database_decision is not record.decision:
+                        raise CandidatePrivacyUnavailable(
+                            "candidate privacy matcher is inconsistent"
+                        )
+                    decisions[subject_index] = database_decision
+
+            if any(decision is None for decision in decisions):
+                raise CandidatePrivacyUnavailable("candidate privacy batch matcher is incomplete")
+            return [decision for decision in decisions if decision is not None]
 
     def canonical_decision(
         self,

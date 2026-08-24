@@ -164,11 +164,18 @@ def test_eligibility_batch_reuses_one_database_connection() -> None:
             )
             for index in range(200)
         ]
-        with patch.object(
-            repository.pool,
-            "connection",
-            wraps=repository.pool.connection,
-        ) as connection:
+        with (
+            patch.object(
+                repository.pool,
+                "connection",
+                wraps=repository.pool.connection,
+            ) as connection,
+            patch.object(
+                repository,
+                "_evaluate_on_cursor",
+                side_effect=AssertionError("batch evaluation must not call the scalar evaluator"),
+            ),
+        ):
             decisions = repository.evaluate_many(subjects)
         assert decisions == [CandidatePrivacyDecision.ALLOW] * 200
         assert connection.call_count == 1
@@ -361,6 +368,18 @@ def test_ambiguity_is_review_and_key_rotation_is_fail_closed_by_readiness() -> N
                 dual_read.evaluate(identifiers=[token_only]) is CandidatePrivacyDecision.BLOCK_ALL
             )
             assert new_only.evaluate(identifiers=[token_only]) is CandidatePrivacyDecision.ALLOW
+            assert dual_read.evaluate_many(
+                [
+                    ([identifier], CanonicalSubject()),
+                    ([token_only], CanonicalSubject()),
+                ]
+            ) == [CandidatePrivacyDecision.REVIEW, CandidatePrivacyDecision.BLOCK_ALL]
+            assert new_only.evaluate_many(
+                [
+                    ([identifier], CanonicalSubject()),
+                    ([token_only], CanonicalSubject()),
+                ]
+            ) == [CandidatePrivacyDecision.REVIEW, CandidatePrivacyDecision.ALLOW]
             assert new_only.referenced_key_versions() == {1}
 
             with patch.dict(
