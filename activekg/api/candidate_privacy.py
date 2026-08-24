@@ -314,21 +314,21 @@ async def eligibility_batch(
     _claims: Annotated[JWTClaims, Depends(require_candidate_privacy_read)],
 ) -> dict[str, Any]:
     payload = await _parse_body(request, EligibilityBatch)
-    results: list[dict[str, str]] = []
     repository = _repo()
-    for subject in payload.subjects:
-        identifiers = _identifiers(subject.identifiers)
-        canonical = _canonical(subject.canonical)
-        try:
-            decision = repository.evaluate(
-                identifiers=identifiers,
-                global_candidate_id=canonical.global_candidate_id,
-                candidate_tenant_id=canonical.candidate_tenant_id,
-                candidate_id=canonical.candidate_id,
-            )
-        except CandidatePrivacyUnavailable as exc:
-            raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
-        results.append({"request_ref": str(subject.request_ref), "decision": decision.value})
+    prepared = [
+        (_identifiers(subject.identifiers), _canonical(subject.canonical))
+        for subject in payload.subjects
+    ]
+    try:
+        decisions = repository.evaluate_many(prepared)
+    except CandidatePrivacyUnavailable as exc:
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
+    if len(decisions) != len(payload.subjects):
+        raise HTTPException(status_code=503, detail="candidate_privacy_unavailable")
+    results = [
+        {"request_ref": str(subject.request_ref), "decision": decision.value}
+        for subject, decision in zip(payload.subjects, decisions, strict=True)
+    ]
     return {"results": results, "count": len(results)}
 
 

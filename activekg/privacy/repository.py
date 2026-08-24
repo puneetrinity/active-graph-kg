@@ -366,6 +366,62 @@ class CandidatePrivacyRepository:
                 raise CandidatePrivacyConflict("candidate privacy transition conflicts") from exc
             raise CandidatePrivacyUnavailable("candidate privacy transition failed") from exc
 
+    def _evaluate_on_cursor(
+        self,
+        cur: Any,
+        *,
+        identifiers: Sequence[NormalizedIdentifier] = (),
+        global_candidate_id: UUID | str | None = None,
+        candidate_tenant_id: str | None = None,
+        candidate_id: UUID | str | None = None,
+    ) -> CandidatePrivacyDecision:
+        payloads = self._match_payloads(identifiers) if identifiers else []
+        resolved = (
+            self._resolve_subject_on_cursor(cur, identifiers) if identifiers else CanonicalSubject()
+        )
+        supplied = CanonicalSubject(
+            global_candidate_id=(
+                UUID(str(global_candidate_id)) if global_candidate_id is not None else None
+            ),
+            # A tenant passed alongside identifier matching is lookup
+            # context, not a canonical candidate reference. Preserve it
+            # only when the candidate id makes the pair authoritative.
+            # A candidate id without its tenant remains fail-closed in
+            # the database resolver.
+            candidate_tenant_id=(candidate_tenant_id if candidate_id is not None else None),
+            candidate_id=UUID(str(candidate_id)) if candidate_id is not None else None,
+        )
+        canonical = self._merge_subjects(
+            resolved,
+            self._resolve_canonical_on_cursor(cur, supplied),
+        )
+        if canonical.needs_review:
+            return CandidatePrivacyDecision.REVIEW
+        cur.execute(
+            """
+            SELECT directive_id, action, scope, state, version, effective_at, decision
+            FROM candidate_privacy_match(%s::jsonb,%s,%s,%s)
+            ORDER BY CASE decision WHEN 'review' THEN 4 WHEN 'block_all' THEN 3
+                     WHEN 'block_global' THEN 2 ELSE 1 END DESC,
+                     effective_at DESC, version DESC
+            LIMIT 1
+            """,
+            (
+                json.dumps(payloads),
+                canonical.global_candidate_id,
+                canonical.candidate_tenant_id,
+                canonical.candidate_id,
+            ),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return CandidatePrivacyDecision.ALLOW
+        record = self._record(row[:6])
+        database_decision = CandidatePrivacyDecision(row[6])
+        if database_decision is not record.decision:
+            raise CandidatePrivacyUnavailable("candidate privacy matcher is inconsistent")
+        return database_decision
+
     def evaluate(
         self,
         *,
@@ -374,55 +430,31 @@ class CandidatePrivacyRepository:
         candidate_tenant_id: str | None = None,
         candidate_id: UUID | str | None = None,
     ) -> CandidatePrivacyDecision:
-        payloads = self._match_payloads(identifiers) if identifiers else []
         with self._conn() as conn, conn.cursor() as cur:
-            resolved = (
-                self._resolve_subject_on_cursor(cur, identifiers)
-                if identifiers
-                else CanonicalSubject()
+            return self._evaluate_on_cursor(
+                cur,
+                identifiers=identifiers,
+                global_candidate_id=global_candidate_id,
+                candidate_tenant_id=candidate_tenant_id,
+                candidate_id=candidate_id,
             )
-            supplied = CanonicalSubject(
-                global_candidate_id=(
-                    UUID(str(global_candidate_id)) if global_candidate_id is not None else None
-                ),
-                # A tenant passed alongside identifier matching is lookup
-                # context, not a canonical candidate reference. Preserve it
-                # only when the candidate id makes the pair authoritative.
-                # A candidate id without its tenant remains fail-closed in
-                # the database resolver.
-                candidate_tenant_id=(candidate_tenant_id if candidate_id is not None else None),
-                candidate_id=UUID(str(candidate_id)) if candidate_id is not None else None,
-            )
-            canonical = self._merge_subjects(
-                resolved,
-                self._resolve_canonical_on_cursor(cur, supplied),
-            )
-            if canonical.needs_review:
-                return CandidatePrivacyDecision.REVIEW
-            cur.execute(
-                """
-                SELECT directive_id, action, scope, state, version, effective_at, decision
-                FROM candidate_privacy_match(%s::jsonb,%s,%s,%s)
-                ORDER BY CASE decision WHEN 'review' THEN 4 WHEN 'block_all' THEN 3
-                         WHEN 'block_global' THEN 2 ELSE 1 END DESC,
-                         effective_at DESC, version DESC
-                LIMIT 1
-                """,
-                (
-                    json.dumps(payloads),
-                    canonical.global_candidate_id,
-                    canonical.candidate_tenant_id,
-                    canonical.candidate_id,
-                ),
-            )
-            row = cur.fetchone()
-            if row is None:
-                return CandidatePrivacyDecision.ALLOW
-            record = self._record(row[:6])
-            database_decision = CandidatePrivacyDecision(row[6])
-            if database_decision is not record.decision:
-                raise CandidatePrivacyUnavailable("candidate privacy matcher is inconsistent")
-            return database_decision
+
+    def evaluate_many(
+        self,
+        subjects: Sequence[tuple[Sequence[NormalizedIdentifier], CanonicalSubject]],
+    ) -> list[CandidatePrivacyDecision]:
+        """Evaluate one bounded API batch through one connection and transaction."""
+        with self._conn() as conn, conn.cursor() as cur:
+            return [
+                self._evaluate_on_cursor(
+                    cur,
+                    identifiers=identifiers,
+                    global_candidate_id=canonical.global_candidate_id,
+                    candidate_tenant_id=canonical.candidate_tenant_id,
+                    candidate_id=canonical.candidate_id,
+                )
+                for identifiers, canonical in subjects
+            ]
 
     def canonical_decision(
         self,

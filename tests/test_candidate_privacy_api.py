@@ -41,6 +41,7 @@ CANARY = "raw.person+private@example.test"
 class FakeRepository:
     def __init__(self) -> None:
         self.create_identifiers: list[tuple[str, str]] = []
+        self.evaluate_many_calls = 0
 
     @staticmethod
     def _record() -> DirectiveRecord:
@@ -65,6 +66,10 @@ class FakeRepository:
 
     def evaluate(self, **_kwargs):
         return CandidatePrivacyDecision.BLOCK_GLOBAL
+
+    def evaluate_many(self, subjects):
+        self.evaluate_many_calls += 1
+        return [CandidatePrivacyDecision.BLOCK_GLOBAL for _subject in subjects]
 
     def changes(self, **_kwargs):
         return [
@@ -303,6 +308,7 @@ def test_read_routes_accept_signal_and_expose_only_bounded_authority_fields() ->
         "results": [{"request_ref": str(REQUEST_ID), "decision": "block_global"}],
         "count": 1,
     }
+    assert repo.evaluate_many_calls == 1
     combined = eligibility.text + str(changes) + str(snapshot)
     assert CANARY not in combined
     assert str(EVIDENCE_ID) not in combined
