@@ -31,6 +31,14 @@ jobs:
       AUTO_INDEX_ON_STARTUP: 'false'
       JWT_ENABLED: 'false'
       TOKEN: ${{ secrets.E2E_ADMIN_TOKEN || 'dummy-token-jwt-disabled' }}
+      # Fixed synthetic material for this disposable CI environment only.
+      CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: '1'
+      CANDIDATE_PRIVACY_HMAC_KEY_V1: 'Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=='
+      CANDIDATE_PRIVACY_INTAKE_ENABLED: 'false'
+      CANDIDATE_PRIVACY_FLOW_ISSUER: 'vantahire'
+      CANDIDATE_PRIVACY_FLOW_ACTOR_ID: 'vantahire-backend'
+      CANDIDATE_PRIVACY_SIGNAL_ISSUER: 'signal'
+      CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: 'signal-backend'
 
     steps:
       - name: Checkout
