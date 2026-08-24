@@ -104,7 +104,7 @@
         "withdraw_global_matching",
         "request_erasure"
       ],
-      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and one-call bounded CandidatePrivacyRepository batch contract.",
+      "enforcement": "Exact service authority dependency, sanitized bounded body parser, and a one-connection, three-query set-based CandidatePrivacyRepository batch contract.",
       "test_id": "privacy-api-contract",
       "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
     },
