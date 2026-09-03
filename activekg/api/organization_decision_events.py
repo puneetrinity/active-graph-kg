@@ -6,13 +6,14 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal
 from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from typing_extensions import Self
 
 from activekg.api import auth
 from activekg.api.auth import JWTClaims, get_jwt_claims
