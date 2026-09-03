@@ -35,7 +35,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
     manifest = json.loads((ROOT / "scripts/schema_control_callers.json").read_text())
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
-    assert len(MIGRATIONS) == 23 == len(set(MIGRATIONS))
+    assert len(MIGRATIONS) == 24 == len(set(MIGRATIONS))
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
     )

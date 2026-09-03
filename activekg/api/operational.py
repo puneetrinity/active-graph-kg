@@ -41,6 +41,47 @@ _PRIVACY_TABLES = (
     "candidate_privacy_directives",
     "candidate_privacy_identity_tokens",
 )
+_DECISION_INBOX_TABLES = (
+    "organization_decision_event_inbox",
+    "organization_decision_stream_state",
+)
+_DECISION_INBOX_INDEXES = {
+    "organization_decision_event_inbox_tenant_delivery_idx",
+    "organization_decision_event_inbox_tenant_source_idx",
+}
+_DECISION_INBOX_CONSTRAINTS_BY_TABLE = {
+    "organization_decision_event_inbox": {
+        "organization_decision_event_inbox_pkey",
+        "organization_decision_event_inbox_delivery_sequence_key",
+        "organization_decision_event_inbox_source_event_sequence_key",
+        "organization_decision_event_inbox_tenant_check",
+        "organization_decision_event_inbox_source_check",
+        "organization_decision_event_inbox_delivery_positive",
+        "organization_decision_event_inbox_source_sequence_positive",
+        "organization_decision_event_inbox_schema_v1",
+        "organization_decision_event_inbox_organization_positive",
+        "organization_decision_event_inbox_subject_v1",
+        "organization_decision_event_inbox_action_v1",
+        "organization_decision_event_inbox_taxonomy_positive",
+        "organization_decision_event_inbox_rubric_shape",
+        "organization_decision_event_inbox_jd_digest_positive",
+        "organization_decision_event_inbox_recommendation_v1",
+        "organization_decision_event_inbox_reason_bounded",
+        "organization_decision_event_inbox_before_state_v1",
+        "organization_decision_event_inbox_after_state_v1",
+        "organization_decision_event_inbox_state_changed",
+        "organization_decision_event_inbox_digest_check",
+    },
+    "organization_decision_stream_state": {
+        "organization_decision_stream_state_pkey",
+        "organization_decision_stream_state_tenant_id_check",
+        "organization_decision_stream_state_state_check",
+        "organization_decision_stream_state_last_delivery_sequence_check",
+        "organization_decision_stream_source_sequence_check",
+        "organization_decision_stream_state_last_event_id_key",
+        "organization_decision_stream_state_last_event_id_fkey",
+    },
+}
 _PRIVACY_INDEXES = {
     "candidate_privacy_events_cursor_idx",
     "candidate_privacy_events_directive_idx",
@@ -501,6 +542,12 @@ def _tenant_policy_expression_ok(expression: str) -> bool:
     }
 
 
+def _decision_tenant_policy_expression_ok(expression: str) -> bool:
+    return _normalize_sql_definition(expression) == (
+        "(tenant_id=current_setting('app.current_tenant_id',true))"
+    )
+
+
 def _migration_checksums_match(applied: Mapping[str, str | None], started_at: float) -> bool:
     migrations_dir = Path(__file__).resolve().parents[2] / "db" / "migrations"
     if set(MIGRATIONS) != set(applied):
@@ -529,6 +576,7 @@ def bounded_readiness_check(
     jwt_problems: list[str],
     privacy_problems: list[str] | None = None,
     privacy_key_versions: set[int] | None = None,
+    decision_inbox_enabled: bool | None = None,
 ) -> ReadinessResult:
     """Run a fixed, read-only readiness census with at most eight SQL statements."""
 
@@ -541,6 +589,9 @@ def bounded_readiness_check(
         reasons.append("jwt_verification_unavailable")
     if privacy_problems:
         reasons.extend(privacy_problems)
+    check_decision_inbox = decision_inbox_enabled is not None
+    if decision_inbox_enabled is False:
+        reasons.append("decision_inbox_disabled")
     if candidate_repository is None:
         reasons.append("candidate_repository_unavailable")
     try:
@@ -673,7 +724,14 @@ def bounded_readiness_check(
                     WHERE n.nspname = 'public' AND c.relkind = 'r'
                       AND c.relname = ANY(%s)
                     """,
-                    (list(_CANDIDATE_TABLES + _SHARED_TABLES + _PRIVACY_TABLES),),
+                    (
+                        list(
+                            _CANDIDATE_TABLES
+                            + _SHARED_TABLES
+                            + _PRIVACY_TABLES
+                            + _DECISION_INBOX_TABLES
+                        ),
+                    ),
                 )
                 relation_rows = cur.fetchall()
                 relation_map = {row[0]: row for row in relation_rows}
@@ -683,6 +741,22 @@ def bounded_readiness_check(
                     reasons.append("candidate_privacy_schema_missing")
                 elif any(not bool(relation_map[table][1]) for table in _PRIVACY_TABLES):
                     reasons.append("candidate_privacy_rls_incomplete")
+                if check_decision_inbox and set(_DECISION_INBOX_TABLES) - set(relation_map):
+                    reasons.append("decision_inbox_schema_missing")
+                elif check_decision_inbox and any(
+                    not bool(relation_map[table][1]) or not bool(relation_map[table][2])
+                    for table in _DECISION_INBOX_TABLES
+                ):
+                    reasons.append("decision_inbox_rls_incomplete")
+                elif (
+                    check_decision_inbox
+                    and not allow_owner
+                    and any(
+                        relation_map[table][3] == relation_map[table][4]
+                        for table in _DECISION_INBOX_TABLES
+                    )
+                ):
+                    reasons.append("runtime_role_owns_decision_inbox")
                 for table in _CANDIDATE_TABLES:
                     row = relation_map.get(table)
                     if row is None or not bool(row[1]):
@@ -709,7 +783,7 @@ def bounded_readiness_check(
                     FROM pg_policies
                     WHERE schemaname = 'public' AND tablename = ANY(%s)
                     """,
-                    (list(_CANDIDATE_TABLES + _PRIVACY_TABLES),),
+                    (list(_CANDIDATE_TABLES + _PRIVACY_TABLES + _DECISION_INBOX_TABLES),),
                 )
                 policies = {(row[0], row[1]): row for row in cur.fetchall()}
                 for table in _CANDIDATE_TABLES:
@@ -775,6 +849,37 @@ def bounded_readiness_check(
                     table == "candidate_privacy_identity_tokens" for table, _policy_name in policies
                 ):
                     reasons.append("candidate_privacy_token_policy_unsafe")
+                for table, policy_name in (
+                    (
+                        "organization_decision_event_inbox",
+                        "organization_decision_event_inbox_tenant",
+                    ),
+                    (
+                        "organization_decision_stream_state",
+                        "organization_decision_stream_state_tenant",
+                    ),
+                ):
+                    policy = policies.get((table, policy_name))
+                    if check_decision_inbox and (
+                        policy is None
+                        or policy[2] != "PERMISSIVE"
+                        or policy[3].lower() != "{public}"
+                        or policy[4] != "ALL"
+                        or not _decision_tenant_policy_expression_ok(policy[5])
+                        or not _decision_tenant_policy_expression_ok(policy[6])
+                    ):
+                        reasons.append("decision_inbox_policy_unexpected")
+                        break
+                if check_decision_inbox and any(
+                    table in _DECISION_INBOX_TABLES
+                    and policy_name
+                    not in {
+                        "organization_decision_event_inbox_tenant",
+                        "organization_decision_stream_state_tenant",
+                    }
+                    for table, policy_name in policies
+                ):
+                    reasons.append("decision_inbox_policy_unexpected")
 
                 _check_budget(started_at)
                 # Statement 7: runtime-role escalation posture.
@@ -941,6 +1046,50 @@ def bounded_readiness_check(
                                )
                            )
                     UNION ALL
+                    SELECT 'decision_inbox_privilege'::text, 'runtime'::text,
+                           jsonb_build_object(
+                               'inbox_select', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_event_inbox', 'SELECT'
+                               ),
+                               'inbox_insert', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_event_inbox', 'INSERT'
+                               ),
+                               'inbox_update', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_event_inbox', 'UPDATE'
+                               ),
+                               'inbox_delete', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_event_inbox', 'DELETE'
+                               ),
+                               'inbox_truncate', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_event_inbox', 'TRUNCATE'
+                               ),
+                               'stream_select', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_stream_state', 'SELECT'
+                               ),
+                               'stream_insert', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_stream_state', 'INSERT'
+                               ),
+                               'stream_update', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_stream_state', 'UPDATE'
+                               ),
+                               'stream_delete', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_stream_state', 'DELETE'
+                               ),
+                               'stream_truncate', has_table_privilege(
+                                   current_user,
+                                   'public.organization_decision_stream_state', 'TRUNCATE'
+                               )
+                           )
+                    UNION ALL
                     SELECT 'privacy_key_version'::text, key_version::text, '{}'::jsonb
                     FROM candidate_privacy_token_key_versions()
                     UNION ALL
@@ -954,9 +1103,16 @@ def bounded_readiness_check(
                       AND p.proname = ANY(%s)
                     """,
                     (
-                        list(_REQUIRED_INDEXES | _PRIVACY_INDEXES),
+                        list(_REQUIRED_INDEXES | _PRIVACY_INDEXES | _DECISION_INBOX_INDEXES),
                         list(_REQUIRED_FUNCTIONS | _PRIVACY_FUNCTIONS),
-                        list(_REQUIRED_CONSTRAINTS),
+                        list(
+                            _REQUIRED_CONSTRAINTS
+                            | {
+                                constraint
+                                for names in _DECISION_INBOX_CONSTRAINTS_BY_TABLE.values()
+                                for constraint in names
+                            }
+                        ),
                         [trigger[1] for trigger in _SUPPRESSION_TRIGGERS]
                         + [trigger[1] for trigger in _PRIVACY_TRIGGERS],
                         [_SUPPRESSION_SEQUENCE, _PRIVACY_SEQUENCE],
@@ -975,6 +1131,8 @@ def bounded_readiness_check(
                     reasons.append("required_index_missing")
                 if _PRIVACY_INDEXES - set(indexes):
                     reasons.append("candidate_privacy_index_missing")
+                if check_decision_inbox and _DECISION_INBOX_INDEXES - set(indexes):
+                    reasons.append("decision_inbox_index_missing")
                 functions = objects.get("function", {})
                 if _REQUIRED_FUNCTIONS - set(functions):
                     reasons.append("required_function_missing")
@@ -1028,6 +1186,13 @@ def bounded_readiness_check(
                     not bool(details.get("validated")) for details in constraints.values()
                 ):
                     reasons.append("required_constraint_missing")
+                decision_constraint_keys = {
+                    f"{table}.{constraint}"
+                    for table, names in _DECISION_INBOX_CONSTRAINTS_BY_TABLE.items()
+                    for constraint in names
+                }
+                if check_decision_inbox and decision_constraint_keys - set(constraints):
+                    reasons.append("decision_inbox_constraint_missing")
                 for (table, name), expected_definition in _EXPECTED_CHECK_DEFINITIONS.items():
                     constraint = constraints.get(f"{table}.{name}")
                     if constraint is not None and (
@@ -1127,6 +1292,23 @@ def bounded_readiness_check(
                     or bool(privacy_privileges.get("tokens_write"))
                 ):
                     reasons.append("candidate_privacy_privileges_unsafe")
+                decision_privileges = objects.get("decision_inbox_privilege", {}).get("runtime")
+                if check_decision_inbox and (
+                    decision_privileges is None
+                    or (
+                        not bool(decision_privileges.get("inbox_select"))
+                        or not bool(decision_privileges.get("inbox_insert"))
+                        or bool(decision_privileges.get("inbox_update"))
+                        or bool(decision_privileges.get("inbox_delete"))
+                        or bool(decision_privileges.get("inbox_truncate"))
+                        or not bool(decision_privileges.get("stream_select"))
+                        or not bool(decision_privileges.get("stream_insert"))
+                        or not bool(decision_privileges.get("stream_update"))
+                        or bool(decision_privileges.get("stream_delete"))
+                        or bool(decision_privileges.get("stream_truncate"))
+                    )
+                ):
+                    reasons.append("decision_inbox_privileges_unsafe")
                 stored_privacy_versions = {
                     int(version) for version in objects.get("privacy_key_version", {})
                 }

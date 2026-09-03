@@ -111,9 +111,9 @@ def _copy_with_tail_migration(
     manifest = copied / "activekg/common/migration_manifest.py"
     content = manifest.read_text()
     content = content.replace(
-        '    "023_candidate_privacy_directives.sql",\n)',
-        f'    "023_candidate_privacy_directives.sql",\n    "{migration_name}",\n)',
-    ).replace("len(MIGRATIONS) != 23", "len(MIGRATIONS) != 24")
+        '    "024_organization_decision_event_inbox.sql",\n)',
+        f'    "024_organization_decision_event_inbox.sql",\n    "{migration_name}",\n)',
+    ).replace("len(MIGRATIONS) != 24", "len(MIGRATIONS) != 25")
     manifest.write_text(content)
 
     runner = copied / "scripts/init_railway_db.py"
@@ -271,7 +271,7 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
             cur.execute("SELECT to_regclass('public.idx_global_candidates_embed_version')")
             assert cur.fetchone()[0] is None
             cur.execute("SELECT count(*) FROM schema_migrations")
-            assert cur.fetchone()[0] == 23
+            assert cur.fetchone()[0] == 24
     finally:
         _drop_database(name)
 
@@ -352,7 +352,7 @@ def test_every_release_reasserts_candidate_privacy_runtime_privileges() -> None:
         _drop_database(name)
 
 
-def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
+def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
     tmp_path: Path,
 ) -> None:
     name = "memory_schema_privacy_upgrade_test"
@@ -360,7 +360,7 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
     with _maintenance() as conn, conn.cursor() as cur:
         cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     dsn = _dsn(name)
-    legacy = tmp_path / "legacy-22"
+    legacy = tmp_path / "legacy-23"
     shutil.copytree(
         ROOT,
         legacy,
@@ -369,18 +369,18 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
     manifest = legacy / "activekg/common/migration_manifest.py"
     manifest.write_text(
         manifest.read_text()
-        .replace('    "023_candidate_privacy_directives.sql",\n', "")
-        .replace("len(MIGRATIONS) != 23", "len(MIGRATIONS) != 22")
+        .replace('    "024_organization_decision_event_inbox.sql",\n', "")
+        .replace("len(MIGRATIONS) != 24", "len(MIGRATIONS) != 23")
     )
     runner = legacy / "scripts/init_railway_db.py"
     runner.write_text(
         runner.read_text()
         .replace(
-            "                _harden_candidate_privacy_runtime_privileges(cur, runtime_role)\n",
+            "                _harden_decision_inbox_runtime_privileges(cur, runtime_role)\n",
             "",
         )
         .replace(
-            "                _assert_candidate_privacy_runtime_privileges(cur, runtime_role)\n",
+            "                _assert_decision_inbox_runtime_privileges(cur, runtime_role)\n",
             "",
         )
     )
@@ -406,8 +406,8 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
             cur.execute("SELECT count(*), min(props->>'text') FROM nodes")
             before_nodes = cur.fetchone()
             cur.execute("SELECT count(*) FROM schema_migrations")
-            assert cur.fetchone()[0] == 22
-            cur.execute("SELECT to_regclass('public.candidate_privacy_directives')")
+            assert cur.fetchone()[0] == 23
+            cur.execute("SELECT to_regclass('public.organization_decision_event_inbox')")
             assert cur.fetchone()[0] is None
 
         upgraded = _run(
@@ -420,8 +420,19 @@ def test_existing_22_migration_target_upgrades_to_023_without_product_mutation(
             cur.execute("SELECT count(*), min(props->>'text') FROM nodes")
             assert cur.fetchone() == before_nodes
             cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
-            assert cur.fetchone() == (23, 0)
+            assert cur.fetchone() == (24, 0)
             _assert_candidate_privacy_runtime_privileges(cur)
+            cur.execute(
+                "SELECT has_table_privilege('activekg_app',"
+                "'public.organization_decision_event_inbox','SELECT'),"
+                "has_table_privilege('activekg_app',"
+                "'public.organization_decision_event_inbox','INSERT'),"
+                "has_table_privilege('activekg_app',"
+                "'public.organization_decision_event_inbox','UPDATE'),"
+                "has_table_privilege('activekg_app',"
+                "'public.organization_decision_stream_state','UPDATE')"
+            )
+            assert cur.fetchone() == (True, True, False, True)
         with psycopg.connect(_runtime_dsn(name)) as conn, conn.cursor() as cur:
             cur.execute("SELECT current_user")
             assert cur.fetchone() == ("activekg_app",)
@@ -505,7 +516,7 @@ def test_failed_tail_release_blocks_readiness_and_a_corrected_release_recovers(
 ) -> None:
     name = "memory_schema_failure_test"
     dsn = _clone_database(name)
-    migration_name = "024_schema_control_failure_test.sql"
+    migration_name = "025_schema_control_failure_test.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,
@@ -590,7 +601,7 @@ def test_two_concurrent_tail_releases_apply_the_new_migration_exactly_once(
 ) -> None:
     name = "memory_schema_tail_test"
     dsn = _clone_database(name)
-    migration_name = "024_schema_control_test_tail.sql"
+    migration_name = "025_schema_control_test_tail.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,
