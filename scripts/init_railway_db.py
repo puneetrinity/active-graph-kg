@@ -731,6 +731,28 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
             "candidate_privacy_transition_directive(uuid,bigint,uuid,text,uuid,text,text,text,timestamp with time zone)",
         ),
     ],
+    "024_organization_decision_event_inbox.sql": [
+        ("table", "organization_decision_event_inbox"),
+        ("table", "organization_decision_stream_state"),
+        ("index", "organization_decision_event_inbox_tenant_delivery_idx"),
+        ("index", "organization_decision_event_inbox_tenant_source_idx"),
+        ("constraint", "organization_decision_event_inbox_pkey"),
+        ("constraint", "organization_decision_event_inbox_delivery_sequence_key"),
+        ("constraint", "organization_decision_event_inbox_source_event_sequence_key"),
+        ("constraint", "organization_decision_event_inbox_state_changed"),
+        ("constraint", "organization_decision_event_inbox_digest_check"),
+        ("constraint", "organization_decision_stream_state_pkey"),
+        ("constraint", "organization_decision_stream_state_last_event_id_key"),
+        ("constraint", "organization_decision_stream_state_last_event_id_fkey"),
+        ("forcerls", "organization_decision_event_inbox"),
+        ("forcerls", "organization_decision_stream_state"),
+        ("policy", "organization_decision_event_inbox", "organization_decision_event_inbox_tenant"),
+        (
+            "policy",
+            "organization_decision_stream_state",
+            "organization_decision_stream_state_tenant",
+        ),
+    ],
 }
 
 
@@ -1388,6 +1410,92 @@ def _assert_candidate_privacy_runtime_privileges(cur: psycopg.Cursor, role: str)
         raise SchemaControlError("candidate privacy trigger function privilege is invalid")
 
 
+def _harden_decision_inbox_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    """Restore the exact 024 tenant-inbox ACL after blanket application grants."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    migration_user = cur.fetchone()[0]
+    if role in {migration_user, "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    cur.execute(
+        "SELECT to_regclass('public.organization_decision_event_inbox'), "
+        "to_regclass('public.organization_decision_stream_state')"
+    )
+    if cur.fetchone() != (
+        "organization_decision_event_inbox",
+        "organization_decision_stream_state",
+    ):
+        raise SchemaControlError("organization decision inbox authority is missing")
+    role_ident = sql.Identifier(role)
+    cur.execute(
+        sql.SQL(
+            "REVOKE ALL ON organization_decision_event_inbox, "
+            "organization_decision_stream_state FROM {}"
+        ).format(role_ident)
+    )
+    cur.execute(
+        sql.SQL("GRANT SELECT, INSERT ON organization_decision_event_inbox TO {}").format(
+            role_ident
+        )
+    )
+    cur.execute(
+        sql.SQL("GRANT SELECT, INSERT, UPDATE ON organization_decision_stream_state TO {}").format(
+            role_ident
+        )
+    )
+
+
+def _assert_decision_inbox_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    expected = {
+        "public.organization_decision_event_inbox": (
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ),
+        "public.organization_decision_stream_state": (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ),
+    }
+    for relation, privileges_expected in expected.items():
+        cur.execute(
+            "SELECT has_table_privilege(%s,%s,'SELECT'), "
+            "has_table_privilege(%s,%s,'INSERT'), "
+            "has_table_privilege(%s,%s,'UPDATE'), "
+            "has_table_privilege(%s,%s,'DELETE'), "
+            "has_table_privilege(%s,%s,'TRUNCATE'), "
+            "has_table_privilege(%s,%s,'REFERENCES'), "
+            "has_table_privilege(%s,%s,'TRIGGER')",
+            tuple(value for _ in range(7) for value in (role, relation)),
+        )
+        if cur.fetchone() != privileges_expected:
+            raise SchemaControlError("organization decision inbox privileges are invalid")
+
+    cur.execute(
+        "SELECT r.rolsuper,r.rolbypassrls,"
+        "pg_has_role(%s,'admin_role','MEMBER') "
+        "FROM pg_roles r WHERE r.rolname=%s",
+        (role, role),
+    )
+    posture = cur.fetchone()
+    if posture is None or any(bool(value) for value in posture):
+        raise SchemaControlError("organization decision inbox runtime role is elevated")
+
+
 def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
     """Disable the app_user role older installs created with a known password."""
     cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'app_user'")
@@ -1523,10 +1631,12 @@ def main():
                     )
                 runtime_role = os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
                 _harden_candidate_privacy_runtime_privileges(cur, runtime_role)
+                _harden_decision_inbox_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
                 _assert_candidate_privacy_runtime_privileges(cur, runtime_role)
+                _assert_decision_inbox_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

@@ -29,6 +29,7 @@ from activekg.privacy.repository import (
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d3ed778e6b705100f0671169375848f71c992f5c"
+SHIPPED_PRIVACY_TAIL_BASE = "749896a8d8d0626f3faa836a0a1ad71f6d9109e9"
 
 
 class PrivacyAuthority:
@@ -494,7 +495,7 @@ def test_increment_adds_no_destructive_candidate_data_path() -> None:
 
 def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
     for relative in (
-        *(f"db/migrations/{name}" for name in MIGRATIONS[:-1]),
+        *(f"db/migrations/{name}" for name in MIGRATIONS[:-2]),
         "db/init.sql",
         "enable_rls_policies.sql",
     ):
@@ -505,6 +506,15 @@ def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
             capture_output=True,
         ).stdout
         assert (ROOT / relative).read_bytes() == deployed
+
+    privacy_tail = "db/migrations/023_candidate_privacy_directives.sql"
+    deployed_privacy_tail = subprocess.run(
+        ["git", "show", f"{SHIPPED_PRIVACY_TAIL_BASE}:{privacy_tail}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert (ROOT / privacy_tail).read_bytes() == deployed_privacy_tail
 
 
 def test_migration_023_mutates_only_its_new_authority_tables() -> None:

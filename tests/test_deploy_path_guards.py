@@ -120,28 +120,52 @@ def _restore_runtime_posture() -> None:
                 "GRANT USAGE, SELECT ON SEQUENCE contact_suppression_receipts_id_seq TO {}"
             ).format(role_ident)
         )
+        cur.execute(
+            sql.SQL(
+                "REVOKE ALL ON organization_decision_event_inbox, "
+                "organization_decision_stream_state FROM {}"
+            ).format(role_ident)
+        )
+        cur.execute(
+            sql.SQL("GRANT SELECT, INSERT ON organization_decision_event_inbox TO {}").format(
+                role_ident
+            )
+        )
+        cur.execute(
+            sql.SQL(
+                "GRANT SELECT, INSERT, UPDATE ON organization_decision_stream_state TO {}"
+            ).format(role_ident)
+        )
 
 
-def _rewind_021_tail() -> bool:
-    """Temporarily remove both tail ledger rows so 022 remains a valid prefix upgrade."""
+def _rewind_021_tail() -> tuple[bool, bool]:
+    """Temporarily remove migrations 022-024 so 022 remains a valid prefix upgrade."""
 
     (privacy_was_baselined,) = _sql(
         "SELECT baselined FROM schema_migrations "
         "WHERE filename='023_candidate_privacy_directives.sql'"
     )[0]
+    (decision_was_baselined,) = _sql(
+        "SELECT baselined FROM schema_migrations "
+        "WHERE filename='024_organization_decision_event_inbox.sql'"
+    )[0]
+    _sql("DROP TABLE IF EXISTS organization_decision_stream_state")
+    _sql("DROP TABLE IF EXISTS organization_decision_event_inbox")
     _sql(
         "DELETE FROM schema_migrations WHERE filename = ANY(%s)",
         (
             [
                 "022_contact_suppression_person_and_audit.sql",
                 "023_candidate_privacy_directives.sql",
+                "024_organization_decision_event_inbox.sql",
             ],
         ),
     )
-    return privacy_was_baselined
+    return privacy_was_baselined, decision_was_baselined
 
 
-def _restore_023_ledger_posture(privacy_was_baselined: bool) -> None:
+def _restore_024_ledger_posture(baselines: tuple[bool, bool]) -> None:
+    privacy_was_baselined, decision_was_baselined = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
     ):
@@ -150,6 +174,11 @@ def _restore_023_ledger_posture(privacy_was_baselined: bool) -> None:
         "UPDATE schema_migrations SET baselined=%s "
         "WHERE filename='023_candidate_privacy_directives.sql'",
         (privacy_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s "
+        "WHERE filename='024_organization_decision_event_inbox.sql'",
+        (decision_was_baselined,),
     )
 
 
@@ -307,7 +336,7 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
     expected_evidence_event_hash = sha256(
         f"legacy-021-evidence-complaint|{evidence_d}".encode()
     ).hexdigest()
-    privacy_was_baselined = _rewind_021_tail()
+    tail_baselines = _rewind_021_tail()
     try:
         _sql("DROP TABLE IF EXISTS contact_person_suppressions")
         _sql("DROP TABLE IF EXISTS contact_suppression_receipts")
@@ -424,13 +453,13 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_023_ledger_posture(privacy_was_baselined)
+        _restore_024_ledger_posture(tail_baselines)
         _restore_runtime_posture()
 
 
 def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
     email_hash = sha256(b"legacy-unresolved-complaint@example.com").hexdigest()
-    privacy_was_baselined = _rewind_021_tail()
+    tail_baselines = _rewind_021_tail()
     try:
         _sql("DROP TABLE IF EXISTS contact_person_suppressions")
         _sql("DROP TABLE IF EXISTS contact_suppression_receipts")
@@ -469,13 +498,13 @@ def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_023_ledger_posture(privacy_was_baselined)
+        _restore_024_ledger_posture(tail_baselines)
         _restore_runtime_posture()
 
 
 def test_022_partial_if_not_exists_schema_is_not_recorded():
     """A missing serial default survives CREATE TABLE IF NOT EXISTS and must fail."""
-    privacy_was_baselined = _rewind_021_tail()
+    tail_baselines = _rewind_021_tail()
     try:
         _sql("ALTER TABLE contact_suppression_receipts ALTER COLUMN id DROP DEFAULT")
 
@@ -502,7 +531,7 @@ def test_022_partial_if_not_exists_schema_is_not_recorded():
         if not rows:
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_023_ledger_posture(privacy_was_baselined)
+        _restore_024_ledger_posture(tail_baselines)
 
 
 def test_022_baseline_rejects_replica_only_audit_trigger():

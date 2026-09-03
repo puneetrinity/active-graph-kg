@@ -45,6 +45,7 @@ jobs:
         run: |
           python scripts/schema_control_guard.py
           python scripts/candidate_privacy_surface_guard.py
+          python scripts/decision_history_guard.py
 
       - name: Run type checking
         run: |
@@ -101,6 +102,8 @@ jobs:
             tests/test_candidate_privacy_api.py \
             tests/test_candidate_privacy_fences.py \
             tests/test_candidate_privacy_surface_guard.py \
+            tests/test_organization_decision_events.py \
+            tests/test_decision_history_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -313,11 +316,11 @@ jobs:
           done
           ledger=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "23|0" ]; then
-            echo "FAIL: ledger should have exactly 23 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "24|0" ]; then
+            echo "FAIL: ledger should have exactly 24 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 23 applied, 0 baselined"
+          echo "OK: migration ledger has 24 applied, 0 baselined"
           posture=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -339,6 +342,13 @@ jobs:
           ACTIVEKG_PRIVACY_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
         run: |
           pytest tests/test_candidate_privacy_postgres.py -v --tb=short --timeout=240
+
+      - name: Run disposable organization-decision inbox matrix
+        env:
+          ACTIVEKG_DECISION_INBOX_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_DECISION_INBOX_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
+        run: |
+          pytest tests/test_organization_decision_events_postgres.py -v --tb=short --timeout=240
 
       - name: Run RLS enforcement tests as the restricted runtime role
         env:
@@ -362,6 +372,8 @@ jobs:
           LLM_ENABLED: "false"
           RUN_SCHEDULER: "false"
           RATE_LIMIT_ENABLED: "false"
+          ORG_DECISION_INBOX_ENABLED: "true"
+          ORG_DECISION_INBOX_FLOW_ACTOR_ID: "vantahire-backend"
           REDIS_URL: redis://localhost:6379/0
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &

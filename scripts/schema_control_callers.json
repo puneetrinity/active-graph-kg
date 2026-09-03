@@ -28,7 +28,8 @@
     "020_embed_version.sql",
     "021_public_memory_contact_evidence.sql",
     "022_contact_suppression_person_and_audit.sql",
-    "023_candidate_privacy_directives.sql"
+    "023_candidate_privacy_directives.sql",
+    "024_organization_decision_event_inbox.sql"
   ],
   "migration_files": {
     "001_add_embedding_history_index.sql": "f109a2eb8da22cbcd1efdbadb5d9fa3a166784740bfe48f7e5c85805fc1556fa",
@@ -53,6 +54,7 @@
     "021_public_memory_contact_evidence.sql": "8ce5999f50ff36468ff75d2c95be972778a82c0b7d3c586f4258355f0636b161",
     "022_contact_suppression_person_and_audit.sql": "a7abfdeef3c2b6a6e36743b19ab5aae10d0fb02f5b94f237699e174d0be8d0bf",
     "023_candidate_privacy_directives.sql": "de179e695497c96321de2990b590b6e93702220b0071b488da18b0beffd94e1e",
+    "024_organization_decision_event_inbox.sql": "a39bedef181f6152a5ecad1f5167afd9a266ea08be74686fe37686538665dacf",
     "add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
     "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad"
   },

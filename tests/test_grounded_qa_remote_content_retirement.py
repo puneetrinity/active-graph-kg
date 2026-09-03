@@ -140,7 +140,7 @@ def test_full_app_preserves_tombstone_for_oversized_declared_body(monkeypatch) -
     monkeypatch.setenv("JWT_ENABLED", "false")
     from activekg.api.main import app
 
-    assert len(app.routes) == 75
+    assert len(app.routes) == 76
 
     async def exercise() -> None:
         transport = httpx.ASGITransport(app=app)
@@ -178,7 +178,7 @@ def test_api_import_ignores_stale_q_and_a_model_configuration() -> None:
             "-c",
             (
                 "import json; from activekg.api.main import app, health; "
-                "h=health(); assert len(app.routes)==75; "
+                "h=health(); assert len(app.routes)==76; "
                 "assert json.loads(h.body)=={'status':'alive','service':'activekg-api'}; "
                 "print('Q_AND_A_WIRING_INERT')"
             ),
