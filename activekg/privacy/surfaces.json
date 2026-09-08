@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 122,
+    "discovered_rows": 126,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -1060,6 +1060,76 @@
       ],
       "enforcement": "Eight-statement bounded catalog, privilege, function, key-version, and RLS readiness proof.",
       "test_id": "privacy-readiness-contract",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/sourced_candidates.py",
+      "symbol": "<module>",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "declaration",
+      "candidate_scope": "public_global",
+      "actions": [],
+      "reason": "Module declarations and documentation only; all executable sourced-candidate authority is classified below."
+    },
+    {
+      "file": "activekg/api/sourced_candidates.py",
+      "symbol": "_select_receipt",
+      "tables": [
+        "global_candidate_ingest_receipts"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "public_global_evidence",
+      "actions": [],
+      "reason": "Internal idempotency lookup called only inside the fenced atomic ingest transaction; it exposes no route or profile output."
+    },
+    {
+      "file": "activekg/api/sourced_candidates.py",
+      "symbol": "_store",
+      "tables": [
+        "candidate_provenance",
+        "global_candidate_ingest_receipts",
+        "global_candidate_source_identities",
+        "global_candidate_source_observations",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact identifier privacy matching is composed through decision_for(state, action) and require_allowed(..., global_use=True) inside the one atomic transaction before canonical or evidence writes.",
+      "test_id": "privacy-approved-provider-ingest",
+      "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/sourced_candidates.py",
+      "symbol": "ingest_sourced_candidate",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /sourced-candidates/ingest"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "public_global",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated Signal service authority, strict bounded provider-neutral body, closed adapter registry and transactional privacy-fenced resolver.",
+      "test_id": "privacy-approved-provider-ingest",
       "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
     },
     {

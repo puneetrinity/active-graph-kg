@@ -75,6 +75,10 @@ from activekg.api.retirement import (
     public_observability_retirement_router,
     semantic_triggers_router,
 )
+from activekg.api.sourced_candidates import (
+    sourced_candidate_ingest_mode,
+    sourced_candidates_router,
+)
 from activekg.common.control_plane import (
     ControlPlaneUnauthorized,
     ControlPlaneUnavailable,
@@ -383,6 +387,7 @@ else:
 app.include_router(global_memory_router)
 app.include_router(candidate_privacy_router)
 app.include_router(organization_decision_events_router)
+app.include_router(sourced_candidates_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
 app.include_router(grounded_qa_retirement_router)
@@ -622,6 +627,9 @@ def readyz(
                 ),
                 privacy_key_versions=candidate_privacy_key_versions_for_readiness(),
                 decision_inbox_enabled=decision_inbox_enabled(),
+                sourced_candidate_ingest_mode=os.getenv(
+                    "SOURCED_CANDIDATE_INGEST_MODE", "off"
+                ).strip(),
             ),
             force_refresh=force_refresh,
         )
@@ -4235,6 +4243,8 @@ def resolve_candidate_from_signal(
     and bridge tier are preserved in identifier metadata so downstream match
     review can weigh Signal's enrichment quality.
     """
+    if sourced_candidate_ingest_mode() == "canonical_only":
+        raise HTTPException(status_code=410, detail="signal_candidate_resolve_retired")
     if payload.source_record_type not in {"sourced_candidate", "profile"}:
         raise HTTPException(
             status_code=400,

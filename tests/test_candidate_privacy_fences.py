@@ -30,6 +30,7 @@ from activekg.privacy.repository import (
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d3ed778e6b705100f0671169375848f71c992f5c"
 SHIPPED_PRIVACY_TAIL_BASE = "749896a8d8d0626f3faa836a0a1ad71f6d9109e9"
+SHIPPED_DECISION_TAIL_BASE = "43801a8152793a8b5c49bf1b9d9661132e85e454"
 
 
 class PrivacyAuthority:
@@ -495,7 +496,7 @@ def test_increment_adds_no_destructive_candidate_data_path() -> None:
 
 def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
     for relative in (
-        *(f"db/migrations/{name}" for name in MIGRATIONS[:-2]),
+        *(f"db/migrations/{name}" for name in MIGRATIONS[:-3]),
         "db/init.sql",
         "enable_rls_policies.sql",
     ):
@@ -515,6 +516,15 @@ def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
         capture_output=True,
     ).stdout
     assert (ROOT / privacy_tail).read_bytes() == deployed_privacy_tail
+
+    decision_tail = "db/migrations/024_organization_decision_event_inbox.sql"
+    deployed_decision_tail = subprocess.run(
+        ["git", "show", f"{SHIPPED_DECISION_TAIL_BASE}:{decision_tail}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert (ROOT / decision_tail).read_bytes() == deployed_decision_tail
 
 
 def test_migration_023_mutates_only_its_new_authority_tables() -> None:

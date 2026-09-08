@@ -111,9 +111,9 @@ def _copy_with_tail_migration(
     manifest = copied / "activekg/common/migration_manifest.py"
     content = manifest.read_text()
     content = content.replace(
-        '    "024_organization_decision_event_inbox.sql",\n)',
-        f'    "024_organization_decision_event_inbox.sql",\n    "{migration_name}",\n)',
-    ).replace("len(MIGRATIONS) != 24", "len(MIGRATIONS) != 25")
+        '    "025_approved_provider_candidate_ingest.sql",\n)',
+        f'    "025_approved_provider_candidate_ingest.sql",\n    "{migration_name}",\n)',
+    ).replace("len(MIGRATIONS) != 25", "len(MIGRATIONS) != 26")
     manifest.write_text(content)
 
     runner = copied / "scripts/init_railway_db.py"
@@ -125,6 +125,35 @@ def _copy_with_tail_migration(
         1,
     )
     runner.write_text(content)
+    return copied
+
+
+def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
+    copied = tmp_path / name
+    shutil.copytree(
+        ROOT,
+        copied,
+        ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
+    )
+    manifest = copied / "activekg/common/migration_manifest.py"
+    manifest.write_text(
+        manifest.read_text()
+        .replace('    "025_approved_provider_candidate_ingest.sql",\n', "")
+        .replace("len(MIGRATIONS) != 25", "len(MIGRATIONS) != 24")
+        .replace("contain 25 unique ordered entries", "contain 24 unique ordered entries")
+    )
+    runner = copied / "scripts/init_railway_db.py"
+    runner.write_text(
+        runner.read_text()
+        .replace(
+            "                _harden_sourced_candidate_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+        .replace(
+            "                _assert_sourced_candidate_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+    )
     return copied
 
 
@@ -271,7 +300,7 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
             cur.execute("SELECT to_regclass('public.idx_global_candidates_embed_version')")
             assert cur.fetchone()[0] is None
             cur.execute("SELECT count(*) FROM schema_migrations")
-            assert cur.fetchone()[0] == 24
+            assert cur.fetchone()[0] == 25
     finally:
         _drop_database(name)
 
@@ -360,17 +389,15 @@ def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
     with _maintenance() as conn, conn.cursor() as cur:
         cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     dsn = _dsn(name)
-    legacy = tmp_path / "legacy-23"
-    shutil.copytree(
-        ROOT,
-        legacy,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
-    )
+    shipped_024 = _copy_shipped_024(tmp_path)
+    legacy = tmp_path / "legacy-023"
+    shutil.copytree(shipped_024, legacy)
     manifest = legacy / "activekg/common/migration_manifest.py"
     manifest.write_text(
         manifest.read_text()
         .replace('    "024_organization_decision_event_inbox.sql",\n', "")
         .replace("len(MIGRATIONS) != 24", "len(MIGRATIONS) != 23")
+        .replace("contain 24 unique ordered entries", "contain 23 unique ordered entries")
     )
     runner = legacy / "scripts/init_railway_db.py"
     runner.write_text(
@@ -411,7 +438,7 @@ def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
             assert cur.fetchone()[0] is None
 
         upgraded = _run(
-            ROOT / "scripts/init_railway_db.py",
+            shipped_024 / "scripts/init_railway_db.py",
             dsn,
             ACTIVEKG_MIGRATION_APPLY="1",
         )
@@ -436,6 +463,80 @@ def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
         with psycopg.connect(_runtime_dsn(name)) as conn, conn.cursor() as cur:
             cur.execute("SELECT current_user")
             assert cur.fetchone() == ("activekg_app",)
+    finally:
+        _drop_database(name)
+
+
+def test_existing_024_target_upgrades_to_025_without_product_mutation(
+    tmp_path: Path,
+) -> None:
+    name = "memory_schema_source_identity_upgrade_test"
+    _drop_database(name)
+    with _maintenance() as conn, conn.cursor() as cur:
+        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    dsn = _dsn(name)
+    shipped_024 = _copy_shipped_024(tmp_path, "source-identity-shipped-024")
+    try:
+        legacy_install = _run(
+            shipped_024 / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+            ACTIVEKG_SCHEMA_FRESH_INIT="1",
+            ACTIVEKG_RUNTIME_PASSWORD=_runtime_password(),
+        )
+        assert legacy_install.returncode == 0, legacy_install.stdout + legacy_install.stderr
+        candidate_id = "52525252-5252-4525-8525-525252525252"
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO global_candidates (id, public_profile) "
+                'VALUES (%s, \'{"headline":"unchanged sentinel"}\'::jsonb)',
+                (candidate_id,),
+            )
+            cur.execute("SELECT count(*), min(public_profile->>'headline') FROM global_candidates")
+            before_candidates = cur.fetchone()
+            cur.execute("SELECT count(*) FROM schema_migrations")
+            assert cur.fetchone()[0] == 24
+            cur.execute("SELECT to_regclass('public.global_candidate_source_identities')")
+            assert cur.fetchone()[0] is None
+
+        upgraded = _run(
+            ROOT / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+        )
+        assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*), min(public_profile->>'headline') FROM global_candidates")
+            assert cur.fetchone() == before_candidates
+            cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
+            assert cur.fetchone() == (25, 0)
+            cur.execute(
+                "SELECT to_regclass('public.global_candidate_source_identities'), "
+                "to_regclass('public.global_candidate_source_observations'), "
+                "to_regclass('public.global_candidate_ingest_receipts')"
+            )
+            assert cur.fetchone() == (
+                "global_candidate_source_identities",
+                "global_candidate_source_observations",
+                "global_candidate_ingest_receipts",
+            )
+        with psycopg.connect(_runtime_dsn(name)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            assert cur.fetchone() == ("activekg_app",)
+            for relation in (
+                "global_candidate_source_identities",
+                "global_candidate_source_observations",
+                "global_candidate_ingest_receipts",
+            ):
+                cur.execute(
+                    "SELECT has_table_privilege(current_user,%s,'SELECT'), "
+                    "has_table_privilege(current_user,%s,'INSERT'), "
+                    "has_table_privilege(current_user,%s,'UPDATE'), "
+                    "has_table_privilege(current_user,%s,'DELETE'), "
+                    "has_table_privilege(current_user,%s,'TRUNCATE')",
+                    tuple(f"public.{relation}" for _ in range(5)),
+                )
+                assert cur.fetchone() == (True, True, False, False, False)
     finally:
         _drop_database(name)
 
@@ -516,7 +617,7 @@ def test_failed_tail_release_blocks_readiness_and_a_corrected_release_recovers(
 ) -> None:
     name = "memory_schema_failure_test"
     dsn = _clone_database(name)
-    migration_name = "025_schema_control_failure_test.sql"
+    migration_name = "026_schema_control_failure_test.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,
@@ -601,7 +702,7 @@ def test_two_concurrent_tail_releases_apply_the_new_migration_exactly_once(
 ) -> None:
     name = "memory_schema_tail_test"
     dsn = _clone_database(name)
-    migration_name = "025_schema_control_test_tail.sql"
+    migration_name = "026_schema_control_test_tail.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,

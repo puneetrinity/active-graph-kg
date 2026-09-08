@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
+from unittest.mock import patch
 
 import psycopg
 import pytest
@@ -70,6 +71,35 @@ def _post(client: TestClient, body: dict) -> dict:
     r = client.post("/candidates/resolve/signal/candidate", json=body)
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def _counts_for_tenant(tenant: str) -> tuple[int, int, int]:
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT (SELECT count(*) FROM candidates WHERE tenant_id=%s),"
+            "(SELECT count(*) FROM candidate_identifiers WHERE tenant_id=%s),"
+            "(SELECT count(*) FROM candidate_source_records WHERE tenant_id=%s)",
+            (tenant, tenant, tenant),
+        )
+        return tuple(int(value) for value in cur.fetchone())
+
+
+def test_canonical_only_retires_old_signal_writer_without_database_work(
+    client: TestClient, tenant: str
+) -> None:
+    before = _counts_for_tenant(tenant)
+    with patch.dict("os.environ", {"SOURCED_CANDIDATE_INGEST_MODE": "canonical_only"}):
+        response = client.post(
+            "/candidates/resolve/signal/candidate",
+            json={
+                "signal_candidate_id": f"SIG-{uuid.uuid4()}",
+                "linkedinUrl": "https://linkedin.com/in/retired-writer",
+                "tenant_id": tenant,
+            },
+        )
+    assert response.status_code == 410
+    assert response.json() == {"detail": "signal_candidate_resolve_retired"}
+    assert _counts_for_tenant(tenant) == before
 
 
 def _list_identifiers(candidate_id: str, tenant: str) -> list:

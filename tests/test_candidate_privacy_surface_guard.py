@@ -120,3 +120,37 @@ def test_guard_rejects_raw_output_primitive_and_restores_exact_bytes() -> None:
         with pytest.raises(guard.GuardError, match="raw-output"):
             guard.validate()
     guard.validate()
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            b"decision_for(row[1], row[0])",
+            b"decision_for(row[0], row[1])",
+        ),
+        (
+            b"require_allowed(decision, global_use=True)",
+            b"require_allowed(decision, global_use=False)",
+        ),
+    ],
+)
+def test_guard_rejects_approved_provider_privacy_authority_mutation(
+    old: bytes,
+    new: bytes,
+) -> None:
+    with _temporary_mutation("activekg/api/sourced_candidates.py", old, new):
+        with pytest.raises(guard.GuardError, match="privacy/source authority"):
+            guard.validate()
+    guard.validate()
+
+
+def test_guard_rejects_approved_provider_route_authority_mutation() -> None:
+    with _temporary_mutation(
+        "activekg/api/sourced_candidates.py",
+        b"Depends(require_sourced_candidate_writer)",
+        b"Depends(get_jwt_claims)",
+    ):
+        with pytest.raises(guard.GuardError, match="route authority"):
+            guard.validate()
+    guard.validate()
