@@ -72,7 +72,8 @@ _ORGANIZATION_CANDIDATE_CONSTRAINTS_BY_TABLE = {
         "organization_candidate_references_tenant_candidate_fkey",
         "organization_candidate_references_tenant_application_unique",
         "organization_candidate_references_tenant_reference_unique",
-        "organization_candidate_references_tenant_reference_candidate_unique",
+        # PostgreSQL truncates migration 026's longer identifier to 63 bytes.
+        "organization_candidate_references_tenant_reference_candidate_un",
     },
     "organization_candidate_resume_evidence": {
         "organization_candidate_resume_evidence_pkey",
@@ -86,7 +87,7 @@ _ORGANIZATION_CANDIDATE_CONSTRAINTS_BY_TABLE = {
         "organization_candidate_resume_evidence_reference_fkey",
         "organization_candidate_resume_evidence_tenant_candidate_fkey",
         "organization_candidate_resume_evidence_reference_unique",
-        "organization_candidate_resume_evidence_tenant_version_candidate_unique",
+        "organization_candidate_resume_evidence_tenant_version_candidate",
         "organization_candidate_resume_evidence_tenant_version_unique",
     },
     "organization_candidate_ingest_receipts": {
@@ -713,6 +714,13 @@ def _decision_tenant_policy_expression_ok(expression: str) -> bool:
     )
 
 
+def _organization_candidate_tenant_policy_expression_ok(expression: str) -> bool:
+    # Migration 026 excludes quarantine tenants through table CHECK constraints.
+    return _normalize_sql_definition(expression) == (
+        "(tenant_id=current_setting('app.current_tenant_id',true))"
+    )
+
+
 def _migration_checksums_match(applied: Mapping[str, str | None], started_at: float) -> bool:
     migrations_dir = Path(__file__).resolve().parents[2] / "db" / "migrations"
     if set(MIGRATIONS) != set(applied):
@@ -1097,8 +1105,8 @@ def bounded_readiness_check(
                         or tenant_policy[2] != "PERMISSIVE"
                         or tenant_policy[3].lower() != "{public}"
                         or tenant_policy[4] != "ALL"
-                        or not _tenant_policy_expression_ok(tenant_policy[5])
-                        or not _tenant_policy_expression_ok(tenant_policy[6])
+                        or not _organization_candidate_tenant_policy_expression_ok(tenant_policy[5])
+                        or not _organization_candidate_tenant_policy_expression_ok(tenant_policy[6])
                         or admin_policy is None
                         or admin_policy[2] != "PERMISSIVE"
                         or "admin_role" not in admin_policy[3].lower()

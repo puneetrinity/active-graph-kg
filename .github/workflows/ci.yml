@@ -399,6 +399,7 @@ jobs:
           ORG_DECISION_INBOX_ENABLED: "true"
           ORG_DECISION_INBOX_FLOW_ACTOR_ID: "vantahire-backend"
           SOURCED_CANDIDATE_INGEST_MODE: "dual"
+          ORGANIZATION_CANDIDATE_INTAKE_ENABLED: "true"
           REDIS_URL: redis://localhost:6379/0
         run: |
           uvicorn activekg.api.main:app --host 0.0.0.0 --port 8000 &
