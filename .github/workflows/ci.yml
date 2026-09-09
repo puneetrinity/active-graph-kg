@@ -47,6 +47,7 @@ jobs:
           python scripts/candidate_privacy_surface_guard.py
           python scripts/decision_history_guard.py
           python scripts/sourced_candidate_ingest_guard.py
+          python scripts/organization_candidate_intake_guard.py
 
       - name: Run type checking
         run: |
@@ -86,7 +87,7 @@ jobs:
           CANDIDATE_PRIVACY_FLOW_ISSUER: "vantahire"
           CANDIDATE_PRIVACY_FLOW_ACTOR_ID: "vantahire-backend"
           CANDIDATE_PRIVACY_SIGNAL_ISSUER: "signal"
-          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-backend"
+          CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-service"
         run: |
           pytest \
             tests/test_security_limits.py \
@@ -107,6 +108,8 @@ jobs:
             tests/test_decision_history_guard.py \
             tests/test_sourced_candidates.py \
             tests/test_sourced_candidate_ingest_guard.py \
+            tests/test_organization_candidate_intake.py \
+            tests/test_organization_candidate_intake_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -319,11 +322,11 @@ jobs:
           done
           ledger=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT count(*) || '|' || count(*) FILTER (WHERE baselined) FROM schema_migrations;")
-          if [ "$ledger" != "25|0" ]; then
-            echo "FAIL: ledger should have exactly 25 applied and 0 baselined entries on a clean DB (got: '$ledger')"
+          if [ "$ledger" != "26|0" ]; then
+            echo "FAIL: ledger should have exactly 26 applied and 0 baselined entries on a clean DB (got: '$ledger')"
             exit 1
           fi
-          echo "OK: migration ledger has 25 applied, 0 baselined"
+          echo "OK: migration ledger has 26 applied, 0 baselined"
           posture=$(psql -h 127.0.0.1 -U activekg_schema_control_test -d memory_schema_control_test -tAc \
             "SELECT (NOT rolsuper AND NOT rolbypassrls) FROM pg_roles WHERE rolname = 'activekg_app';")
           if [ "$posture" != "t" ]; then
@@ -361,6 +364,15 @@ jobs:
           CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
         run: |
           pytest tests/test_sourced_candidates_postgres.py -v --tb=short --timeout=240
+
+      - name: Run disposable organization-private candidate intake matrix
+        env:
+          ACTIVEKG_ORGANIZATION_CANDIDATE_TEST_OWNER_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_ORGANIZATION_CANDIDATE_TEST_RUNTIME_DSN: postgresql://activekg_app:activekg_app_ci@127.0.0.1:5432/memory_schema_control_test
+          CANDIDATE_PRIVACY_HMAC_ACTIVE_VERSION: "1"
+          CANDIDATE_PRIVACY_HMAC_KEY_V1: "Y2ktb25seS1jYW5kaWRhdGUtcHJpdmFjeS1rZXktMzItYnl0ZXMtbWluaW11bQ=="
+        run: |
+          pytest tests/test_organization_candidate_intake_postgres.py -v --tb=short --timeout=240
 
       - name: Run RLS enforcement tests as the restricted runtime role
         env:

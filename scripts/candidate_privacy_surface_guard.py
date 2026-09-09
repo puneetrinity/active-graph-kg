@@ -32,6 +32,9 @@ GOVERNED_TABLES = (
     "global_candidate_source_identities",
     "global_candidate_source_observations",
     "global_candidate_ingest_receipts",
+    "organization_candidate_references",
+    "organization_candidate_resume_evidence",
+    "organization_candidate_ingest_receipts",
 )
 GOVERNED_CALLS = (
     "CandidateRepository",
@@ -188,6 +191,11 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
         "_require_privacy_for_candidate(",
         "_store(",
     ),
+    "privacy-organization-candidate-intake": (
+        "require_allowed(decision, global_use=False)",
+        "require_organization_candidate_writer",
+        "_store(",
+    ),
     "privacy-surface-dependency": (
         "candidate_privacy_",
         "_require_candidate_ingest_allowed",
@@ -281,6 +289,10 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
         elif reference.symbol == "ingest_sourced_candidate":
             if "require_sourced_candidate_writer" not in source:
                 raise GuardError("approved-provider route authority is incomplete")
+    if row["test_id"] == "privacy-organization-candidate-intake":
+        module_source = (ROOT / reference.file).read_text(encoding="utf-8")
+        if "require_allowed(decision, global_use=False)" not in module_source:
+            raise GuardError("organization-private intake enforcement anchor is incomplete")
     if reference.key.endswith("embedding/worker.py::EmbeddingWorker._process_job"):
         if source.count("self.privacy_repository.node_decision") < 3:
             raise GuardError("embedding worker stale-job privacy recheck is missing")

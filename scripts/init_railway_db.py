@@ -859,6 +859,83 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
             "34",
         ),
     ],
+    "026_organization_private_candidate_intake.sql": [
+        (
+            "constraint_definition",
+            "candidates",
+            "candidates_scope_check",
+            "check((scope=any(array['shared','organization_private'])))",
+        ),
+        ("table", "organization_candidate_references"),
+        ("table", "organization_candidate_resume_evidence"),
+        ("table", "organization_candidate_ingest_receipts"),
+        ("index", "organization_candidate_references_candidate_idx"),
+        ("index", "organization_candidate_references_job_idx"),
+        ("index", "organization_candidate_resume_evidence_candidate_idx"),
+        ("index", "organization_candidate_ingest_receipts_candidate_idx"),
+        ("constraint", "organization_candidate_references_tenant_application_unique"),
+        ("constraint", "organization_candidate_resume_evidence_tenant_version_unique"),
+        ("constraint", "organization_candidate_ingest_receipts_reference_unique"),
+        ("constraint", "organization_candidate_ingest_receipts_resume_unique"),
+        (
+            "fk_delete",
+            "organization_candidate_references",
+            "organization_candidate_references_tenant_candidate_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "organization_candidate_resume_evidence",
+            "organization_candidate_resume_evidence_reference_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "organization_candidate_ingest_receipts",
+            "organization_candidate_ingest_receipts_resume_fkey",
+            "r",
+        ),
+        ("trigger_function", "organization_candidate_evidence_append_only"),
+        (
+            "trigger",
+            "organization_candidate_references",
+            "organization_candidate_references_no_mutation",
+            "organization_candidate_evidence_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "organization_candidate_resume_evidence",
+            "organization_candidate_resume_evidence_no_mutation",
+            "organization_candidate_evidence_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "organization_candidate_ingest_receipts",
+            "organization_candidate_ingest_receipts_no_mutation",
+            "organization_candidate_evidence_append_only",
+            "27",
+        ),
+        ("forcerls", "organization_candidate_references"),
+        ("forcerls", "organization_candidate_resume_evidence"),
+        ("forcerls", "organization_candidate_ingest_receipts"),
+        (
+            "policy",
+            "organization_candidate_references",
+            "tenant_isolation_organization_candidate_references",
+        ),
+        (
+            "policy",
+            "organization_candidate_resume_evidence",
+            "tenant_isolation_organization_candidate_resume_evidence",
+        ),
+        (
+            "policy",
+            "organization_candidate_ingest_receipts",
+            "tenant_isolation_organization_candidate_ingest_receipts",
+        ),
+    ],
 }
 
 
@@ -1607,6 +1684,11 @@ _SOURCED_CANDIDATE_TABLES = (
     "global_candidate_source_observations",
     "global_candidate_ingest_receipts",
 )
+_ORGANIZATION_CANDIDATE_TABLES = (
+    "organization_candidate_references",
+    "organization_candidate_resume_evidence",
+    "organization_candidate_ingest_receipts",
+)
 
 
 def _harden_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
@@ -1660,6 +1742,59 @@ def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str)
     )
     if cur.fetchone() != (False,):
         raise SchemaControlError("approved-provider append-only function privilege is invalid")
+
+
+def _harden_organization_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    """Restore migration-026's exact append-only runtime table boundary."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    migration_user = cur.fetchone()[0]
+    if role in {migration_user, "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    cur.execute(
+        "SELECT "
+        + ",".join(f"to_regclass('public.{table}')" for table in _ORGANIZATION_CANDIDATE_TABLES)
+    )
+    if cur.fetchone() != _ORGANIZATION_CANDIDATE_TABLES:
+        raise SchemaControlError("organization candidate intake authority is missing")
+    role_ident = sql.Identifier(role)
+    relations = sql.SQL(",").join(sql.Identifier(table) for table in _ORGANIZATION_CANDIDATE_TABLES)
+    cur.execute(sql.SQL("REVOKE ALL ON {} FROM {}").format(relations, role_ident))
+    cur.execute(sql.SQL("GRANT SELECT, INSERT ON {} TO {}").format(relations, role_ident))
+    cur.execute(
+        sql.SQL(
+            "REVOKE ALL ON FUNCTION organization_candidate_evidence_append_only() FROM {}"
+        ).format(role_ident)
+    )
+
+
+def _assert_organization_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    for table in _ORGANIZATION_CANDIDATE_TABLES:
+        relation = f"public.{table}"
+        cur.execute(
+            "SELECT has_table_privilege(%s,%s,'SELECT'), "
+            "has_table_privilege(%s,%s,'INSERT'), "
+            "has_table_privilege(%s,%s,'UPDATE'), "
+            "has_table_privilege(%s,%s,'DELETE'), "
+            "has_table_privilege(%s,%s,'TRUNCATE'), "
+            "has_table_privilege(%s,%s,'REFERENCES'), "
+            "has_table_privilege(%s,%s,'TRIGGER')",
+            tuple(value for _ in range(7) for value in (role, relation)),
+        )
+        if cur.fetchone() != (True, True, False, False, False, False, False):
+            raise SchemaControlError("organization candidate privileges are invalid")
+    cur.execute(
+        "SELECT has_function_privilege(%s,"
+        "'public.organization_candidate_evidence_append_only()','EXECUTE')",
+        (role,),
+    )
+    if cur.fetchone() != (False,):
+        raise SchemaControlError("organization candidate guard privilege is invalid")
 
 
 def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
@@ -1799,12 +1934,14 @@ def main():
                 _harden_candidate_privacy_runtime_privileges(cur, runtime_role)
                 _harden_decision_inbox_runtime_privileges(cur, runtime_role)
                 _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
+                _harden_organization_candidate_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
                 _assert_candidate_privacy_runtime_privileges(cur, runtime_role)
                 _assert_decision_inbox_runtime_privileges(cur, runtime_role)
                 _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
+                _assert_organization_candidate_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

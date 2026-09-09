@@ -138,8 +138,8 @@ def _restore_runtime_posture() -> None:
         )
 
 
-def _rewind_021_tail() -> tuple[bool, bool, bool]:
-    """Temporarily remove migrations 022-025 so 022 remains a valid prefix upgrade."""
+def _rewind_021_tail() -> tuple[bool, bool, bool, bool]:
+    """Temporarily remove migrations 022-026 so 022 remains a valid prefix upgrade."""
 
     (privacy_was_baselined,) = _sql(
         "SELECT baselined FROM schema_migrations "
@@ -153,6 +153,16 @@ def _rewind_021_tail() -> tuple[bool, bool, bool]:
         "SELECT baselined FROM schema_migrations "
         "WHERE filename='025_approved_provider_candidate_ingest.sql'"
     )[0]
+    (organization_candidate_was_baselined,) = _sql(
+        "SELECT baselined FROM schema_migrations "
+        "WHERE filename='026_organization_private_candidate_intake.sql'"
+    )[0]
+    _sql("DROP TABLE IF EXISTS organization_candidate_ingest_receipts")
+    _sql("DROP TABLE IF EXISTS organization_candidate_resume_evidence")
+    _sql("DROP TABLE IF EXISTS organization_candidate_references")
+    _sql("DROP FUNCTION IF EXISTS organization_candidate_evidence_append_only()")
+    _sql("ALTER TABLE candidates DROP CONSTRAINT candidates_scope_check")
+    _sql("ALTER TABLE candidates ADD CONSTRAINT candidates_scope_check CHECK (scope IN ('shared'))")
     _sql("DROP TABLE IF EXISTS global_candidate_ingest_receipts")
     _sql("DROP TABLE IF EXISTS global_candidate_source_observations")
     _sql("DROP TABLE IF EXISTS global_candidate_source_identities")
@@ -167,14 +177,25 @@ def _rewind_021_tail() -> tuple[bool, bool, bool]:
                 "023_candidate_privacy_directives.sql",
                 "024_organization_decision_event_inbox.sql",
                 "025_approved_provider_candidate_ingest.sql",
+                "026_organization_private_candidate_intake.sql",
             ],
         ),
     )
-    return privacy_was_baselined, decision_was_baselined, source_was_baselined
+    return (
+        privacy_was_baselined,
+        decision_was_baselined,
+        source_was_baselined,
+        organization_candidate_was_baselined,
+    )
 
 
-def _restore_025_ledger_posture(baselines: tuple[bool, bool, bool]) -> None:
-    privacy_was_baselined, decision_was_baselined, source_was_baselined = baselines
+def _restore_026_ledger_posture(baselines: tuple[bool, bool, bool, bool]) -> None:
+    (
+        privacy_was_baselined,
+        decision_was_baselined,
+        source_was_baselined,
+        organization_candidate_was_baselined,
+    ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
     ):
@@ -193,6 +214,11 @@ def _restore_025_ledger_posture(baselines: tuple[bool, bool, bool]) -> None:
         "UPDATE schema_migrations SET baselined=%s "
         "WHERE filename='025_approved_provider_candidate_ingest.sql'",
         (source_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s "
+        "WHERE filename='026_organization_private_candidate_intake.sql'",
+        (organization_candidate_was_baselined,),
     )
 
 
@@ -467,7 +493,7 @@ def test_021_to_022_upgrade_hashes_opaque_provider_event_and_builds_guards():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_025_ledger_posture(tail_baselines)
+        _restore_026_ledger_posture(tail_baselines)
         _restore_runtime_posture()
 
 
@@ -512,7 +538,7 @@ def test_021_to_022_upgrade_rejects_unresolved_legacy_complaint():
         ):
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_025_ledger_posture(tail_baselines)
+        _restore_026_ledger_posture(tail_baselines)
         _restore_runtime_posture()
 
 
@@ -545,7 +571,7 @@ def test_022_partial_if_not_exists_schema_is_not_recorded():
         if not rows:
             restored = _run_init()
             assert restored.returncode == 0, restored.stdout + restored.stderr
-        _restore_025_ledger_posture(tail_baselines)
+        _restore_026_ledger_posture(tail_baselines)
 
 
 def test_022_baseline_rejects_replica_only_audit_trigger():

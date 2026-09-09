@@ -77,6 +77,15 @@ def test_erasure_and_uncertainty_block_even_existing_private_use(
         require_allowed(decision, global_use=False)
 
 
+def test_organization_private_intake_uses_private_not_global_privacy_authority() -> None:
+    from activekg.api.organization_candidates import _require_private_privacy
+
+    source = inspect.getsource(_require_private_privacy)
+    assert "candidate_privacy_match(%s::jsonb,NULL,NULL,NULL)" in source
+    assert "require_allowed(decision, global_use=False)" in source
+    assert "global_use=True" not in source
+
+
 def test_missing_authority_fails_closed_in_production() -> None:
     repository = CandidateRepository.__new__(CandidateRepository)
     repository.privacy_repository = None
@@ -496,7 +505,7 @@ def test_increment_adds_no_destructive_candidate_data_path() -> None:
 
 def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
     for relative in (
-        *(f"db/migrations/{name}" for name in MIGRATIONS[:-3]),
+        *(f"db/migrations/{name}" for name in MIGRATIONS[:-4]),
         "db/init.sql",
         "enable_rls_policies.sql",
     ):

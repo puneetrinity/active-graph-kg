@@ -17,6 +17,7 @@ FROZEN_HASHES = {
     "activekg/privacy/repository.py": "faf4b08c16f10517e4173228702fd5be6b7388dc5192dd1e0544a83a8d270cdc",
     "db/migrations/023_candidate_privacy_directives.sql": "de179e695497c96321de2990b590b6e93702220b0071b488da18b0beffd94e1e",
     "db/migrations/024_organization_decision_event_inbox.sql": "a39bedef181f6152a5ecad1f5167afd9a266ea08be74686fe37686538665dacf",
+    "db/migrations/026_organization_private_candidate_intake.sql": "154f14ad9eff1bf6f4b86c4944769356c9324cd5bb0a5becaa675179857eb2e6",
 }
 
 
@@ -164,7 +165,8 @@ def validate(root: Path = ROOT) -> None:
         manifest,
         (
             '"025_approved_provider_candidate_ingest.sql"',
-            "len(MIGRATIONS) != 25",
+            '"026_organization_private_candidate_intake.sql"',
+            "len(MIGRATIONS) != 26",
         ),
         "migration manifest did not advance exactly once",
     )

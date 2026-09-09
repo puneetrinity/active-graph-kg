@@ -64,6 +64,10 @@ from activekg.api.operational import (
     ReadinessCoordinator,
     bounded_readiness_check,
 )
+from activekg.api.organization_candidates import (
+    organization_candidate_intake_enabled,
+    organization_candidates_router,
+)
 from activekg.api.organization_decision_events import (
     decision_inbox_enabled,
     organization_decision_events_router,
@@ -387,6 +391,7 @@ else:
 app.include_router(global_memory_router)
 app.include_router(candidate_privacy_router)
 app.include_router(organization_decision_events_router)
+app.include_router(organization_candidates_router)
 app.include_router(sourced_candidates_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
@@ -627,6 +632,7 @@ def readyz(
                 ),
                 privacy_key_versions=candidate_privacy_key_versions_for_readiness(),
                 decision_inbox_enabled=decision_inbox_enabled(),
+                organization_candidate_intake_enabled=(organization_candidate_intake_enabled()),
                 sourced_candidate_ingest_mode=os.getenv(
                     "SOURCED_CANDIDATE_INGEST_MODE", "off"
                 ).strip(),

@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 126,
+    "discovered_rows": 129,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -1061,6 +1061,61 @@
       "enforcement": "Eight-statement bounded catalog, privilege, function, key-version, and RLS readiness proof.",
       "test_id": "privacy-readiness-contract",
       "reason": "Candidate-bearing data surface is governed by the named enforcement boundary."
+    },
+    {
+      "file": "activekg/api/organization_candidates.py",
+      "symbol": "_select_receipt",
+      "tables": [
+        "organization_candidate_ingest_receipts"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "organization_private_evidence",
+      "actions": [],
+      "reason": "Internal idempotency lookup called only inside the fenced intake transaction; it exposes no route or candidate output."
+    },
+    {
+      "file": "activekg/api/organization_candidates.py",
+      "symbol": "_store",
+      "tables": [
+        "candidates",
+        "organization_candidate_ingest_receipts",
+        "organization_candidate_references",
+        "organization_candidate_resume_evidence"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Transient identifiers are evaluated through candidate_privacy_match and require_allowed(..., global_use=False) inside the one atomic transaction before the opaque candidate or evidence writes.",
+      "test_id": "privacy-organization-candidate-intake",
+      "reason": "Organization-private intake is admitted by the existing privacy authority and persists no identifier values."
+    },
+    {
+      "file": "activekg/api/organization_candidates.py",
+      "symbol": "ingest_organization_candidate",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/intake"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact VantaHire service authority, strict bounded body, disabled-by-default flag, private-use privacy decision and atomic opaque-candidate resolver.",
+      "test_id": "privacy-organization-candidate-intake",
+      "reason": "The only 4B Memory intake route is governed by exact authority and privacy admission."
     },
     {
       "file": "activekg/api/sourced_candidates.py",

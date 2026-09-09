@@ -5,15 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts import sourced_candidate_ingest_guard as guard
+from scripts import organization_candidate_intake_guard as guard
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     *guard.FROZEN_HASHES,
-    "db/migrations/025_approved_provider_candidate_ingest.sql",
-    "activekg/api/sourced_candidates.py",
+    "db/migrations/026_organization_private_candidate_intake.sql",
+    "activekg/api/organization_candidates.py",
     "activekg/api/main.py",
-    "activekg/api/global_memory.py",
     "activekg/common/migration_manifest.py",
 )
 
@@ -31,46 +30,34 @@ def _copy_root(tmp_path: Path) -> Path:
     ("relative", "old", "new", "code"),
     [
         (
-            "activekg/api/sourced_candidates.py",
-            'claims.actor_id != "signal-service"',
+            "activekg/api/organization_candidates.py",
+            'claims.actor_id != "vantahire-backend"',
             'claims.actor_id != "any-service"',
             "receiver authority",
         ),
         (
-            "activekg/api/sourced_candidates.py",
-            "require_allowed(decision, global_use=True)",
+            "activekg/api/organization_candidates.py",
             "require_allowed(decision, global_use=False)",
+            "require_allowed(decision, global_use=True)",
             "receiver authority",
         ),
         (
-            "activekg/api/sourced_candidates.py",
-            'Literal["crustdata_person_v1"]',
-            "str",
-            "receiver authority",
+            "activekg/api/organization_candidates.py",
+            'exclude={"idempotency_key", "privacy_subject"}',
+            'exclude={"idempotency_key"}',
+            "transient privacy subject",
+        ),
+        (
+            "db/migrations/026_organization_private_candidate_intake.sql",
+            "BEFORE UPDATE OR DELETE",
+            "BEFORE UPDATE",
+            "trigger census",
         ),
         (
             "activekg/api/main.py",
-            'sourced_candidate_ingest_mode() == "canonical_only"',
-            "False",
-            "old Signal writer",
-        ),
-        (
-            "activekg/api/global_memory.py",
-            'raise HTTPException(status_code=410, detail="global_candidate_writer_retired")',
-            "_require_enabled()",
-            "retired global writer",
-        ),
-        (
-            "db/migrations/025_approved_provider_candidate_ingest.sql",
-            "BEFORE UPDATE OR DELETE",
-            "BEFORE UPDATE",
-            "append-only trigger census",
-        ),
-        (
-            "db/migrations/025_approved_provider_candidate_ingest.sql",
-            "    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
-            "    tenant_id TEXT,\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),",
-            "tenant/job/rank state",
+            "app.include_router(organization_candidates_router)",
+            "# route removed",
+            "route or readiness",
         ),
         (
             "activekg/common/migration_manifest.py",
@@ -78,20 +65,10 @@ def _copy_root(tmp_path: Path) -> Path:
             "len(MIGRATIONS) != 25",
             "manifest",
         ),
-        (
-            "activekg/api/main.py",
-            "app.include_router(sourced_candidates_router)",
-            "# route removed",
-            "route registration",
-        ),
     ],
 )
 def test_guard_refuses_contract_mutations(
-    tmp_path: Path,
-    relative: str,
-    old: str,
-    new: str,
-    code: str,
+    tmp_path: Path, relative: str, old: str, new: str, code: str
 ) -> None:
     root = _copy_root(tmp_path)
     path = root / relative
