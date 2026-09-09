@@ -161,8 +161,14 @@ def _rewind_021_tail() -> tuple[bool, bool, bool, bool]:
     _sql("DROP TABLE IF EXISTS organization_candidate_resume_evidence")
     _sql("DROP TABLE IF EXISTS organization_candidate_references")
     _sql("DROP FUNCTION IF EXISTS organization_candidate_evidence_append_only()")
-    _sql("ALTER TABLE candidates DROP CONSTRAINT candidates_scope_check")
-    _sql("ALTER TABLE candidates ADD CONSTRAINT candidates_scope_check CHECK (scope IN ('shared'))")
+    # Earlier CI matrices leave private containers that cannot exist before 026.
+    # Delete only that disposable scope; roll back both cleanup and the check swap on failure.
+    with psycopg.connect(OWNER_DSN) as conn:
+        conn.execute("DELETE FROM candidates WHERE scope='organization_private'")
+        conn.execute(
+            "ALTER TABLE candidates DROP CONSTRAINT candidates_scope_check, "
+            "ADD CONSTRAINT candidates_scope_check CHECK (scope IN ('shared'))"
+        )
     _sql("DROP TABLE IF EXISTS global_candidate_ingest_receipts")
     _sql("DROP TABLE IF EXISTS global_candidate_source_observations")
     _sql("DROP TABLE IF EXISTS global_candidate_source_identities")
