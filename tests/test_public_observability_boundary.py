@@ -49,7 +49,7 @@ def test_control_plane_verifier_fails_closed_and_compares_exact_bearer() -> None
 def test_route_registration_count_and_public_retirement_contract() -> None:
     routes = [route for route in main.app.routes if isinstance(route, APIRoute)]
     registrations = {(method, route.path) for route in routes for method in route.methods}
-    assert len(routes) == 76
+    assert len(routes) == 77
     assert {
         ("GET", "/openapi.json"),
         ("GET", "/docs"),
@@ -216,7 +216,11 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
             if "SELECT 'index'" in self.last:
                 rows = [
                     ("index", name, {"valid": True})
-                    for name in operational._REQUIRED_INDEXES | operational._PRIVACY_INDEXES
+                    for name in (
+                        operational._REQUIRED_INDEXES
+                        | operational._PRIVACY_INDEXES
+                        | operational._SOURCED_CANDIDATE_INDEXES
+                    )
                 ]
                 for name in operational._REQUIRED_FUNCTIONS:
                     details = {}
@@ -251,7 +255,39 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                             "owned_by_runtime": False,
                         }
                     rows.append(("function", name, details))
+                rows.append(
+                    (
+                        "function",
+                        operational._SOURCED_CANDIDATE_APPEND_ONLY_FUNCTION,
+                        {
+                            "arguments": 0,
+                            "returns_trigger": True,
+                            "language": "plpgsql",
+                            "security_definer": False,
+                            "source": operational._SOURCED_CANDIDATE_APPEND_ONLY_FUNCTION_BODY,
+                            "owned_by_runtime": False,
+                        },
+                    )
+                )
                 for table, names in operational._REQUIRED_CONSTRAINTS_BY_TABLE.items():
+                    for name in names:
+                        details = {
+                            "type": "c",
+                            "delete_action": " ",
+                            "validated": True,
+                            "definition": "CHECK (true)",
+                        }
+                        expected_check = operational._EXPECTED_CHECK_DEFINITIONS.get((table, name))
+                        expected_structural = operational._EXPECTED_STRUCTURAL_DEFINITIONS.get(
+                            (table, name)
+                        )
+                        if expected_check is not None:
+                            details["definition"] = expected_check
+                        if expected_structural is not None:
+                            details["type"] = expected_structural[0]
+                            details["definition"] = expected_structural[1]
+                        rows.append(("constraint", f"{table}.{name}", details))
+                for table, names in operational._SOURCED_CANDIDATE_CONSTRAINTS_BY_TABLE.items():
                     for name in names:
                         details = {
                             "type": "c",
@@ -285,6 +321,16 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     )
                     for table, name, function, trigger_type in operational._PRIVACY_TRIGGERS
                 )
+                rows.extend(
+                    (
+                        "trigger",
+                        f"{table}.{name}",
+                        {"function": function, "type": trigger_type, "enabled": "O"},
+                    )
+                    for table, name, function, trigger_type in (
+                        operational._SOURCED_CANDIDATE_TRIGGERS
+                    )
+                )
                 rows.append(
                     (
                         "sequence",
@@ -300,6 +346,22 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     )
                 )
                 rows.extend(("public_column", name, {}) for name in operational._PUBLIC_COLUMNS)
+                rows.extend(
+                    (
+                        "sourced_candidate_privilege",
+                        name,
+                        {
+                            "select": True,
+                            "insert": True,
+                            "update": False,
+                            "delete": False,
+                            "truncate": False,
+                            "references": False,
+                            "trigger": False,
+                        },
+                    )
+                    for name in operational._SOURCED_CANDIDATE_TABLES
+                )
                 rows.append(
                     (
                         "privilege",
@@ -342,6 +404,7 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
                     for name in operational._CANDIDATE_TABLES
                     + operational._SHARED_TABLES
                     + operational._PRIVACY_TABLES
+                    + operational._SOURCED_CANDIDATE_TABLES
                 ]
             if "FROM pg_policies" in self.last:
                 tenant_expression = (

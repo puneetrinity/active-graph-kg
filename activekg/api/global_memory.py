@@ -1076,6 +1076,10 @@ def upsert_global_candidate(
     body: GlobalCandidateUpsert,
     claims=Depends(get_jwt_claims),
 ):
+    raise HTTPException(status_code=410, detail="global_candidate_writer_retired")
+
+    # Retained unreachable implementation documents the historical contract;
+    # deletion is a separately governed cleanup after all callers are retired.
     _require_enabled()
 
     conn = _get_conn()
@@ -1358,6 +1362,9 @@ def create_provenance(
     body: ProvenanceCreate,
     claims=Depends(get_jwt_claims),
 ):
+    raise HTTPException(status_code=410, detail="global_candidate_writer_retired")
+
+    # Retained unreachable implementation; see the retirement above.
     _require_enabled()
     _validate_tenant(claims, body.tenant_id)
 
@@ -1449,6 +1456,9 @@ def upsert_access(
     body: AccessUpsert,
     claims=Depends(get_jwt_claims),
 ):
+    raise HTTPException(status_code=410, detail="global_candidate_writer_retired")
+
+    # Retained unreachable implementation; see the retirement above.
     _require_enabled()
     _validate_tenant(claims, body.tenant_id)
 

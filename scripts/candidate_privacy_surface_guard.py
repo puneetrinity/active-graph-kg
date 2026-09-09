@@ -29,6 +29,9 @@ GOVERNED_TABLES = (
     "candidate_privacy_directive_events",
     "candidate_privacy_directives",
     "candidate_privacy_identity_tokens",
+    "global_candidate_source_identities",
+    "global_candidate_source_observations",
+    "global_candidate_ingest_receipts",
 )
 GOVERNED_CALLS = (
     "CandidateRepository",
@@ -179,6 +182,12 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
         "_privacy_decision",
         "enforce_privacy",
     ),
+    "privacy-approved-provider-ingest": (
+        "decision_for(",
+        "require_allowed(",
+        "_require_privacy_for_candidate(",
+        "_store(",
+    ),
     "privacy-surface-dependency": (
         "candidate_privacy_",
         "_require_candidate_ingest_allowed",
@@ -250,6 +259,28 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
     anchors = _FENCE_ANCHORS.get(row["test_id"])
     if anchors is None or not any(anchor in source for anchor in anchors):
         raise GuardError(f"candidate privacy enforcement anchor missing: {reference.key}")
+    if row["test_id"] == "privacy-approved-provider-ingest":
+        module_source = (ROOT / reference.file).read_text(encoding="utf-8")
+        privacy_required = (
+            "decision_for(row[1], row[0])",
+            "require_allowed(decision, global_use=True)",
+        )
+        if any(token not in module_source for token in privacy_required):
+            raise GuardError("approved-provider privacy/source authority is incomplete")
+        if reference.symbol == "_store":
+            required = (
+                "_require_privacy_for_candidate(",
+                "INSERT INTO global_candidate_source_observations",
+            )
+            if any(token not in source for token in required):
+                raise GuardError("approved-provider privacy/source authority is incomplete")
+            if source.index("_require_privacy_for_candidate(") > source.index(
+                "INSERT INTO global_candidate_source_observations"
+            ):
+                raise GuardError("approved-provider privacy fence moved after evidence write")
+        elif reference.symbol == "ingest_sourced_candidate":
+            if "require_sourced_candidate_writer" not in source:
+                raise GuardError("approved-provider route authority is incomplete")
     if reference.key.endswith("embedding/worker.py::EmbeddingWorker._process_job"):
         if source.count("self.privacy_repository.node_decision") < 3:
             raise GuardError("embedding worker stale-job privacy recheck is missing")

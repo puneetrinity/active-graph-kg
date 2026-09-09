@@ -753,6 +753,112 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
             "organization_decision_stream_state_tenant",
         ),
     ],
+    "025_approved_provider_candidate_ingest.sql": [
+        ("table", "global_candidate_source_identities"),
+        ("table", "global_candidate_source_observations"),
+        ("table", "global_candidate_ingest_receipts"),
+        ("index", "global_candidate_source_identities_candidate_idx"),
+        ("index", "global_candidate_source_identities_linkedin_idx"),
+        ("index", "global_candidate_source_observations_candidate_freshness_idx"),
+        ("index", "global_candidate_source_observations_provider_idx"),
+        ("index", "global_candidate_source_observations_acquisition_idx"),
+        ("index", "global_candidate_ingest_receipts_candidate_idx"),
+        ("index", "global_candidate_ingest_receipts_acquisition_idx"),
+        ("constraint", "global_candidate_source_identities_pkey"),
+        ("constraint", "global_candidate_source_identities_provider_unique"),
+        ("constraint", "global_candidate_source_identities_provider_v1"),
+        ("constraint", "global_candidate_source_identities_provider_id"),
+        ("constraint", "global_candidate_source_identities_linkedin"),
+        ("constraint", "global_candidate_source_identities_authority"),
+        ("constraint", "global_candidate_source_observations_pkey"),
+        ("constraint", "global_candidate_source_observations_idempotency_key_key"),
+        ("constraint", "global_candidate_source_observations_resolution_shape"),
+        ("constraint", "global_candidate_source_observations_profile"),
+        ("constraint", "global_candidate_source_observations_authority"),
+        ("constraint", "global_candidate_ingest_receipts_pkey"),
+        ("constraint", "global_candidate_ingest_receipts_source_observation_id_key"),
+        ("constraint", "global_candidate_ingest_receipts_resolution_shape"),
+        ("constraint", "global_candidate_ingest_receipts_authority"),
+        (
+            "fk_delete",
+            "global_candidate_source_identities",
+            "global_candidate_source_identities_global_candidate_id_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "global_candidate_source_observations",
+            "global_candidate_source_observations_source_identity_id_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "global_candidate_source_observations",
+            "global_candidate_source_observations_global_candidate_id_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "global_candidate_ingest_receipts",
+            "global_candidate_ingest_receipts_source_observation_id_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "global_candidate_ingest_receipts",
+            "global_candidate_ingest_receipts_source_identity_id_fkey",
+            "r",
+        ),
+        (
+            "fk_delete",
+            "global_candidate_ingest_receipts",
+            "global_candidate_ingest_receipts_global_candidate_id_fkey",
+            "r",
+        ),
+        ("trigger_function", "approved_provider_candidate_evidence_append_only"),
+        (
+            "trigger",
+            "global_candidate_source_identities",
+            "global_candidate_source_identities_no_mutation",
+            "approved_provider_candidate_evidence_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "global_candidate_source_identities",
+            "global_candidate_source_identities_no_nonempty_truncate",
+            "approved_provider_candidate_evidence_append_only",
+            "34",
+        ),
+        (
+            "trigger",
+            "global_candidate_source_observations",
+            "global_candidate_source_observations_no_mutation",
+            "approved_provider_candidate_evidence_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "global_candidate_source_observations",
+            "global_candidate_source_observations_no_nonempty_truncate",
+            "approved_provider_candidate_evidence_append_only",
+            "34",
+        ),
+        (
+            "trigger",
+            "global_candidate_ingest_receipts",
+            "global_candidate_ingest_receipts_no_mutation",
+            "approved_provider_candidate_evidence_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "global_candidate_ingest_receipts",
+            "global_candidate_ingest_receipts_no_nonempty_truncate",
+            "approved_provider_candidate_evidence_append_only",
+            "34",
+        ),
+    ],
 }
 
 
@@ -1496,6 +1602,66 @@ def _assert_decision_inbox_runtime_privileges(cur: psycopg.Cursor, role: str) ->
         raise SchemaControlError("organization decision inbox runtime role is elevated")
 
 
+_SOURCED_CANDIDATE_TABLES = (
+    "global_candidate_source_identities",
+    "global_candidate_source_observations",
+    "global_candidate_ingest_receipts",
+)
+
+
+def _harden_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    """Restore migration-025's exact append-only runtime table boundary."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    migration_user = cur.fetchone()[0]
+    if role in {migration_user, "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    cur.execute(
+        "SELECT "
+        + ",".join(f"to_regclass('public.{table}')" for table in _SOURCED_CANDIDATE_TABLES)
+    )
+    if cur.fetchone() != _SOURCED_CANDIDATE_TABLES:
+        raise SchemaControlError("approved-provider sourced-candidate authority is missing")
+    role_ident = sql.Identifier(role)
+    relations = sql.SQL(",").join(sql.Identifier(table) for table in _SOURCED_CANDIDATE_TABLES)
+    cur.execute(sql.SQL("REVOKE ALL ON {} FROM {}").format(relations, role_ident))
+    cur.execute(sql.SQL("GRANT SELECT, INSERT ON {} TO {}").format(relations, role_ident))
+    cur.execute(
+        sql.SQL(
+            "REVOKE ALL ON FUNCTION approved_provider_candidate_evidence_append_only() FROM {}"
+        ).format(role_ident)
+    )
+
+
+def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    for table in _SOURCED_CANDIDATE_TABLES:
+        relation = f"public.{table}"
+        cur.execute(
+            "SELECT has_table_privilege(%s,%s,'SELECT'), "
+            "has_table_privilege(%s,%s,'INSERT'), "
+            "has_table_privilege(%s,%s,'UPDATE'), "
+            "has_table_privilege(%s,%s,'DELETE'), "
+            "has_table_privilege(%s,%s,'TRUNCATE'), "
+            "has_table_privilege(%s,%s,'REFERENCES'), "
+            "has_table_privilege(%s,%s,'TRIGGER')",
+            tuple(value for _ in range(7) for value in (role, relation)),
+        )
+        if cur.fetchone() != (True, True, False, False, False, False, False):
+            raise SchemaControlError("approved-provider sourced-candidate privileges are invalid")
+    cur.execute(
+        "SELECT has_function_privilege(%s,"
+        "'public.approved_provider_candidate_evidence_append_only()','EXECUTE')",
+        (role,),
+    )
+    if cur.fetchone() != (False,):
+        raise SchemaControlError("approved-provider append-only function privilege is invalid")
+
+
 def _remediate_legacy_app_user(cur: psycopg.Cursor) -> None:
     """Disable the app_user role older installs created with a known password."""
     cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'app_user'")
@@ -1632,11 +1798,13 @@ def main():
                 runtime_role = os.getenv("ACTIVEKG_RUNTIME_ROLE", RUNTIME_ROLE_DEFAULT)
                 _harden_candidate_privacy_runtime_privileges(cur, runtime_role)
                 _harden_decision_inbox_runtime_privileges(cur, runtime_role)
+                _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
                 _assert_candidate_privacy_runtime_privileges(cur, runtime_role)
                 _assert_decision_inbox_runtime_privileges(cur, runtime_role)
+                _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

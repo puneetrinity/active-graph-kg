@@ -1343,6 +1343,135 @@ def test_public_mirror_never_promotes_flat_signal_hints():
                 assert cur.fetchone() == (None, None, None, None)
 
 
+def test_approved_provider_evidence_preserves_public_search_projection_shape():
+    candidate_id = str(uuid.uuid4())
+    source_identity_id = str(uuid.uuid4())
+    observation_id = str(uuid.uuid4())
+    slug = f"source-evidence-{uuid.uuid4().hex[:10]}"
+    linkedin_url = f"https://linkedin.com/in/{slug}"
+    provider_id = str(uuid.uuid4().int % 9_000_000_000 + 1_000_000_000)
+    idempotency_key = sha256(f"source-evidence:{provider_id}".encode()).hexdigest()
+    normalized_profile = {
+        "display_name": "Projection Person",
+        "headline": "Projection backend engineer",
+        "skills": ["Python", "PostgreSQL"],
+    }
+    public_profile = {
+        "crustdata_person_id": int(provider_id),
+        "basic_profile": {
+            "name": "Projection Person",
+            "headline": "Projection backend engineer",
+        },
+        "skills": {"professional_network_skills": ["Python", "PostgreSQL"]},
+    }
+
+    projection_sql = """
+        SELECT gc.id::text,
+               COALESCE(gc.public_profile #>> '{basic_profile,name}',
+                        gc.public_profile ->> 'name') AS name,
+               gc.public_headline,
+               gc.linkedin_url,
+               gc.linkedin_id,
+               gc.public_skills_normalized,
+               gc.public_profile,
+               'public'::text AS evidence_surface
+        FROM global_candidates gc
+        WHERE gc.id = %s
+    """
+    with psycopg.connect(OWNER_DSN) as conn:
+        with conn.transaction(force_rollback=True):
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO global_candidates
+                        (id, linkedin_id, linkedin_url, public_profile,
+                         public_profile_observed_at, public_crustdata_person_id,
+                         public_headline, public_skills_normalized)
+                    VALUES (%s,%s,%s,%s::jsonb,now(),%s,%s,%s::text[])
+                    """,
+                    (
+                        candidate_id,
+                        slug,
+                        linkedin_url,
+                        json.dumps(public_profile),
+                        int(provider_id),
+                        "Projection backend engineer",
+                        ["python", "postgresql"],
+                    ),
+                )
+                cur.execute(projection_sql, (candidate_id,))
+                before = cur.fetchone()
+
+                cur.execute(
+                    """
+                    INSERT INTO global_candidate_source_identities
+                        (id,provider_namespace,record_type,adapter_family,adapter_version,
+                         provider_record_id,canonical_linkedin_url,global_candidate_id,
+                         verified_issuer,verified_actor_id,first_observed_at)
+                    VALUES (%s,'crustdata','person','crustdata_person',1,%s,%s,%s,
+                            'signal','signal-service',now())
+                    """,
+                    (source_identity_id, provider_id, linkedin_url, candidate_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO global_candidate_source_observations
+                        (id,idempotency_key,source_identity_id,global_candidate_id,
+                         provider_namespace,record_type,adapter_family,adapter_version,
+                         provider_record_id,canonical_linkedin_url,acquisition_receipt_id,
+                         acquisition_generation,acquisition_slot,acquired_at,
+                         provider_observed_at,schema_version,normalized_profile,
+                         profile_digest,outcome,verified_issuer,verified_actor_id)
+                    VALUES (%s,%s,%s,%s,'crustdata','person','crustdata_person',1,%s,%s,
+                            'projection-conservation',1,'exact',now(),now(),1,%s::jsonb,
+                            %s,'accepted','signal','signal-service')
+                    """,
+                    (
+                        observation_id,
+                        idempotency_key,
+                        source_identity_id,
+                        candidate_id,
+                        provider_id,
+                        linkedin_url,
+                        json.dumps(normalized_profile),
+                        sha256(json.dumps(normalized_profile, sort_keys=True).encode()).hexdigest(),
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO global_candidate_ingest_receipts
+                        (idempotency_key,input_digest,source_observation_id,
+                         source_identity_id,global_candidate_id,resolution,
+                         provider_namespace,record_type,provider_record_id,
+                         acquisition_receipt_id,acquisition_generation,acquisition_slot,
+                         verified_issuer,verified_actor_id)
+                    VALUES (%s,%s,%s,%s,%s,'created','crustdata','person',%s,
+                            'projection-conservation',1,'exact','signal','signal-service')
+                    """,
+                    (
+                        idempotency_key,
+                        sha256(f"input:{provider_id}".encode()).hexdigest(),
+                        observation_id,
+                        source_identity_id,
+                        candidate_id,
+                        provider_id,
+                    ),
+                )
+                cur.execute(projection_sql, (candidate_id,))
+                after = cur.fetchone()
+
+                assert after == before
+                assert after[1:] == (
+                    "Projection Person",
+                    "Projection backend engineer",
+                    linkedin_url,
+                    slug,
+                    ["python", "postgresql"],
+                    public_profile,
+                    "public",
+                )
+
+
 def test_public_headline_must_equal_projected_profile_headline():
     with psycopg.connect(OWNER_DSN) as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
