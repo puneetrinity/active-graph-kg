@@ -143,13 +143,38 @@ jobs:
         run: |
           sudo systemctl stop postgresql || true
           if [ ! -f "/usr/share/postgresql/${POSTGRES_MAJOR}/extension/vector.control" ]; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-common
-            if [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then
-              sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            # A6: only Ubuntu/PGDG sources; unrelated runner repositories must not gate PostgreSQL.
+            pg_apt_sources="$(mktemp -d)"
+            chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then
+                cp "$pg_source" "$pg_apt_sources/"
+              fi
+            done
+            pg_apt_options=(
+              -o "Dir::Etc::sourcelist=/dev/null"
+              -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3"
+              -o "Acquire::http::Timeout=30"
+              -o "Acquire::https::Timeout=30"
+              -o "APT::Update::Error-Mode=any"
+            )
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              # Configure the signed repository locally: the bootstrap script runs a global apt update.
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              if [ ! -r "$pg_keyring" ]; then
+                pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              fi
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
             fi
-            sudo apt-get update
-            sudo apt-get install -y "postgresql-${POSTGRES_MAJOR}" "postgresql-${POSTGRES_MAJOR}-pgvector"
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y "postgresql-${POSTGRES_MAJOR}" "postgresql-${POSTGRES_MAJOR}-pgvector"
           fi
           while read -r version cluster _; do
             sudo pg_ctlcluster "$version" "$cluster" stop || true
@@ -267,8 +292,25 @@ jobs:
             exit 1
           fi
           if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-16-pgvector
+            # A6: only Ubuntu/PGDG sources; unrelated runner repositories must not gate PostgreSQL.
+            pg_apt_sources="$(mktemp -d)"
+            chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then
+                cp "$pg_source" "$pg_apt_sources/"
+              fi
+            done
+            pg_apt_options=(
+              -o "Dir::Etc::sourcelist=/dev/null"
+              -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3"
+              -o "Acquire::http::Timeout=30"
+              -o "Acquire::https::Timeout=30"
+              -o "APT::Update::Error-Mode=any"
+            )
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16-pgvector
             sudo systemctl restart postgresql
           fi
           sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
@@ -713,8 +755,25 @@ jobs:
             exit 1
           fi
           if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-16-pgvector
+            # A6: only Ubuntu/PGDG sources; unrelated runner repositories must not gate PostgreSQL.
+            pg_apt_sources="$(mktemp -d)"
+            chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then
+                cp "$pg_source" "$pg_apt_sources/"
+              fi
+            done
+            pg_apt_options=(
+              -o "Dir::Etc::sourcelist=/dev/null"
+              -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3"
+              -o "Acquire::http::Timeout=30"
+              -o "Acquire::https::Timeout=30"
+              -o "APT::Update::Error-Mode=any"
+            )
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16-pgvector
             sudo systemctl restart postgresql
           fi
           sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
@@ -869,8 +928,25 @@ jobs:
             exit 1
           fi
           if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-16-pgvector
+            # A6: only Ubuntu/PGDG sources; unrelated runner repositories must not gate PostgreSQL.
+            pg_apt_sources="$(mktemp -d)"
+            chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then
+                cp "$pg_source" "$pg_apt_sources/"
+              fi
+            done
+            pg_apt_options=(
+              -o "Dir::Etc::sourcelist=/dev/null"
+              -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3"
+              -o "Acquire::http::Timeout=30"
+              -o "Acquire::https::Timeout=30"
+              -o "APT::Update::Error-Mode=any"
+            )
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16-pgvector
             sudo systemctl restart postgresql
           fi
           sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'

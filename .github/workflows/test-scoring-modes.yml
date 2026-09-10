@@ -53,8 +53,25 @@ jobs:
             exit 1
           fi
           if [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-16-pgvector
+            # A6: only Ubuntu/PGDG sources; unrelated runner repositories must not gate PostgreSQL.
+            pg_apt_sources="$(mktemp -d)"
+            chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then
+                cp "$pg_source" "$pg_apt_sources/"
+              fi
+            done
+            pg_apt_options=(
+              -o "Dir::Etc::sourcelist=/dev/null"
+              -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3"
+              -o "Acquire::http::Timeout=30"
+              -o "Acquire::https::Timeout=30"
+              -o "APT::Update::Error-Mode=any"
+            )
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16-pgvector
             sudo systemctl restart postgresql
           fi
           sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
