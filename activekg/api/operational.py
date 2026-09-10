@@ -50,6 +50,81 @@ _SOURCED_CANDIDATE_TABLES = (
     "global_candidate_source_observations",
     "global_candidate_ingest_receipts",
 )
+_ORGANIZATION_CANDIDATE_TABLES = (
+    "organization_candidate_references",
+    "organization_candidate_resume_evidence",
+    "organization_candidate_ingest_receipts",
+)
+_ORGANIZATION_CANDIDATE_INDEXES = {
+    "organization_candidate_references_candidate_idx",
+    "organization_candidate_references_job_idx",
+    "organization_candidate_resume_evidence_candidate_idx",
+    "organization_candidate_ingest_receipts_candidate_idx",
+}
+_ORGANIZATION_CANDIDATE_CONSTRAINTS_BY_TABLE = {
+    "organization_candidate_references": {
+        "organization_candidate_references_pkey",
+        "organization_candidate_references_tenant_nonblank",
+        "organization_candidate_references_application_positive",
+        "organization_candidate_references_job_positive",
+        "organization_candidate_references_origin_v1",
+        "organization_candidate_references_authority",
+        "organization_candidate_references_tenant_candidate_fkey",
+        "organization_candidate_references_tenant_application_unique",
+        "organization_candidate_references_tenant_reference_unique",
+        # PostgreSQL truncates migration 026's longer identifier to 63 bytes.
+        "organization_candidate_references_tenant_reference_candidate_un",
+    },
+    "organization_candidate_resume_evidence": {
+        "organization_candidate_resume_evidence_pkey",
+        "organization_candidate_resume_evidence_tenant_nonblank",
+        "organization_candidate_resume_evidence_version_v1",
+        "organization_candidate_resume_evidence_source_kind",
+        "organization_candidate_resume_evidence_content_digest",
+        "organization_candidate_resume_evidence_byte_count",
+        "organization_candidate_resume_evidence_media_type",
+        "organization_candidate_resume_evidence_extracted_digest",
+        "organization_candidate_resume_evidence_reference_fkey",
+        "organization_candidate_resume_evidence_tenant_candidate_fkey",
+        "organization_candidate_resume_evidence_reference_unique",
+        "organization_candidate_resume_evidence_tenant_version_candidate",
+        "organization_candidate_resume_evidence_tenant_version_unique",
+    },
+    "organization_candidate_ingest_receipts": {
+        "organization_candidate_ingest_receipts_pkey",
+        "organization_candidate_ingest_receipts_idempotency",
+        "organization_candidate_ingest_receipts_input_digest",
+        "organization_candidate_ingest_receipts_tenant_nonblank",
+        "organization_candidate_ingest_receipts_resolution",
+        "organization_candidate_ingest_receipts_authority",
+        "organization_candidate_ingest_receipts_reference_fkey",
+        "organization_candidate_ingest_receipts_resume_fkey",
+        "organization_candidate_ingest_receipts_tenant_candidate_fkey",
+        "organization_candidate_ingest_receipts_reference_unique",
+        "organization_candidate_ingest_receipts_resume_unique",
+    },
+}
+_ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION = "organization_candidate_evidence_append_only"
+_ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION_BODY = (
+    "declarehas_evidenceboolean;beginiftg_op<>'truncate'thenraiseexceptionusing"
+    "errcode='55000',message=tg_table_name||'isappend-only(attempted'||tg_op||')';"
+    "endif;executeformat('selectexists(select1from%ilimit1)',tg_table_name)into"
+    "has_evidence;ifhas_evidencethenraiseexceptionusingerrcode='55000',message="
+    "tg_table_name||'containscommittedevidenceandcannotbetruncated';endif;returnnull;end;"
+)
+_ORGANIZATION_CANDIDATE_TRIGGERS = tuple(
+    trigger
+    for table in _ORGANIZATION_CANDIDATE_TABLES
+    for trigger in (
+        (table, f"{table}_no_mutation", _ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION, 27),
+        (
+            table,
+            f"{table}_no_nonempty_truncate",
+            _ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION,
+            34,
+        ),
+    )
+)
 _SOURCED_CANDIDATE_INDEXES = {
     "global_candidate_source_identities_candidate_idx",
     "global_candidate_source_identities_linkedin_idx",
@@ -264,6 +339,7 @@ _REQUIRED_FUNCTIONS = {
     "contact_suppression_receipts_append_only",
 }
 _REQUIRED_CONSTRAINTS_BY_TABLE = {
+    "candidates": {"candidates_scope_check"},
     "global_candidates": {
         "global_candidates_public_embedding_status_check",
         "global_candidates_public_headline_from_profile",
@@ -347,6 +423,10 @@ _REQUIRED_CONSTRAINTS = {
     for constraint in constraints
 }
 _EXPECTED_CHECK_DEFINITIONS = {
+    (
+        "candidates",
+        "candidates_scope_check",
+    ): "check((scope=any(array['shared','organization_private'])))",
     (
         "contact_suppression_tombstones",
         "contact_suppression_reason_check",
@@ -634,6 +714,13 @@ def _decision_tenant_policy_expression_ok(expression: str) -> bool:
     )
 
 
+def _organization_candidate_tenant_policy_expression_ok(expression: str) -> bool:
+    # Migration 026 excludes quarantine tenants through table CHECK constraints.
+    return _normalize_sql_definition(expression) == (
+        "(tenant_id=current_setting('app.current_tenant_id',true))"
+    )
+
+
 def _migration_checksums_match(applied: Mapping[str, str | None], started_at: float) -> bool:
     migrations_dir = Path(__file__).resolve().parents[2] / "db" / "migrations"
     if set(MIGRATIONS) != set(applied):
@@ -663,6 +750,7 @@ def bounded_readiness_check(
     privacy_problems: list[str] | None = None,
     privacy_key_versions: set[int] | None = None,
     decision_inbox_enabled: bool | None = None,
+    organization_candidate_intake_enabled: bool | None = None,
     sourced_candidate_ingest_mode: str | None = None,
 ) -> ReadinessResult:
     """Run a fixed, read-only readiness census with at most eight SQL statements."""
@@ -679,6 +767,9 @@ def bounded_readiness_check(
     check_decision_inbox = decision_inbox_enabled is not None
     if decision_inbox_enabled is False:
         reasons.append("decision_inbox_disabled")
+    check_organization_candidates = organization_candidate_intake_enabled is not None
+    if organization_candidate_intake_enabled is False:
+        reasons.append("organization_candidate_intake_disabled")
     if sourced_candidate_ingest_mode is not None and sourced_candidate_ingest_mode not in {
         "dual",
         "canonical_only",
@@ -823,6 +914,7 @@ def bounded_readiness_check(
                             + _PRIVACY_TABLES
                             + _DECISION_INBOX_TABLES
                             + _SOURCED_CANDIDATE_TABLES
+                            + _ORGANIZATION_CANDIDATE_TABLES
                         ),
                     ),
                 )
@@ -857,6 +949,24 @@ def bounded_readiness_check(
                     for table in _SOURCED_CANDIDATE_TABLES
                 ):
                     reasons.append("runtime_role_owns_sourced_candidate_authority")
+                if check_organization_candidates and set(_ORGANIZATION_CANDIDATE_TABLES) - set(
+                    relation_map
+                ):
+                    reasons.append("organization_candidate_schema_missing")
+                elif check_organization_candidates and any(
+                    not bool(relation_map[table][1]) or not bool(relation_map[table][2])
+                    for table in _ORGANIZATION_CANDIDATE_TABLES
+                ):
+                    reasons.append("organization_candidate_rls_incomplete")
+                elif (
+                    check_organization_candidates
+                    and not allow_owner
+                    and any(
+                        relation_map[table][3] == relation_map[table][4]
+                        for table in _ORGANIZATION_CANDIDATE_TABLES
+                    )
+                ):
+                    reasons.append("runtime_role_owns_organization_candidate_authority")
                 for table in _CANDIDATE_TABLES:
                     row = relation_map.get(table)
                     if row is None or not bool(row[1]):
@@ -883,7 +993,14 @@ def bounded_readiness_check(
                     FROM pg_policies
                     WHERE schemaname = 'public' AND tablename = ANY(%s)
                     """,
-                    (list(_CANDIDATE_TABLES + _PRIVACY_TABLES + _DECISION_INBOX_TABLES),),
+                    (
+                        list(
+                            _CANDIDATE_TABLES
+                            + _PRIVACY_TABLES
+                            + _DECISION_INBOX_TABLES
+                            + _ORGANIZATION_CANDIDATE_TABLES
+                        ),
+                    ),
                 )
                 policies = {(row[0], row[1]): row for row in cur.fetchall()}
                 for table in _CANDIDATE_TABLES:
@@ -980,6 +1097,25 @@ def bounded_readiness_check(
                     for table, policy_name in policies
                 ):
                     reasons.append("decision_inbox_policy_unexpected")
+                for table in _ORGANIZATION_CANDIDATE_TABLES:
+                    tenant_policy = policies.get((table, f"tenant_isolation_{table}"))
+                    admin_policy = policies.get((table, f"admin_all_{table}"))
+                    if check_organization_candidates and (
+                        tenant_policy is None
+                        or tenant_policy[2] != "PERMISSIVE"
+                        or tenant_policy[3].lower() != "{public}"
+                        or tenant_policy[4] != "ALL"
+                        or not _organization_candidate_tenant_policy_expression_ok(tenant_policy[5])
+                        or not _organization_candidate_tenant_policy_expression_ok(tenant_policy[6])
+                        or admin_policy is None
+                        or admin_policy[2] != "PERMISSIVE"
+                        or "admin_role" not in admin_policy[3].lower()
+                        or admin_policy[4] != "ALL"
+                        or _normalize_sql_definition(admin_policy[5]) != "true"
+                        or _normalize_sql_definition(admin_policy[6]) != "true"
+                    ):
+                        reasons.append("organization_candidate_policy_unexpected")
+                        break
 
                 _check_budget(started_at)
                 # Statement 7: runtime-role escalation posture.
@@ -1218,6 +1354,20 @@ def bounded_readiness_check(
                     JOIN pg_namespace n ON n.oid=c.relnamespace
                     WHERE n.nspname='public' AND c.relname=ANY(%s)
                     UNION ALL
+                    SELECT 'organization_candidate_privilege'::text, c.relname::text,
+                           jsonb_build_object(
+                               'select', has_table_privilege(current_user, c.oid, 'SELECT'),
+                               'insert', has_table_privilege(current_user, c.oid, 'INSERT'),
+                               'update', has_table_privilege(current_user, c.oid, 'UPDATE'),
+                               'delete', has_table_privilege(current_user, c.oid, 'DELETE'),
+                               'truncate', has_table_privilege(current_user, c.oid, 'TRUNCATE'),
+                               'references', has_table_privilege(current_user, c.oid, 'REFERENCES'),
+                               'trigger', has_table_privilege(current_user, c.oid, 'TRIGGER')
+                           )
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='public' AND c.relname=ANY(%s)
+                    UNION ALL
                     SELECT 'privacy_key_version'::text, key_version::text, '{}'::jsonb
                     FROM candidate_privacy_token_key_versions()
                     UNION ALL
@@ -1236,11 +1386,13 @@ def bounded_readiness_check(
                             | _PRIVACY_INDEXES
                             | _DECISION_INBOX_INDEXES
                             | _SOURCED_CANDIDATE_INDEXES
+                            | _ORGANIZATION_CANDIDATE_INDEXES
                         ),
                         list(
                             _REQUIRED_FUNCTIONS
                             | _PRIVACY_FUNCTIONS
                             | {_SOURCED_CANDIDATE_APPEND_ONLY_FUNCTION}
+                            | {_ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION}
                         ),
                         list(
                             _REQUIRED_CONSTRAINTS
@@ -1254,13 +1406,21 @@ def bounded_readiness_check(
                                 for names in _SOURCED_CANDIDATE_CONSTRAINTS_BY_TABLE.values()
                                 for constraint in names
                             }
+                            | {
+                                constraint
+                                for names in _ORGANIZATION_CANDIDATE_CONSTRAINTS_BY_TABLE.values()
+                                for constraint in names
+                            }
                         ),
                         [trigger[1] for trigger in _SUPPRESSION_TRIGGERS]
                         + [trigger[1] for trigger in _PRIVACY_TRIGGERS]
-                        + [trigger[1] for trigger in _SOURCED_CANDIDATE_TRIGGERS],
+                        + [trigger[1] for trigger in _SOURCED_CANDIDATE_TRIGGERS]
+                        + [trigger[1] for trigger in _ORGANIZATION_CANDIDATE_TRIGGERS],
+                        # No sequence is introduced by migration 026.
                         [_SUPPRESSION_SEQUENCE, _PRIVACY_SEQUENCE],
                         list(_PUBLIC_COLUMNS),
                         list(_SOURCED_CANDIDATE_TABLES),
+                        list(_ORGANIZATION_CANDIDATE_TABLES),
                         list(_PRIVACY_FUNCTION_ARGUMENTS),
                     ),
                 )
@@ -1279,6 +1439,8 @@ def bounded_readiness_check(
                     reasons.append("decision_inbox_index_missing")
                 if _SOURCED_CANDIDATE_INDEXES - set(indexes):
                     reasons.append("sourced_candidate_index_missing")
+                if check_organization_candidates and _ORGANIZATION_CANDIDATE_INDEXES - set(indexes):
+                    reasons.append("organization_candidate_index_missing")
                 functions = objects.get("function", {})
                 if _REQUIRED_FUNCTIONS - set(functions):
                     reasons.append("required_function_missing")
@@ -1332,6 +1494,25 @@ def bounded_readiness_check(
                     or (not allow_owner and bool(sourced_append_only.get("owned_by_runtime")))
                 ):
                     reasons.append("sourced_candidate_append_only_function_unexpected")
+                organization_candidate_append_only = functions.get(
+                    _ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION
+                )
+                if check_organization_candidates and (
+                    organization_candidate_append_only is None
+                    or int(organization_candidate_append_only.get("arguments", -1)) != 0
+                    or not bool(organization_candidate_append_only.get("returns_trigger"))
+                    or organization_candidate_append_only.get("language") != "plpgsql"
+                    or bool(organization_candidate_append_only.get("security_definer"))
+                    or _normalize_sql_definition(
+                        str(organization_candidate_append_only.get("source", ""))
+                    )
+                    != _ORGANIZATION_CANDIDATE_APPEND_ONLY_FUNCTION_BODY
+                    or (
+                        not allow_owner
+                        and bool(organization_candidate_append_only.get("owned_by_runtime"))
+                    )
+                ):
+                    reasons.append("organization_candidate_append_only_function_unexpected")
 
                 constraints = objects.get("constraint", {})
                 expected_constraint_keys = {
@@ -1357,6 +1538,15 @@ def bounded_readiness_check(
                 }
                 if sourced_constraint_keys - set(constraints):
                     reasons.append("sourced_candidate_constraint_missing")
+                organization_candidate_constraint_keys = {
+                    f"{table}.{constraint}"
+                    for table, names in _ORGANIZATION_CANDIDATE_CONSTRAINTS_BY_TABLE.items()
+                    for constraint in names
+                }
+                if check_organization_candidates and organization_candidate_constraint_keys - set(
+                    constraints
+                ):
+                    reasons.append("organization_candidate_constraint_missing")
                 for (table, name), expected_definition in _EXPECTED_CHECK_DEFINITIONS.items():
                     constraint = constraints.get(f"{table}.{name}")
                     if constraint is not None and (
@@ -1422,6 +1612,21 @@ def bounded_readiness_check(
                         or trigger.get("enabled") not in {"O", "A"}
                     ):
                         reasons.append("sourced_candidate_trigger_unexpected")
+                        break
+                for (
+                    table,
+                    trigger_name,
+                    trigger_function_name,
+                    trigger_type,
+                ) in _ORGANIZATION_CANDIDATE_TRIGGERS:
+                    trigger = triggers.get(f"{table}.{trigger_name}")
+                    if check_organization_candidates and (
+                        trigger is None
+                        or trigger.get("function") != trigger_function_name
+                        or int(trigger.get("type", -1)) != trigger_type
+                        or trigger.get("enabled") not in {"O", "A"}
+                    ):
+                        reasons.append("organization_candidate_trigger_unexpected")
                         break
 
                 sequence = objects.get("sequence", {}).get(_SUPPRESSION_SEQUENCE)
@@ -1507,6 +1712,28 @@ def bounded_readiness_check(
                     for details in sourced_privileges.values()
                 ):
                     reasons.append("sourced_candidate_privileges_unsafe")
+                organization_candidate_privileges = objects.get(
+                    "organization_candidate_privilege", {}
+                )
+                if check_organization_candidates and (
+                    set(_ORGANIZATION_CANDIDATE_TABLES) - set(organization_candidate_privileges)
+                    or any(
+                        not bool(details.get("select"))
+                        or not bool(details.get("insert"))
+                        or any(
+                            bool(details.get(privilege))
+                            for privilege in (
+                                "update",
+                                "delete",
+                                "truncate",
+                                "references",
+                                "trigger",
+                            )
+                        )
+                        for details in organization_candidate_privileges.values()
+                    )
+                ):
+                    reasons.append("organization_candidate_privileges_unsafe")
                 stored_privacy_versions = {
                     int(version) for version in objects.get("privacy_key_version", {})
                 }

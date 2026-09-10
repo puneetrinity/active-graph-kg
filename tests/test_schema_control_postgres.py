@@ -111,9 +111,9 @@ def _copy_with_tail_migration(
     manifest = copied / "activekg/common/migration_manifest.py"
     content = manifest.read_text()
     content = content.replace(
-        '    "025_approved_provider_candidate_ingest.sql",\n)',
-        f'    "025_approved_provider_candidate_ingest.sql",\n    "{migration_name}",\n)',
-    ).replace("len(MIGRATIONS) != 25", "len(MIGRATIONS) != 26")
+        '    "026_organization_private_candidate_intake.sql",\n)',
+        f'    "026_organization_private_candidate_intake.sql",\n    "{migration_name}",\n)',
+    ).replace("len(MIGRATIONS) != 26", "len(MIGRATIONS) != 27")
     manifest.write_text(content)
 
     runner = copied / "scripts/init_railway_db.py"
@@ -139,8 +139,9 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
     manifest.write_text(
         manifest.read_text()
         .replace('    "025_approved_provider_candidate_ingest.sql",\n', "")
-        .replace("len(MIGRATIONS) != 25", "len(MIGRATIONS) != 24")
-        .replace("contain 25 unique ordered entries", "contain 24 unique ordered entries")
+        .replace('    "026_organization_private_candidate_intake.sql",\n', "")
+        .replace("len(MIGRATIONS) != 26", "len(MIGRATIONS) != 24")
+        .replace("contain 26 unique ordered entries", "contain 24 unique ordered entries")
     )
     runner = copied / "scripts/init_railway_db.py"
     runner.write_text(
@@ -151,6 +152,14 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         )
         .replace(
             "                _assert_sourced_candidate_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+        .replace(
+            "                _harden_organization_candidate_runtime_privileges(cur, runtime_role)\n",
+            "",
+        )
+        .replace(
+            "                _assert_organization_candidate_runtime_privileges(cur, runtime_role)\n",
             "",
         )
     )
@@ -300,7 +309,7 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
             cur.execute("SELECT to_regclass('public.idx_global_candidates_embed_version')")
             assert cur.fetchone()[0] is None
             cur.execute("SELECT count(*) FROM schema_migrations")
-            assert cur.fetchone()[0] == 25
+            assert cur.fetchone()[0] == 26
     finally:
         _drop_database(name)
 
@@ -467,7 +476,7 @@ def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
         _drop_database(name)
 
 
-def test_existing_024_target_upgrades_to_025_without_product_mutation(
+def test_existing_024_target_upgrades_through_026_without_product_mutation(
     tmp_path: Path,
 ) -> None:
     name = "memory_schema_source_identity_upgrade_test"
@@ -509,7 +518,7 @@ def test_existing_024_target_upgrades_to_025_without_product_mutation(
             cur.execute("SELECT count(*), min(public_profile->>'headline') FROM global_candidates")
             assert cur.fetchone() == before_candidates
             cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
-            assert cur.fetchone() == (25, 0)
+            assert cur.fetchone() == (26, 0)
             cur.execute(
                 "SELECT to_regclass('public.global_candidate_source_identities'), "
                 "to_regclass('public.global_candidate_source_observations'), "

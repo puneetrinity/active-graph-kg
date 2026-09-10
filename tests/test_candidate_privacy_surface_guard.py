@@ -154,3 +154,14 @@ def test_guard_rejects_approved_provider_route_authority_mutation() -> None:
         with pytest.raises(guard.GuardError, match="route authority"):
             guard.validate()
     guard.validate()
+
+
+def test_guard_rejects_private_intake_privacy_authority_mutation() -> None:
+    with _temporary_mutation(
+        "activekg/api/organization_candidates.py",
+        b"require_allowed(decision, global_use=False)",
+        b"require_allowed(decision, global_use=True)",
+    ):
+        with pytest.raises(guard.GuardError, match="enforcement anchor"):
+            guard.validate()
+    guard.validate()
