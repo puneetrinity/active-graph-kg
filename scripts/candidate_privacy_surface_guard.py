@@ -35,6 +35,9 @@ GOVERNED_TABLES = (
     "organization_candidate_references",
     "organization_candidate_resume_evidence",
     "organization_candidate_ingest_receipts",
+    "candidate_consent_state",
+    "candidate_consent_sources",
+    "candidate_consent_receipts",
 )
 GOVERNED_CALLS = (
     "CandidateRepository",
@@ -196,6 +199,13 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
         "require_organization_candidate_writer",
         "_store(",
     ),
+    "privacy-candidate-consent": (
+        "require_consent_writer",
+        "_require_global(cur, tokens",
+        "candidate_privacy_match(",
+        "global_candidates",
+        "organization_candidate_resume_evidence",
+    ),
     "privacy-surface-dependency": (
         "candidate_privacy_",
         "_require_candidate_ingest_allowed",
@@ -293,6 +303,26 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
         module_source = (ROOT / reference.file).read_text(encoding="utf-8")
         if "require_allowed(decision, global_use=False)" not in module_source:
             raise GuardError("organization-private intake enforcement anchor is incomplete")
+    if row["test_id"] == "privacy-candidate-consent":
+        module_source = (ROOT / reference.file).read_text(encoding="utf-8")
+        if "require_allowed(decision, global_use=True)" not in module_source:
+            raise GuardError("candidate consent global-use authority is incomplete")
+        if reference.symbol == "_store":
+            required = (
+                "_require_global(cur, tokens, None)",
+                "_require_global(cur, tokens, global_id)",
+                "INSERT INTO global_candidates",
+                "INSERT INTO candidate_consent_sources",
+            )
+            if any(token not in source for token in required) or max(
+                source.index(token) for token in required[:2]
+            ) > min(source.index(token) for token in required[2:]):
+                raise GuardError("candidate consent privacy fence moved after persistence")
+        if (
+            reference.symbol == "ingest_candidate_consent"
+            and "Depends(require_consent_writer)" not in source
+        ):
+            raise GuardError("candidate consent route authority is incomplete")
     if reference.key.endswith("embedding/worker.py::EmbeddingWorker._process_job"):
         if source.count("self.privacy_repository.node_decision") < 3:
             raise GuardError("embedding worker stale-job privacy recheck is missing")

@@ -741,6 +741,118 @@ def _migration_checksums_match(applied: Mapping[str, str | None], started_at: fl
     return True
 
 
+CANDIDATE_CONSENT_TABLES = (
+    "candidate_consent_state",
+    "candidate_consent_sources",
+    "candidate_consent_receipts",
+)
+CANDIDATE_CONSENT_UPDATE_COLUMNS = (
+    "global_candidate_id",
+    "highest_version",
+    "last_action",
+    "effective_version",
+    "effective_action",
+    "active_source_id",
+    "effective_at",
+    "updated_at",
+)
+
+# Used by the real release provisioner and the API's existing single catalog census.
+# Only this source-owned role placeholder is substituted; operator names remain query parameters.
+CANDIDATE_CONSENT_CATALOG_SQL = """
+WITH consent_role AS (SELECT __CONSENT_ROLE__::text AS name)
+SELECT (
+  SELECT count(*)=3 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='public' AND c.relname IN ('candidate_consent_state','candidate_consent_sources','candidate_consent_receipts')
+    AND c.relrowsecurity AND c.relforcerowsecurity
+    AND has_table_privilege((SELECT name FROM consent_role),c.oid,'SELECT')
+    AND has_table_privilege((SELECT name FROM consent_role),c.oid,'INSERT')
+    AND NOT has_table_privilege((SELECT name FROM consent_role),c.oid,'UPDATE')
+    AND NOT has_table_privilege((SELECT name FROM consent_role),c.oid,'DELETE')
+    AND NOT has_table_privilege((SELECT name FROM consent_role),c.oid,'TRUNCATE')
+    AND NOT has_table_privilege((SELECT name FROM consent_role),c.oid,'REFERENCES')
+    AND NOT has_table_privilege((SELECT name FROM consent_role),c.oid,'TRIGGER')
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(c.relacl) acl WHERE acl.grantee=0)
+    AND NOT EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+      AND has_column_privilege((SELECT name FROM consent_role),c.oid,a.attnum,'UPDATE') IS DISTINCT FROM
+        (c.relname='candidate_consent_state' AND a.attname IN ('global_candidate_id','highest_version','last_action',
+          'effective_version','effective_action','active_source_id','effective_at','updated_at')))
+    AND (SELECT count(*)=1 AND bool_and(p.polcmd='*' AND p.polpermissive AND p.polroles=ARRAY[0::oid]
+      AND regexp_replace(pg_get_expr(p.polqual,p.polrelid),'[[:space:]]','','g')=
+        '(tenant_id=current_setting(''app.current_tenant_id''::text,true))'
+      AND regexp_replace(pg_get_expr(p.polwithcheck,p.polrelid),'[[:space:]]','','g')=
+        '(tenant_id=current_setting(''app.current_tenant_id''::text,true))')
+      FROM pg_policy p WHERE p.polrelid=c.oid)
+) AND (
+  SELECT count(*)=5 FROM (VALUES
+    ('candidate_consent_state','consent_state_binding','candidate_consent_binding_immutable',19),
+    ('candidate_consent_sources','consent_sources_no_mutation','candidate_consent_append_only',27),
+    ('candidate_consent_sources','consent_sources_no_truncate','candidate_consent_append_only',34),
+    ('candidate_consent_receipts','consent_receipts_no_mutation','candidate_consent_append_only',27),
+    ('candidate_consent_receipts','consent_receipts_no_truncate','candidate_consent_append_only',34)
+  ) expected(relation,trigger_name,function_name,trigger_type)
+  JOIN pg_trigger t ON t.tgrelid=to_regclass('public.'||expected.relation) AND t.tgname=expected.trigger_name
+  JOIN pg_proc p ON p.oid=t.tgfoid AND p.proname=expected.function_name
+  JOIN pg_namespace n ON n.oid=p.pronamespace AND n.nspname='public'
+  WHERE NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=expected.trigger_type
+    AND p.pronargs=0 AND p.prorettype='trigger'::regtype AND NOT p.prosecdef
+    AND p.proconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+    AND (p.proname<>'candidate_consent_append_only' OR p.proconfig @> ARRAY['row_security=off']::text[])
+    AND NOT has_function_privilege((SELECT name FROM consent_role),p.oid,'EXECUTE')
+) AND (
+  SELECT count(*)=44 FROM (VALUES
+    ('candidate_consent_receipts','candidate_consent_receipts_action_check','c','f8baec0ffc2899951c35ca936fe97813'),
+    ('candidate_consent_receipts','candidate_consent_receipts_check','c','77de686c544c483941670e4b4fa0d712'),
+    ('candidate_consent_receipts','candidate_consent_receipts_check1','c','41414f887f2a18003b0e51a848f29201'),
+    ('candidate_consent_receipts','candidate_consent_receipts_command_digest_check','c','33104cd83ac3c89eb46b2ada38dbc5bb'),
+    ('candidate_consent_receipts','candidate_consent_receipts_effective_action_check','c','c4097c1792801089189293ca8213f836'),
+    ('candidate_consent_receipts','candidate_consent_receipts_effective_version_check','c','db178b81e60dfafe261180e651906293'),
+    ('candidate_consent_receipts','candidate_consent_receipts_global_candidate_id_fkey','f','0fef2c0b3373b84134f3716e334547e0'),
+    ('candidate_consent_receipts','candidate_consent_receipts_idempotency_key_check','c','4e6f49a4abb058a5eb136e4de2214b3b'),
+    ('candidate_consent_receipts','candidate_consent_receipts_idempotency_key_key','u','1edb563e32a4bf1046f01b8e99e8e3bd'),
+    ('candidate_consent_receipts','candidate_consent_receipts_outcome_check','c','b2c25fa2f05af59824ea668079aa8f6f'),
+    ('candidate_consent_receipts','candidate_consent_receipts_pkey','p','1e909a41847e2371a95110af439aa15e'),
+    ('candidate_consent_receipts','candidate_consent_receipts_tenant_id_subject_id_fkey','f','fb45fd42d273695a05dbcf1b70173c09'),
+    ('candidate_consent_receipts','candidate_consent_receipts_tenant_id_subject_id_source_id_fkey','f','97f4402e8ebd5a0853f3cd0c514c3d25'),
+    ('candidate_consent_receipts','candidate_consent_receipts_tenant_id_subject_id_version_key','u','a2e05bda1d2f0a439bb1ea16d1707fdb'),
+    ('candidate_consent_receipts','candidate_consent_receipts_verified_actor_id_check','c','505fcb32315f40235005615b5ba44b90'),
+    ('candidate_consent_receipts','candidate_consent_receipts_verified_issuer_check','c','5442308800c6314cf6e9beb22d5514f0'),
+    ('candidate_consent_receipts','candidate_consent_receipts_version_check','c','72175895b5c5708506e5936cb1053585'),
+    ('candidate_consent_sources','candidate_consent_sources_check','c','77de686c544c483941670e4b4fa0d712'),
+    ('candidate_consent_sources','candidate_consent_sources_copy_sha256_check','c','7868e2e17dd2299588997beeb4a9b46b'),
+    ('candidate_consent_sources','candidate_consent_sources_copy_version_check','c','e1fb59b2d3de11f2b37240e7639c3abf'),
+    ('candidate_consent_sources','candidate_consent_sources_global_candidate_id_fkey','f','0fef2c0b3373b84134f3716e334547e0'),
+    ('candidate_consent_sources','candidate_consent_sources_pkey','p','fa7c89ca3643d31a04934ae436c5f197'),
+    ('candidate_consent_sources','candidate_consent_sources_profile_sha256_check','c','b64ffeb0bec2311b0243eb3c3aaa38eb'),
+    ('candidate_consent_sources','candidate_consent_sources_purpose_check','c','4adae87552136aa5b4ddd45e8453d0fb'),
+    ('candidate_consent_sources','candidate_consent_sources_purpose_version_check','c','10ae93a6dc0cdd5c761e3db41a0e4d25'),
+    ('candidate_consent_sources','candidate_consent_sources_resume_sha256_check','c','f0c8293196e6150ca589ceec72a10333'),
+    ('candidate_consent_sources','candidate_consent_sources_source_version_check','c','788b8c6e78d44e34af3f92e22f2ca164'),
+    ('candidate_consent_sources','candidate_consent_sources_tenant_id_subject_id_fkey','f','fb45fd42d273695a05dbcf1b70173c09'),
+    ('candidate_consent_sources','candidate_consent_sources_tenant_id_subject_id_source_id_key','u','f25d79b17c2779702d67f868a7430073'),
+    ('candidate_consent_sources','candidate_consent_sources_tenant_id_subject_id_source_versi_key','u','a5a8123e0b1afd70a4d48d4af1ee078f'),
+    ('candidate_consent_sources','consent_source_profile_shape','c','fd9b8acc0a140c608516508821cb2d45'),
+    ('candidate_consent_sources','consent_source_resume_shape','c','414a5d751f852275893add948f5f690e'),
+    ('candidate_consent_state','candidate_consent_state_check','c','77de686c544c483941670e4b4fa0d712'),
+    ('candidate_consent_state','candidate_consent_state_check1','c','873ed466b93e4f76533803ce6a32f0f4'),
+    ('candidate_consent_state','candidate_consent_state_check2','c','5b45731dceb819340c8331c7b9533ddf'),
+    ('candidate_consent_state','candidate_consent_state_check3','c','4c311dad7447ea221a3a6ce3f7b81425'),
+    ('candidate_consent_state','candidate_consent_state_effective_action_check','c','c4097c1792801089189293ca8213f836'),
+    ('candidate_consent_state','candidate_consent_state_global_candidate_id_fkey','f','0fef2c0b3373b84134f3716e334547e0'),
+    ('candidate_consent_state','candidate_consent_state_highest_version_check','c','8eea671cce1902bb147a2edd595fa7d8'),
+    ('candidate_consent_state','candidate_consent_state_last_action_check','c','72abafd120bad43e7ced792c240db677'),
+    ('candidate_consent_state','candidate_consent_state_pkey','p','ed6a3b6ca977ba2af4edc138d1371ce3'),
+    ('candidate_consent_state','candidate_consent_state_tenant_id_key','u','5014d6ea211895d80fc06566189444a8'),
+    ('candidate_consent_state','candidate_consent_state_tenant_id_subject_id_key','u','e3056d9812dd366333f2524d1ba35e0c'),
+    ('candidate_consent_state','consent_active_source_fk','f','0658c772a722599db92541ebdd19ed56')
+  ) expected(relation,name,type,definition_hash)
+  JOIN pg_constraint c ON c.conrelid=to_regclass('public.'||expected.relation) AND c.conname=expected.name
+  WHERE c.contype::text=expected.type AND c.convalidated AND NOT c.condeferrable
+    AND md5(pg_get_constraintdef(c.oid))=expected.definition_hash
+) AS ready
+"""
+
+
 def bounded_readiness_check(
     candidate_repository: Any,
     *,
@@ -751,6 +863,7 @@ def bounded_readiness_check(
     privacy_key_versions: set[int] | None = None,
     decision_inbox_enabled: bool | None = None,
     organization_candidate_intake_enabled: bool | None = None,
+    candidate_consent_intake_enabled: bool | None = None,
     sourced_candidate_ingest_mode: str | None = None,
 ) -> ReadinessResult:
     """Run a fixed, read-only readiness census with at most eight SQL statements."""
@@ -770,6 +883,8 @@ def bounded_readiness_check(
     check_organization_candidates = organization_candidate_intake_enabled is not None
     if organization_candidate_intake_enabled is False:
         reasons.append("organization_candidate_intake_disabled")
+    if candidate_consent_intake_enabled is False:
+        reasons.append("candidate_consent_intake_disabled")
     if sourced_candidate_ingest_mode is not None and sourced_candidate_ingest_mode not in {
         "dual",
         "canonical_only",
@@ -1379,7 +1494,10 @@ def bounded_readiness_check(
                     JOIN pg_namespace n ON n.oid = p.pronamespace
                     WHERE n.nspname = 'public'
                       AND p.proname = ANY(%s)
-                    """,
+                    """
+                    + " UNION ALL SELECT 'candidate_consent_catalog','authority',jsonb_build_object('ready',consent.ready) FROM ("
+                    + CANDIDATE_CONSENT_CATALOG_SQL.replace("__CONSENT_ROLE__", "current_user")
+                    + ") consent",
                     (
                         list(
                             _REQUIRED_INDEXES
@@ -1734,6 +1852,10 @@ def bounded_readiness_check(
                     )
                 ):
                     reasons.append("organization_candidate_privileges_unsafe")
+                if candidate_consent_intake_enabled is not None and not objects.get(
+                    "candidate_consent_catalog", {}
+                ).get("authority", {}).get("ready", False):
+                    reasons.append("candidate_consent_authority_unsafe")
                 stored_privacy_versions = {
                     int(version) for version in objects.get("privacy_key_version", {})
                 }

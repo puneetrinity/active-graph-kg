@@ -43,6 +43,12 @@ from activekg.api.auth import (
     require_scope,
     verification_key_problems,
 )
+from activekg.api.candidate_consent import (
+    candidate_consent_intake_enabled,
+)
+from activekg.api.candidate_consent import (
+    router as candidate_consent_router,
+)
 from activekg.api.candidate_privacy import (
     router as candidate_privacy_router,
 )
@@ -392,6 +398,7 @@ app.include_router(global_memory_router)
 app.include_router(candidate_privacy_router)
 app.include_router(organization_decision_events_router)
 app.include_router(organization_candidates_router)
+app.include_router(candidate_consent_router)
 app.include_router(sourced_candidates_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
@@ -633,6 +640,7 @@ def readyz(
                 privacy_key_versions=candidate_privacy_key_versions_for_readiness(),
                 decision_inbox_enabled=decision_inbox_enabled(),
                 organization_candidate_intake_enabled=(organization_candidate_intake_enabled()),
+                candidate_consent_intake_enabled=candidate_consent_intake_enabled(),
                 sourced_candidate_ingest_mode=os.getenv(
                     "SOURCED_CANDIDATE_INGEST_MODE", "off"
                 ).strip(),

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -49,6 +51,33 @@ def validate(root: Path = ROOT) -> None:
     receiver = _read(root, "activekg/api/organization_candidates.py")
     main = _read(root, "activekg/api/main.py")
     manifest = _read(root, "activekg/common/migration_manifest.py")
+    # This guard owns its historical migration, not the current tail count.
+    # The full ordered authority must still agree with the caller manifest.
+    try:
+        assignments = (
+            node
+            for node in ast.parse(manifest).body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "MIGRATIONS"
+        )
+        ordered = list(ast.literal_eval(next(assignments).value))
+        declared = json.loads(_read(root, "scripts/schema_control_callers.json"))[
+            "migration_manifest"
+        ]
+        required = [
+            "023_candidate_privacy_directives.sql",
+            "024_organization_decision_event_inbox.sql",
+            "025_approved_provider_candidate_ingest.sql",
+            "026_organization_private_candidate_intake.sql",
+        ]
+        if ordered != declared or len(set(ordered)) != len(ordered):
+            raise ValueError("manifest inconsistency")
+        positions = [ordered.index(name) for name in required]
+        if positions != sorted(positions):
+            raise ValueError("manifest order")
+    except (SyntaxError, ValueError, TypeError, KeyError, StopIteration) as exc:
+        raise GuardError("migration manifest is incomplete or inconsistent") from exc
 
     _require(
         migration,
@@ -118,10 +147,7 @@ def validate(root: Path = ROOT) -> None:
     )
     _require(
         manifest,
-        (
-            '"026_organization_private_candidate_intake.sql"',
-            "len(MIGRATIONS) != 26",
-        ),
+        ('"026_organization_private_candidate_intake.sql"',),
         "private intake migration manifest is incomplete",
     )
 

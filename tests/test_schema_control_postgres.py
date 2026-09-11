@@ -11,6 +11,8 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from activekg.common.migration_manifest import MIGRATIONS
+
 OWNER_DSN = os.getenv("ACTIVEKG_SCHEMA_CONTROL_TEST_OWNER_DSN")
 RUNTIME_DSN = os.getenv("ACTIVEKG_SCHEMA_CONTROL_TEST_RUNTIME_DSN")
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,9 +113,9 @@ def _copy_with_tail_migration(
     manifest = copied / "activekg/common/migration_manifest.py"
     content = manifest.read_text()
     content = content.replace(
-        '    "026_organization_private_candidate_intake.sql",\n)',
-        f'    "026_organization_private_candidate_intake.sql",\n    "{migration_name}",\n)',
-    ).replace("len(MIGRATIONS) != 26", "len(MIGRATIONS) != 27")
+        f'    "{MIGRATIONS[-1]}",\n)',
+        f'    "{MIGRATIONS[-1]}",\n    "{migration_name}",\n)',
+    ).replace(f"len(MIGRATIONS) != {len(MIGRATIONS)}", f"len(MIGRATIONS) != {len(MIGRATIONS) + 1}")
     manifest.write_text(content)
 
     runner = copied / "scripts/init_railway_db.py"
@@ -140,8 +142,11 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         manifest.read_text()
         .replace('    "025_approved_provider_candidate_ingest.sql",\n', "")
         .replace('    "026_organization_private_candidate_intake.sql",\n', "")
-        .replace("len(MIGRATIONS) != 26", "len(MIGRATIONS) != 24")
-        .replace("contain 26 unique ordered entries", "contain 24 unique ordered entries")
+        .replace('    "027_candidate_consent.sql",\n', "")
+        .replace(f"len(MIGRATIONS) != {len(MIGRATIONS)}", "len(MIGRATIONS) != 24")
+        .replace(
+            f"contain {len(MIGRATIONS)} unique ordered entries", "contain 24 unique ordered entries"
+        )
     )
     runner = copied / "scripts/init_railway_db.py"
     runner.write_text(
@@ -161,6 +166,12 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         .replace(
             "                _assert_organization_candidate_runtime_privileges(cur, runtime_role)\n",
             "",
+        )
+        .replace(
+            "                _harden_candidate_consent_runtime_privileges(cur, runtime_role)\n", ""
+        )
+        .replace(
+            "                _assert_candidate_consent_runtime_privileges(cur, runtime_role)\n", ""
         )
     )
     return copied
@@ -309,7 +320,7 @@ def test_partial_existing_target_refuses_adoption_without_control_write() -> Non
             cur.execute("SELECT to_regclass('public.idx_global_candidates_embed_version')")
             assert cur.fetchone()[0] is None
             cur.execute("SELECT count(*) FROM schema_migrations")
-            assert cur.fetchone()[0] == 26
+            assert cur.fetchone()[0] == len(MIGRATIONS)
     finally:
         _drop_database(name)
 
@@ -476,7 +487,7 @@ def test_existing_23_migration_target_upgrades_to_024_without_product_mutation(
         _drop_database(name)
 
 
-def test_existing_024_target_upgrades_through_026_without_product_mutation(
+def test_existing_024_target_upgrades_through_current_without_product_mutation(
     tmp_path: Path,
 ) -> None:
     name = "memory_schema_source_identity_upgrade_test"
@@ -518,7 +529,7 @@ def test_existing_024_target_upgrades_through_026_without_product_mutation(
             cur.execute("SELECT count(*), min(public_profile->>'headline') FROM global_candidates")
             assert cur.fetchone() == before_candidates
             cur.execute("SELECT count(*), count(*) FILTER (WHERE baselined) FROM schema_migrations")
-            assert cur.fetchone() == (26, 0)
+            assert cur.fetchone() == (len(MIGRATIONS), 0)
             cur.execute(
                 "SELECT to_regclass('public.global_candidate_source_identities'), "
                 "to_regclass('public.global_candidate_source_observations'), "
@@ -626,7 +637,7 @@ def test_failed_tail_release_blocks_readiness_and_a_corrected_release_recovers(
 ) -> None:
     name = "memory_schema_failure_test"
     dsn = _clone_database(name)
-    migration_name = "026_schema_control_failure_test.sql"
+    migration_name = "028_schema_control_failure_test.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,
@@ -711,7 +722,7 @@ def test_two_concurrent_tail_releases_apply_the_new_migration_exactly_once(
 ) -> None:
     name = "memory_schema_tail_test"
     dsn = _clone_database(name)
-    migration_name = "026_schema_control_test_tail.sql"
+    migration_name = "028_schema_control_test_tail.sql"
     copied = _copy_with_tail_migration(
         tmp_path,
         migration_name,

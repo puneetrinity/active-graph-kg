@@ -15,6 +15,7 @@ FILES = (
     "activekg/api/main.py",
     "activekg/api/global_memory.py",
     "activekg/common/migration_manifest.py",
+    "scripts/schema_control_callers.json",
 )
 
 
@@ -74,8 +75,8 @@ def _copy_root(tmp_path: Path) -> Path:
         ),
         (
             "activekg/common/migration_manifest.py",
-            "len(MIGRATIONS) != 26",
-            "len(MIGRATIONS) != 25",
+            '    "026_organization_private_candidate_intake.sql",',
+            '    "026_removed_authority.sql",',
             "manifest",
         ),
         (
