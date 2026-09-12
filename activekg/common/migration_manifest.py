@@ -46,7 +46,8 @@ MIGRATIONS: tuple[str, ...] = (
     "024_organization_decision_event_inbox.sql",
     "025_approved_provider_candidate_ingest.sql",
     "026_organization_private_candidate_intake.sql",
+    "027_candidate_consent.sql",
 )
 
-if len(MIGRATIONS) != 26 or len(set(MIGRATIONS)) != len(MIGRATIONS):
-    raise RuntimeError("Memory migration manifest must contain 26 unique ordered entries")
+if len(MIGRATIONS) != 27 or len(set(MIGRATIONS)) != len(MIGRATIONS):
+    raise RuntimeError("Memory migration manifest must contain 27 unique ordered entries")

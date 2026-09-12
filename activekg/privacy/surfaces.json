@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 129,
+    "discovered_rows": 134,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -2470,6 +2470,103 @@
       "candidate_scope": "dependency",
       "actions": [],
       "reason": "Semantic trigger engine remains quarantined and unconstructed; its repository sinks are independently fenced."
+    },
+    {
+      "file": "activekg/api/candidate_consent.py",
+      "symbol": "_check_resume",
+      "tables": [
+        "organization_candidate_ingest_receipts",
+        "organization_candidate_references",
+        "organization_candidate_resume_evidence"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "approved_resume",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "One primary-key-bound resume/receipt existence lookup under temporary org context, restored to candidate context; no private row returned.",
+      "test_id": "privacy-candidate-consent",
+      "reason": "One primary-key-bound resume/receipt existence lookup under temporary org context, restored to candidate context; no private row returned."
+    },
+    {
+      "file": "activekg/api/candidate_consent.py",
+      "symbol": "_resolve_identity",
+      "tables": [
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "canonical_identity",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Verified-email-only binding under subject/token/email locks; social-only or contradictory anchors park for review; existing immutable binding is not reassigned.",
+      "test_id": "privacy-candidate-consent",
+      "reason": "Verified-email-only binding under subject/token/email locks; social-only or contradictory anchors park for review; existing immutable binding is not reassigned."
+    },
+    {
+      "file": "activekg/api/candidate_consent.py",
+      "symbol": "_store",
+      "tables": [
+        "candidate_consent_receipts",
+        "candidate_consent_sources",
+        "candidate_consent_state",
+        "global_candidates"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "candidate_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service and candidate-tenant authority; grant composes both frozen global-use privacy checks before source/shell persistence; withdrawal only removes approved-source authority; no indexing.",
+      "test_id": "privacy-candidate-consent",
+      "reason": "Exact service and candidate-tenant authority; grant composes both frozen global-use privacy checks before source/shell persistence; withdrawal only removes approved-source authority; no indexing."
+    },
+    {
+      "file": "activekg/api/candidate_consent.py",
+      "symbol": "ingest_candidate_consent",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /candidate-consent/events"
+      ],
+      "classification": "fenced",
+      "direction": "write",
+      "candidate_scope": "candidate_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact service JWT dependency, bounded strict body, candidate-tenant binding, and transactional receiver; never a public profile route.",
+      "test_id": "privacy-candidate-consent",
+      "reason": "Exact service JWT dependency, bounded strict body, candidate-tenant binding, and transactional receiver; never a public profile route."
+    },
+    {
+      "file": "activekg/api/operational.py",
+      "symbol": "<module>",
+      "tables": [
+        "candidate_consent_receipts",
+        "candidate_consent_sources",
+        "candidate_consent_state"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "schema_catalog",
+      "actions": [],
+      "reason": "SQL constant checks relation/policy/ACL metadata only, not candidate values; existing migration-and-health-catalog exclusion applies."
     }
   ]
 }

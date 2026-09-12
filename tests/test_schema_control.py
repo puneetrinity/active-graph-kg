@@ -31,11 +31,58 @@ CONTROL_ENV = {
 }
 
 
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        (False, False, False, False),
+        (True, False, False, False),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, False, False, True),
+        None,
+    ],
+)
+def test_a2_existing_runtime_attribute_reconciliation(monkeypatch, attributes) -> None:
+    monkeypatch.setenv("ACTIVEKG_RUNTIME_ROLE", "consent_test_runtime")
+    monkeypatch.setenv("ACTIVEKG_RUNTIME_PASSWORD", "test-only-password")
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+            self.last = ""
+
+        def execute(self, statement, _params=None):
+            self.last = str(statement)
+            self.statements.append(self.last)
+
+        def fetchone(self):
+            if self.last == "SELECT current_user":
+                return ("consent_test_owner",)
+            if self.last.startswith("SELECT 1 FROM pg_roles"):
+                return (1,)
+            if self.last.startswith("SELECT rolsuper,rolcreatedb"):
+                return attributes
+            if self.last.startswith("SELECT pg_has_role"):
+                return (False,)
+            raise AssertionError("unexpected query")
+
+    cur = Cursor()
+    init_railway_db._provision_runtime_role(cur)
+    attribute_alters = [s for s in cur.statements if "ALTER ROLE" in s and "NOSUPERUSER" in s]
+    assert len(attribute_alters) == (attributes != (False, False, False, False))
+    assert any("ALTER ROLE" in s and "PASSWORD" in s for s in cur.statements)
+    assert any("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES" in s for s in cur.statements)
+    assert any(
+        "REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON schema_migrations" in s for s in cur.statements
+    )
+
+
 def test_migration_files_and_historical_transition_are_frozen() -> None:
     manifest = json.loads((ROOT / "scripts/schema_control_callers.json").read_text())
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
-    assert len(MIGRATIONS) == 26 == len(set(MIGRATIONS))
+    assert len(MIGRATIONS) == len(manifest["migration_manifest"]) == len(set(MIGRATIONS))
+    assert MIGRATIONS[-1] == "027_candidate_consent.sql"
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
     )

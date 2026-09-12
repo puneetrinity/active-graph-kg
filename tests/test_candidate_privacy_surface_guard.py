@@ -165,3 +165,18 @@ def test_guard_rejects_private_intake_privacy_authority_mutation() -> None:
         with pytest.raises(guard.GuardError, match="enforcement anchor"):
             guard.validate()
     guard.validate()
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b"Depends(require_consent_writer)", b"Depends(get_jwt_claims)"),
+        (b"global_use=True", b"global_use=False"),
+        (b"_require_global(cur, tokens, None)", b"pass # removed global proof"),
+    ],
+)
+def test_guard_rejects_consent_authority_mutation(old: bytes, new: bytes) -> None:
+    with _temporary_mutation("activekg/api/candidate_consent.py", old, new):
+        with pytest.raises(guard.GuardError):
+            guard.validate()
+    guard.validate()

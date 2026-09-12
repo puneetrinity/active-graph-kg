@@ -859,6 +859,56 @@ BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
             "34",
         ),
     ],
+    "027_candidate_consent.sql": [
+        ("table", "candidate_consent_state"),
+        ("table", "candidate_consent_sources"),
+        ("table", "candidate_consent_receipts"),
+        ("forcerls", "candidate_consent_state"),
+        ("forcerls", "candidate_consent_sources"),
+        ("forcerls", "candidate_consent_receipts"),
+        ("policy", "candidate_consent_state", "tenant_isolation_consent_state"),
+        ("policy", "candidate_consent_sources", "tenant_isolation_consent_sources"),
+        ("policy", "candidate_consent_receipts", "tenant_isolation_consent_receipts"),
+        ("trigger_function", "candidate_consent_append_only"),
+        ("trigger_function", "candidate_consent_binding_immutable"),
+        (
+            "trigger",
+            "candidate_consent_state",
+            "consent_state_binding",
+            "candidate_consent_binding_immutable",
+            "19",
+        ),
+        (
+            "trigger",
+            "candidate_consent_sources",
+            "consent_sources_no_mutation",
+            "candidate_consent_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "candidate_consent_sources",
+            "consent_sources_no_truncate",
+            "candidate_consent_append_only",
+            "34",
+        ),
+        (
+            "trigger",
+            "candidate_consent_receipts",
+            "consent_receipts_no_mutation",
+            "candidate_consent_append_only",
+            "27",
+        ),
+        (
+            "trigger",
+            "candidate_consent_receipts",
+            "consent_receipts_no_truncate",
+            "candidate_consent_append_only",
+            "34",
+        ),
+        ("fk_delete", "candidate_consent_state", "consent_active_source_fk", "r"),
+        ("index", "consent_sources_canonical_idx"),
+    ],
     "026_organization_private_candidate_intake.sql": [
         (
             "constraint_definition",
@@ -1416,12 +1466,18 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
         )
         print(f"✓ Runtime role {role} created (NOSUPERUSER NOBYPASSRLS)")
     else:
-        # Enforce the security posture even if the role pre-exists.
+        # A2: do not restate SUPERUSER-only attributes when they already match.
+        # A mismatch retains the existing hardening/permission-failure behavior.
         cur.execute(
-            sql.SQL("ALTER ROLE {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS").format(
-                role_ident
-            )
+            "SELECT rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=%s",
+            (role,),
         )
+        if cur.fetchone() != (False, False, False, False):
+            cur.execute(
+                sql.SQL("ALTER ROLE {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS").format(
+                    role_ident
+                )
+            )
         if password:
             cur.execute(
                 sql.SQL("ALTER ROLE {} PASSWORD {}").format(role_ident, sql.Literal(password))
@@ -1744,6 +1800,52 @@ def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str)
         raise SchemaControlError("approved-provider append-only function privilege is invalid")
 
 
+def _harden_candidate_consent_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.api.operational import CANDIDATE_CONSENT_TABLES, CANDIDATE_CONSENT_UPDATE_COLUMNS
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    if role in {cur.fetchone()[0], "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    role_ident = sql.Identifier(role)
+    for table in CANDIDATE_CONSENT_TABLES:
+        relation = sql.Identifier("public", table)
+        cur.execute(sql.SQL("REVOKE ALL ON {} FROM {}").format(relation, role_ident))
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL("REVOKE SELECT({}),INSERT({}),UPDATE({}),REFERENCES({}) ON {} FROM {}").format(
+                columns, columns, columns, columns, relation, role_ident
+            )
+        )
+        cur.execute(sql.SQL("GRANT SELECT,INSERT ON {} TO {}").format(relation, role_ident))
+    columns = sql.SQL(",").join(sql.Identifier(name) for name in CANDIDATE_CONSENT_UPDATE_COLUMNS)
+    cur.execute(
+        sql.SQL("GRANT UPDATE({}) ON candidate_consent_state TO {}").format(columns, role_ident)
+    )
+    for function in ("candidate_consent_append_only", "candidate_consent_binding_immutable"):
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION {}() FROM {}").format(
+                sql.Identifier(function), role_ident
+            )
+        )
+
+
+def _assert_candidate_consent_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.api.operational import CANDIDATE_CONSENT_CATALOG_SQL
+
+    cur.execute(CANDIDATE_CONSENT_CATALOG_SQL.replace("__CONSENT_ROLE__", "%s"), (role,))
+    if cur.fetchone() != (True,):
+        raise SchemaControlError("candidate consent authority is incomplete or unsafe")
+
+
 def _harden_organization_candidate_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
     """Restore migration-026's exact append-only runtime table boundary."""
 
@@ -1935,6 +2037,7 @@ def main():
                 _harden_decision_inbox_runtime_privileges(cur, runtime_role)
                 _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _harden_organization_candidate_runtime_privileges(cur, runtime_role)
+                _harden_candidate_consent_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
@@ -1942,6 +2045,7 @@ def main():
                 _assert_decision_inbox_runtime_privileges(cur, runtime_role)
                 _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _assert_organization_candidate_runtime_privileges(cur, runtime_role)
+                _assert_candidate_consent_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

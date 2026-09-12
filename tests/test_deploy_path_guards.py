@@ -138,69 +138,68 @@ def _restore_runtime_posture() -> None:
         )
 
 
-def _rewind_021_tail() -> tuple[bool, bool, bool, bool]:
-    """Temporarily remove migrations 022-026 so 022 remains a valid prefix upgrade."""
-
-    (privacy_was_baselined,) = _sql(
-        "SELECT baselined FROM schema_migrations "
-        "WHERE filename='023_candidate_privacy_directives.sql'"
-    )[0]
-    (decision_was_baselined,) = _sql(
-        "SELECT baselined FROM schema_migrations "
-        "WHERE filename='024_organization_decision_event_inbox.sql'"
-    )[0]
-    (source_was_baselined,) = _sql(
-        "SELECT baselined FROM schema_migrations "
-        "WHERE filename='025_approved_provider_candidate_ingest.sql'"
-    )[0]
-    (organization_candidate_was_baselined,) = _sql(
-        "SELECT baselined FROM schema_migrations "
-        "WHERE filename='026_organization_private_candidate_intake.sql'"
-    )[0]
-    _sql("DROP TABLE IF EXISTS organization_candidate_ingest_receipts")
-    _sql("DROP TABLE IF EXISTS organization_candidate_resume_evidence")
-    _sql("DROP TABLE IF EXISTS organization_candidate_references")
-    _sql("DROP FUNCTION IF EXISTS organization_candidate_evidence_append_only()")
-    # Earlier CI matrices leave private containers that cannot exist before 026.
-    # Delete only that disposable scope; roll back both cleanup and the check swap on failure.
+def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
+    """Disposable-only atomic removal of 022-027; no partial constraint or ledger state."""
+    files = (
+        "023_candidate_privacy_directives.sql",
+        "024_organization_decision_event_inbox.sql",
+        "025_approved_provider_candidate_ingest.sql",
+        "026_organization_private_candidate_intake.sql",
+        "027_candidate_consent.sql",
+    )
     with psycopg.connect(OWNER_DSN) as conn:
+        rows = dict(
+            conn.execute(
+                "SELECT filename,baselined FROM schema_migrations WHERE filename=ANY(%s)",
+                (list(files),),
+            ).fetchall()
+        )
+        baselines = tuple(rows[name] for name in files)
+        # Break the single source/state cycle explicitly; don't use broad CASCADE.
+        conn.execute("ALTER TABLE candidate_consent_state DROP CONSTRAINT consent_active_source_fk")
+        conn.execute("DROP TABLE candidate_consent_receipts")
+        conn.execute("DROP TABLE candidate_consent_sources")
+        conn.execute("DROP TABLE candidate_consent_state")
+        conn.execute("DROP FUNCTION candidate_consent_append_only()")
+        conn.execute("DROP FUNCTION candidate_consent_binding_immutable()")
+        if fail_after_consent_drop:
+            raise RuntimeError("injected_027_rewind_failure")
+        for name in (
+            "organization_candidate_ingest_receipts",
+            "organization_candidate_resume_evidence",
+            "organization_candidate_references",
+        ):
+            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(name)))
+        conn.execute("DROP FUNCTION IF EXISTS organization_candidate_evidence_append_only()")
+        # Earlier matrices leave private containers that cannot satisfy the pre-026 scope.
         conn.execute("DELETE FROM candidates WHERE scope='organization_private'")
         conn.execute(
             "ALTER TABLE candidates DROP CONSTRAINT candidates_scope_check, "
             "ADD CONSTRAINT candidates_scope_check CHECK (scope IN ('shared'))"
         )
-    _sql("DROP TABLE IF EXISTS global_candidate_ingest_receipts")
-    _sql("DROP TABLE IF EXISTS global_candidate_source_observations")
-    _sql("DROP TABLE IF EXISTS global_candidate_source_identities")
-    _sql("DROP FUNCTION IF EXISTS approved_provider_candidate_evidence_append_only()")
-    _sql("DROP TABLE IF EXISTS organization_decision_stream_state")
-    _sql("DROP TABLE IF EXISTS organization_decision_event_inbox")
-    _sql(
-        "DELETE FROM schema_migrations WHERE filename = ANY(%s)",
-        (
-            [
-                "022_contact_suppression_person_and_audit.sql",
-                "023_candidate_privacy_directives.sql",
-                "024_organization_decision_event_inbox.sql",
-                "025_approved_provider_candidate_ingest.sql",
-                "026_organization_private_candidate_intake.sql",
-            ],
-        ),
-    )
-    return (
-        privacy_was_baselined,
-        decision_was_baselined,
-        source_was_baselined,
-        organization_candidate_was_baselined,
-    )
+        for name in (
+            "global_candidate_ingest_receipts",
+            "global_candidate_source_observations",
+            "global_candidate_source_identities",
+            "organization_decision_stream_state",
+            "organization_decision_event_inbox",
+        ):
+            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(name)))
+        conn.execute("DROP FUNCTION IF EXISTS approved_provider_candidate_evidence_append_only()")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE filename=ANY(%s)",
+            (["022_contact_suppression_person_and_audit.sql", *files],),
+        )
+    return baselines
 
 
-def _restore_026_ledger_posture(baselines: tuple[bool, bool, bool, bool]) -> None:
+def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
     (
         privacy_was_baselined,
         decision_was_baselined,
         source_was_baselined,
         organization_candidate_was_baselined,
+        consent_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -226,6 +225,42 @@ def _restore_026_ledger_posture(baselines: tuple[bool, bool, bool, bool]) -> Non
         "WHERE filename='026_organization_private_candidate_intake.sql'",
         (organization_candidate_was_baselined,),
     )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s WHERE filename='027_candidate_consent.sql'",
+        (consent_was_baselined,),
+    )
+
+
+def test_027_rewind_failure_restores_evidence_and_catalog() -> None:
+    subject = str(uuid.uuid4())
+    _sql(
+        "INSERT INTO candidate_consent_state(subject_id,tenant_id) VALUES(%s,%s)",
+        (subject, f"candidate_{subject}"),
+    )
+    before = _sql("SELECT filename,checksum,baselined FROM schema_migrations ORDER BY filename")
+    row = _sql(
+        "SELECT row_to_json(s) FROM candidate_consent_state s WHERE subject_id=%s", (subject,)
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected_027_rewind_failure"):
+            _rewind_021_tail(fail_after_consent_drop=True)
+        assert (
+            _sql("SELECT filename,checksum,baselined FROM schema_migrations ORDER BY filename")
+            == before
+        )
+        assert (
+            _sql(
+                "SELECT row_to_json(s) FROM candidate_consent_state s WHERE subject_id=%s",
+                (subject,),
+            )
+            == row
+        )
+        assert _sql(
+            "SELECT count(*) FROM pg_constraint WHERE conrelid='candidate_consent_state'::regclass AND conname='consent_active_source_fk'"
+        ) == [(1,)]
+        _assert_release_ok()
+    finally:
+        _sql("DELETE FROM candidate_consent_state WHERE subject_id=%s", (subject,))
 
 
 def _contact_evidence_owner_sql(query: str, params: tuple = ()) -> None:

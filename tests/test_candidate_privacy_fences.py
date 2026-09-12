@@ -505,7 +505,10 @@ def test_increment_adds_no_destructive_candidate_data_path() -> None:
 
 def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
     for relative in (
-        *(f"db/migrations/{name}" for name in MIGRATIONS[:-4]),
+        *(
+            f"db/migrations/{name}"
+            for name in MIGRATIONS[: MIGRATIONS.index("023_candidate_privacy_directives.sql")]
+        ),
         "db/init.sql",
         "enable_rls_policies.sql",
     ):
@@ -534,6 +537,18 @@ def test_historical_migrations_and_baseline_assets_are_byte_identical() -> None:
         capture_output=True,
     ).stdout
     assert (ROOT / decision_tail).read_bytes() == deployed_decision_tail
+    for tail in (
+        "025_approved_provider_candidate_ingest.sql",
+        "026_organization_private_candidate_intake.sql",
+    ):
+        relative = f"db/migrations/{tail}"
+        shipped = subprocess.run(
+            ["git", "show", f"abf1ea66cc6ce6d78215eb8b535f89f97159ef9f:{relative}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert (ROOT / relative).read_bytes() == shipped
 
 
 def test_migration_023_mutates_only_its_new_authority_tables() -> None:
