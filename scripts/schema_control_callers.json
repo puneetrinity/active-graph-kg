@@ -32,7 +32,8 @@
     "024_organization_decision_event_inbox.sql",
     "025_approved_provider_candidate_ingest.sql",
     "026_organization_private_candidate_intake.sql",
-    "027_candidate_consent.sql"
+    "027_candidate_consent.sql",
+    "028_candidate_generation_publication.sql"
   ],
   "migration_files": {
     "001_add_embedding_history_index.sql": "f109a2eb8da22cbcd1efdbadb5d9fa3a166784740bfe48f7e5c85805fc1556fa",
@@ -61,6 +62,7 @@
     "025_approved_provider_candidate_ingest.sql": "2f75201a30493f099953c62aa077c43a8dbb5745b14fc84fb06b76190570b2fe",
     "026_organization_private_candidate_intake.sql": "154f14ad9eff1bf6f4b86c4944769356c9324cd5bb0a5becaa675179857eb2e6",
     "027_candidate_consent.sql": "d82dc142db35e1de81afc6fc9272a498a02c7e8eceb95e2b01d292b8fa50f72b",
+    "028_candidate_generation_publication.sql": "96cee916ce9e9b261cc573a806d9f80105badc97524e0e094a4e9c671938f86d",
     "add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
     "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad"
   },

@@ -264,6 +264,7 @@ def _harden_and_assert(cur, role):
         "sourced_candidate",
         "organization_candidate",
         "candidate_consent",
+        "candidate_index",
     ):
         getattr(release, f"_harden_{package}_runtime_privileges")(cur, role)
     release._assert_runtime_role_catalog(cur, role)
@@ -273,6 +274,7 @@ def _harden_and_assert(cur, role):
         "sourced_candidate",
         "organization_candidate",
         "candidate_consent",
+        "candidate_index",
     ):
         getattr(release, f"_assert_{package}_runtime_privileges")(cur, role)
 
@@ -677,7 +679,10 @@ def test_force_rls_and_actual_append_only_privileges(consent_target):
                 conn.execute(statement, (payload.subject_id,))
     with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState), conn.transaction():
         conn.execute(
-            "TRUNCATE candidate_consent_state,candidate_consent_sources,candidate_consent_receipts"
+            "TRUNCATE candidate_consent_state,candidate_consent_sources,candidate_consent_receipts,"
+            "candidate_index_sources,candidate_index_generations,candidate_index_extractions,"
+            "candidate_index_vectors,candidate_index_publication_events,candidate_index_jobs,"
+            "candidate_index_heads,candidate_index_scheduler"
         )
 
 

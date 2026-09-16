@@ -49,7 +49,7 @@ def test_control_plane_verifier_fails_closed_and_compares_exact_bearer() -> None
 def test_route_registration_count_and_public_retirement_contract() -> None:
     routes = [route for route in main.app.routes if isinstance(route, APIRoute)]
     registrations = {(method, route.path) for route in routes for method in route.methods}
-    assert len(routes) == 79
+    assert len(routes) == 82
     assert {
         ("GET", "/openapi.json"),
         ("GET", "/docs"),
@@ -166,7 +166,22 @@ def test_authenticated_no_cache_directive_forces_a_fresh_readiness_snapshot() ->
     assert coordinator.force_refresh is True
 
 
-def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() -> None:
+def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() -> None:
+    from activekg.candidate_index import repository as index_repository
+    from activekg.candidate_index.contracts import (
+        IMMUTABLE_TABLES,
+        INDEX_TABLES,
+        OWNER_FUNCTIONS,
+        RUNTIME_FUNCTIONS,
+        canonical_json,
+        sha256,
+    )
+
+    # The fake catalog has a synthetic structure digest, but the real validator
+    # still checks every table/column/routine privilege. PostgreSQL drift proofs
+    # bind the real digest separately. 028 adds one catalog and one key-set query.
+    index_structure = {"synthetic": "candidate-index-catalog"}
+
     class FakeCursor:
         def __init__(self) -> None:
             self.statements: list[str] = []
@@ -183,6 +198,24 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
             self.statements.append(self.last)
 
         def fetchone(self):
+            if self.last.startswith("WITH chosen AS"):
+                return index_structure, {
+                    "tables": {
+                        name: {
+                            "table": [name in IMMUTABLE_TABLES] + [False] * 6,
+                            "columns": [name in IMMUTABLE_TABLES] + [False] * 3,
+                            "public": False,
+                            "public_columns": False,
+                            "grant_option": False,
+                            "column_grant_option": False,
+                        }
+                        for name in INDEX_TABLES
+                    },
+                    "routines": {
+                        name: [name in RUNTIME_FUNCTIONS, False, False]
+                        for name in RUNTIME_FUNCTIONS + OWNER_FUNCTIONS
+                    },
+                }
             if "to_regclass" in self.last:
                 return (
                     "schema_migrations",
@@ -207,6 +240,8 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
             raise AssertionError(self.last)
 
         def fetchall(self):
+            if self.last == "SELECT public.candidate_index_key_versions()":
+                return [(1,)]
             if "FROM schema_migrations" in self.last:
                 base = Path("db/migrations")
                 return [
@@ -482,13 +517,18 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
     class FakeRepository:
         pool = FakePool()
 
-    with patch.dict(
-        os.environ,
-        {
-            "ACTIVEKG_SCHEMA_TARGET_ID": "11111111-1111-4111-8111-111111111111",
-            "ACTIVEKG_SCHEMA_ENVIRONMENT": "production",
-        },
-        clear=False,
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ACTIVEKG_SCHEMA_TARGET_ID": "11111111-1111-4111-8111-111111111111",
+                "ACTIVEKG_SCHEMA_ENVIRONMENT": "production",
+            },
+            clear=False,
+        ),
+        patch.object(
+            index_repository, "INDEX_CATALOG_SHA256", sha256(canonical_json(index_structure))
+        ),
     ):
         result = bounded_readiness_check(
             FakeRepository(),
@@ -498,7 +538,9 @@ def test_readiness_is_single_flight_and_uses_at_most_eight_catalog_statements() 
         )
     assert result == ReadinessResult(True)
     assert FakeRepository.pool.timeout == 0.25
-    assert len(cursor.statements) == 8
+    assert len(cursor.statements) == 10
+    assert sum(statement.startswith("WITH chosen AS") for statement in cursor.statements) == 1
+    assert cursor.statements.count("SELECT public.candidate_index_key_versions()") == 1
     assert not any("from candidates" in statement.lower() for statement in cursor.statements)
 
     cached = ReadinessCoordinator()

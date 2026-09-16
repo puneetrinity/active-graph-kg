@@ -49,6 +49,12 @@ from activekg.api.candidate_consent import (
 from activekg.api.candidate_consent import (
     router as candidate_consent_router,
 )
+from activekg.api.candidate_index import (
+    api_configuration_problems as candidate_index_api_configuration_problems,
+)
+from activekg.api.candidate_index import (
+    router as candidate_index_router,
+)
 from activekg.api.candidate_privacy import (
     router as candidate_privacy_router,
 )
@@ -399,6 +405,7 @@ app.include_router(candidate_privacy_router)
 app.include_router(organization_decision_events_router)
 app.include_router(organization_candidates_router)
 app.include_router(candidate_consent_router)
+app.include_router(candidate_index_router)
 app.include_router(sourced_candidates_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
@@ -494,6 +501,8 @@ if embedder is not None:
 @app.on_event("startup")
 def startup_event():
     """Initialize system on startup."""
+    if candidate_index_api_configuration_problems():
+        raise RuntimeError("candidate_index_api_configuration_invalid")
     logger.info(
         "Active Graph KG startup",
         extra_fields={
@@ -641,6 +650,7 @@ def readyz(
                 decision_inbox_enabled=decision_inbox_enabled(),
                 organization_candidate_intake_enabled=(organization_candidate_intake_enabled()),
                 candidate_consent_intake_enabled=candidate_consent_intake_enabled(),
+                candidate_index_problems=candidate_index_api_configuration_problems(),
                 sourced_candidate_ingest_mode=os.getenv(
                     "SOURCED_CANDIDATE_INGEST_MODE", "off"
                 ).strip(),

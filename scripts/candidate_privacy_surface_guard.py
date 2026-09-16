@@ -38,6 +38,27 @@ GOVERNED_TABLES = (
     "candidate_consent_state",
     "candidate_consent_sources",
     "candidate_consent_receipts",
+    "candidate_index_sources",
+    "candidate_index_generations",
+    "candidate_index_extractions",
+    "candidate_index_vectors",
+    "candidate_index_publication_events",
+    "candidate_index_jobs",
+    "candidate_index_heads",
+    "candidate_index_scheduler",
+)
+GOVERNED_SQL_FUNCTIONS = (
+    "candidate_index_capture_source",
+    "candidate_index_claim",
+    "candidate_index_complete_extract",
+    "candidate_index_complete_embed",
+    "candidate_index_fail",
+    "candidate_index_invalidate",
+    "candidate_index_read_private",
+    "candidate_index_read_public",
+    "candidate_index_status",
+    "candidate_index_catchup",
+    "candidate_index_key_versions",
 )
 GOVERNED_CALLS = (
     "CandidateRepository",
@@ -53,6 +74,11 @@ GOVERNED_CALLS = (
     "_update_node_props",
     "_trigger_reembed",
     "_privacy_filtered_vector_rows",
+    "extract_once",
+    "embed_once",
+    "parse_original",
+    "child_work",
+    "_parse_document",
 )
 ROUTE_MARKERS = ("candidate", "profile", "resume")
 ROUTE_DECORATORS = {"get", "post", "put", "patch", "delete"}
@@ -206,6 +232,33 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
         "global_candidates",
         "organization_candidate_resume_evidence",
     ),
+    "privacy-candidate-index-routines": tuple(
+        f"SELECT public.{name}(" for name in GOVERNED_SQL_FUNCTIONS
+    ),
+    "privacy-candidate-index-adopters": (
+        "Depends(writer)",
+        "Depends(reader)",
+        "public.candidate_index_status(",
+        "organization_candidate_resume_evidence",
+    ),
+    "privacy-candidate-index-workers": (
+        "self.repository.reserve, lease, self.policy",
+        "await before_send()",
+        "child_work(",
+        "socket.socket.connect = refuse",
+        "self.repository.status, dispatch[",
+    ),
+    "privacy-candidate-index-legacy-ownership": ("s.source_kind='organization_application'",),
+    "privacy-candidate-index-search": (
+        "Depends(reader)",
+        "repo.transaction(tenant)",
+        "self.index_repo.transaction(tenant_id)",
+        "filters_for(query, tenant)",
+    ),
+    "privacy-candidate-index-catchup": (
+        "consent._require_global(cur, tokens, global_id)",
+        "candidate_consent_sources",
+    ),
     "privacy-surface-dependency": (
         "candidate_privacy_",
         "_require_candidate_ingest_allowed",
@@ -229,6 +282,23 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
 
 def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
     source = _reference_source(reference)
+    if row["test_id"] == "privacy-candidate-index-legacy-ownership":
+        required = (
+            "SELECT EXISTS (",
+            "r.application_id::text=n.metadata->>'application_id'",
+            "r.job_id::text=n.metadata->>'job_id'",
+            "s.scope_key=r.tenant_id AND s.tenant_id=r.tenant_id",
+            "s.candidate_id=r.candidate_id AND s.resume_version_id=e.resume_version_id",
+            "s.source_kind='organization_application' AND s.source_version=e.version",
+            "n.id=%s::uuid AND n.tenant_id=%s",
+            "(node_id, tenant_id)",
+            "type(value) is not bool",
+        )
+        if (
+            reference.key != "activekg/candidate_index/repository.py::legacy_applicant_is_managed"
+            or any(token not in source for token in required)
+        ):
+            raise GuardError("candidate index legacy ownership boundary changed")
     if reference.key.endswith("repository.py::GraphRepository._privacy_filtered_vector_rows"):
         exact_rescan_required = (
             "if len(rows) >= limit:",
@@ -323,6 +393,125 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
             and "Depends(require_consent_writer)" not in source
         ):
             raise GuardError("candidate consent route authority is incomplete")
+    if row["test_id"] == "privacy-candidate-index-adopters":
+        required = {
+            "activekg/api/candidate_index.py::source_content": (
+                "Depends(writer)",
+                "accept_source, command, claims.tenant_id",
+            ),
+            "activekg/api/candidate_index.py::index_status": (
+                "Depends(reader)",
+                "_statuses, query, claims.tenant_id",
+            ),
+            "activekg/api/candidate_index.py::_statuses": (
+                "with repo.transaction(tenant)",
+                "s.scope_key=%s",
+                "public.candidate_index_status(",
+            ),
+            "activekg/candidate_index/admission.py::_evidence": (
+                "WHERE e.tenant_id=%s AND e.reference_id=%s AND e.resume_version_id=%s",
+                "row[:6]",
+                "row[7:9]",
+                "candidate_index_privacy_resume_mismatch",
+            ),
+        }.get(reference.key)
+        if required is None or any(token not in source for token in required):
+            raise GuardError("candidate index adopter source/tenant boundary changed")
+    if row["test_id"] == "privacy-candidate-index-routines":
+        if reference.file != "activekg/candidate_index/repository.py":
+            raise GuardError("candidate index routine caller needs explicit authority review")
+        if reference.symbol != "IndexRepository.capture_on_cursor" and (
+            "with self.transaction(" not in source
+        ):
+            raise GuardError("candidate index routine lost its transaction boundary")
+        if re.search(r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE)\b", source, re.I):
+            raise GuardError("candidate index caller gained direct persistence")
+    if row["test_id"] == "privacy-candidate-index-workers":
+        required = {
+            "GenerationWorker.process": (
+                "self.repository.reserve, lease, self.policy",
+                "before_send=lambda: self._authority(dispatch, deadline)",
+            ),
+            "GenerationWorker._authority": (
+                'current.get("eligible") is not True',
+                'current.get("generation_id") != dispatch["generation_id"]',
+            ),
+            "extract_once": (
+                "await before_send()",
+                "response = await client.send(request, stream=True)",
+            ),
+            "parse_original": ("child_work(", '"parse"'),
+            "embed_once": (
+                "cached_embedding_path(model, revision)",
+                "validate_vectors(vectors, len(texts))",
+            ),
+            "embed_query_once": (
+                "cached_embedding_path(model, revision)",
+                "validate_vectors(vectors, 1)",
+            ),
+            "rerank_once": (
+                "models--cross-encoder--ms-marco-MiniLM-L-6-v2",
+                "not math.isfinite(score)",
+                "child_work(",
+            ),
+            "_run_child": ("socket.socket.connect = refuse", "if forbidden:"),
+        }.get(reference.symbol)
+        if (
+            not reference.file.startswith("activekg/candidate_index/")
+            or required is None
+            or any(token not in source for token in required)
+        ):
+            raise GuardError("candidate index worker authority boundary changed")
+    if row["test_id"] == "privacy-candidate-index-search":
+        required = {
+            "activekg/api/candidate_index.py::private_search": (
+                "Depends(reader)",
+                "search(query, claims.tenant_id, repo, config.policy)",
+            ),
+            "activekg/candidate_index/search.py::retrieve": (
+                "filters_for(query, tenant)",
+                "repo.transaction(tenant)",
+                "public.candidate_index_read_private(",
+                "public.candidate_index_status(",
+                "LegacyPrivateReader(repo, tenant)",
+                "tenant_id",
+                "use_reranker=False",
+            ),
+            "activekg/candidate_index/search.py::LegacyPrivateReader._conn": (
+                "tenant_id != self.tenant",
+                "self.index_repo.transaction(tenant_id)",
+                "SET LOCAL transaction_read_only=on",
+            ),
+            "activekg/candidate_index/search.py::search": (
+                "filters_for(query, tenant)",
+                "await embed_query_once(",
+                "await rerank_once(",
+                "hit.identity in admitted",
+                "len(retained) != len(hits)",
+            ),
+        }.get(reference.key)
+        if required is None or any(token not in source for token in required):
+            raise GuardError("candidate index search authority boundary changed")
+    if row["test_id"] == "privacy-candidate-index-catchup":
+        if reference.file != "activekg/candidate_index/catchup.py" or reference.symbol not in {
+            "<module>",
+            "_memory",
+        }:
+            raise GuardError("candidate index catchup authority boundary changed")
+        module_source = (ROOT / reference.file).read_text(encoding="utf-8")
+        required = (
+            "consent._require_global(cur, tokens, global_id)",
+            'ops.admit_flow_user(row["live_user"])',
+            'row["auth_version"] != row["account_auth_version"]',
+            'row["delivery_status"] != "delivered"',
+            "operator_approved is not True",
+            "hmac.compare_digest(plan.seal, _mac(key, body))",
+            "_posture(ops) != sealed.posture",
+            "ops.verify_original(original) is not True",
+            "_memory(cur, payload, fresh[0], capture=False, ops=ops) != entry",
+        )
+        if any(token not in module_source for token in required):
+            raise GuardError("candidate index catchup authority boundary changed")
     if reference.key.endswith("embedding/worker.py::EmbeddingWorker._process_job"):
         if source.count("self.privacy_repository.node_decision") < 3:
             raise GuardError("embedding worker stale-job privacy recheck is missing")
@@ -412,9 +601,23 @@ def discover() -> list[Reference]:
                 )
             )
             called_names = _called_names(scope_node)
-            calls = tuple(call for call in GOVERNED_CALLS if call in called_names)
+            calls = tuple(call for call in GOVERNED_CALLS if call in called_names) + tuple(
+                call
+                for call in GOVERNED_SQL_FUNCTIONS
+                if re.search(rf"\b{re.escape(call)}\s*\(", sql_text)
+            )
             routes = _route_paths(node)
-            if tables or calls or routes:
+            explicit_index_worker = (
+                relative == "activekg/candidate_index/providers.py" and symbol == "extract_once"
+            ) or (
+                relative == "activekg/candidate_index/processing.py"
+                and symbol == "GenerationWorker._authority"
+            )
+            explicit_index_search = relative == "activekg/candidate_index/search.py" and symbol in {
+                "search",
+                "LegacyPrivateReader._conn",
+            }
+            if tables or calls or routes or explicit_index_worker or explicit_index_search:
                 references.append(
                     Reference(
                         file=relative,

@@ -16,7 +16,7 @@ FROZEN_HASHES = {
     "activekg/privacy/config.py": "97c6bc67fafcf4953c85e7b86579fae4b537f0c264550f378cad4ea159fa9546",
     "activekg/privacy/identity.py": "3c5bc791e51d0e8b5bd01964ab0f7ddd52a53420b44e0684f7a52c2ac16fa65c",
     "activekg/privacy/models.py": "078caf25e85a7e07aa32dad47c7ed86fe7bd9b75f3aeb3852527efad4e99522f",
-    "activekg/privacy/repository.py": "faf4b08c16f10517e4173228702fd5be6b7388dc5192dd1e0544a83a8d270cdc",
+    "activekg/privacy/repository.py": "e9a02de3e6a1dcec4d8e793296cc8fad66caed84abeef63869e919ed8f9e9a12",
     "db/migrations/023_candidate_privacy_directives.sql": "de179e695497c96321de2990b590b6e93702220b0071b488da18b0beffd94e1e",
     "db/migrations/025_approved_provider_candidate_ingest.sql": "2f75201a30493f099953c62aa077c43a8dbb5745b14fc84fb06b76190570b2fe",
 }

@@ -580,6 +580,11 @@ def _store(payload: ConsentCommand, claims: JWTClaims) -> dict[str, Any]:
                     effective_action,
                 ),
             )
+            # Durable generation capture shares the effective consent commit.
+            # Disabled processing is not permission to discard an accepted grant.
+            from activekg.candidate_index.admission import capture_consent
+
+            capture_consent(cur, payload, outcome, command_digest)
         if time.monotonic() - started > 3:
             raise HTTPException(503, "candidate_consent_temporarily_unavailable")
         conn.commit()

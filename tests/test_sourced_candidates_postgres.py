@@ -111,7 +111,11 @@ def test_identity_evidence_replay_conflict_atomicity_acl_and_append_only() -> No
         cur.execute(
             "TRUNCATE global_candidate_ingest_receipts,"
             "global_candidate_source_observations,"
-            "global_candidate_source_identities"
+            "global_candidate_source_identities,"
+            "candidate_index_sources,candidate_index_generations,"
+            "candidate_index_extractions,candidate_index_vectors,"
+            "candidate_index_publication_events,candidate_index_jobs,"
+            "candidate_index_heads,candidate_index_scheduler"
         )
 
     with psycopg.connect(RUNTIME_DSN) as conn, conn.cursor() as cur:

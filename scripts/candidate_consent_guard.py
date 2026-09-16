@@ -14,14 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 FROZEN = {
     "activekg/api/organization_candidates.py": "311df4f1385eb1c4756cf5f61f850c50f831b1dad16411e226402e7c07cba50a",
     "activekg/api/sourced_candidates.py": "2d3342ff555c29f006df4a3aec9d607202f5f093023097b5f359740e74863d2c",
-    "activekg/api/global_memory.py": "2e4a5971278dce4f091cbf1ceefa86f75b268cfa5e3b2a8fe22808974aa3ce58",
+    "activekg/api/global_memory.py": "79ab675b6f5cb48004785ae01586bc5c1ea8460855408d68b34a0c613ba6cfe0",
     "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
     "activekg/privacy/config.py": "97c6bc67fafcf4953c85e7b86579fae4b537f0c264550f378cad4ea159fa9546",
     "activekg/privacy/identity.py": "3c5bc791e51d0e8b5bd01964ab0f7ddd52a53420b44e0684f7a52c2ac16fa65c",
     "activekg/privacy/models.py": "078caf25e85a7e07aa32dad47c7ed86fe7bd9b75f3aeb3852527efad4e99522f",
-    "activekg/privacy/repository.py": "faf4b08c16f10517e4173228702fd5be6b7388dc5192dd1e0544a83a8d270cdc",
-    "activekg/embedding/worker.py": "9219f79df280e8a9c9394efd56b9ac81959edeef9dd6636f7fa8d94bf30628d1",
-    "activekg/extraction/worker.py": "474f29f68818736c79764bc0cde97f780b35603202caf512c031e89bb05390f5",
+    "activekg/privacy/repository.py": "e9a02de3e6a1dcec4d8e793296cc8fad66caed84abeef63869e919ed8f9e9a12",
+    # 4D runtime adoption only; legacy authority/model invocations remain pinned
+    # semantically by the privacy/index guards and entrypoint regressions.
+    "activekg/embedding/worker.py": "d0aeaa5d4e23e0d64972cd8c6236bbb4cf8fd2eb675cdfca6aff81ee2925cdf3",
+    "activekg/extraction/worker.py": "a4085924315c533bd36c6134a02ec85d420c115ccc0521457720e78116d3faa3",
     "db/migrations/023_candidate_privacy_directives.sql": "de179e695497c96321de2990b590b6e93702220b0071b488da18b0beffd94e1e",
     "db/migrations/024_organization_decision_event_inbox.sql": "a39bedef181f6152a5ecad1f5167afd9a266ea08be74686fe37686538665dacf",
     "db/migrations/025_approved_provider_candidate_ingest.sql": "2f75201a30493f099953c62aa077c43a8dbb5745b14fc84fb06b76190570b2fe",
@@ -64,17 +66,13 @@ def validate(root: Path = ROOT) -> None:
         )
         ordered = list(ast.literal_eval(declaration.value))
         caller = json.loads(_read(root, "scripts/schema_control_callers.json"))
-        if (
-            len(ordered) != 27
-            or len(set(ordered)) != 27
-            or ordered[-1] != "027_candidate_consent.sql"
-        ):
-            raise ValueError("tail")
+        if len(set(ordered)) != len(ordered) or ordered[26] != "027_candidate_consent.sql":
+            raise ValueError("historical consent position")
         if ordered != caller["migration_manifest"]:
             raise ValueError("authority")
-        if hashlib.sha256(migration.encode()).hexdigest() != caller["migration_files"][ordered[-1]]:
+        if hashlib.sha256(migration.encode()).hexdigest() != caller["migration_files"][ordered[26]]:
             raise ValueError("migration pin")
-    except (ValueError, TypeError, KeyError, StopIteration, SyntaxError) as exc:
+    except (ValueError, TypeError, KeyError, IndexError, StopIteration, SyntaxError) as exc:
         raise GuardError("consent manifest mismatch") from exc
     _require(
         receiver,

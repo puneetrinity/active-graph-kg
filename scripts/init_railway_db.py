@@ -96,6 +96,7 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "028_candidate_generation_publication.sql": [("candidate_index_catalog",)],
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
     "004_add_external_id_index.sql": [
         ("index", "idx_nodes_external_id"),
@@ -995,6 +996,12 @@ def _normalize_sql_definition(value: str) -> str:
 
 def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
     kind = check[0]
+    if kind == "candidate_index_catalog":
+        from activekg.candidate_index.repository import INDEX_CATALOG_SHA256, catalog_evidence
+
+        # Migration postconditions precede runtime reconciliation. Structural
+        # equality is required here; the subsequent role assertion checks ACLs.
+        return catalog_evidence(cur)[0] == INDEX_CATALOG_SHA256
     if kind == "table":
         cur.execute(
             "SELECT 1 FROM information_schema.tables "
@@ -1800,6 +1807,55 @@ def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str)
         raise SchemaControlError("approved-provider append-only function privilege is invalid")
 
 
+def _harden_candidate_index_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_index.contracts import (
+        IMMUTABLE_TABLES,
+        INDEX_TABLES,
+        OWNER_FUNCTIONS,
+        RUNTIME_FUNCTIONS,
+    )
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", role):
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is invalid")
+    cur.execute("SELECT current_user")
+    if role in {cur.fetchone()[0], "postgres", "app_user", "admin_role"}:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE is reserved")
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        raise SchemaControlError("ACTIVEKG_RUNTIME_ROLE does not exist")
+    role_ident = sql.Identifier(role)
+    for table in INDEX_TABLES:
+        relation = sql.Identifier("public", table)
+        cur.execute(sql.SQL("REVOKE ALL ON {} FROM PUBLIC, {}").format(relation, role_ident))
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({}),INSERT({}),UPDATE({}),REFERENCES({}) ON {} FROM PUBLIC, {}"
+            ).format(columns, columns, columns, columns, relation, role_ident)
+        )
+        if table in IMMUTABLE_TABLES:
+            cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(relation, role_ident))
+    for signature in RUNTIME_FUNCTIONS + OWNER_FUNCTIONS:
+        # Literal inventory only, no caller-controlled routine/type identifier.
+        routine = sql.SQL("public." + signature)
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION {} FROM PUBLIC, {}").format(routine, role_ident)
+        )
+        if signature in RUNTIME_FUNCTIONS:
+            cur.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(routine, role_ident))
+
+
+def _assert_candidate_index_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_index.repository import catalog_ready
+
+    if not catalog_ready(cur, role):
+        raise SchemaControlError("candidate index authority is incomplete or unsafe")
+
+
 def _harden_candidate_consent_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
     from activekg.api.operational import CANDIDATE_CONSENT_TABLES, CANDIDATE_CONSENT_UPDATE_COLUMNS
 
@@ -2038,6 +2094,8 @@ def main():
                 _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _harden_organization_candidate_runtime_privileges(cur, runtime_role)
                 _harden_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "028_candidate_generation_publication.sql" in migrations:
+                    _harden_candidate_index_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
@@ -2046,6 +2104,8 @@ def main():
                 _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _assert_organization_candidate_runtime_privileges(cur, runtime_role)
                 _assert_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "028_candidate_generation_publication.sql" in migrations:
+                    _assert_candidate_index_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

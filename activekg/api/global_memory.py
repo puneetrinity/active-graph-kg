@@ -1594,6 +1594,8 @@ def sync_applicant_to_global_memory(
     """
     import hashlib
 
+    from activekg.candidate_index.repository import legacy_applicant_is_managed
+
     # Build candidate fields from extraction result
     location = None
     if hasattr(extracted_result, "location") and extracted_result.location:
@@ -1632,6 +1634,11 @@ def sync_applicant_to_global_memory(
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
+            if legacy_applicant_is_managed(cur, node_id, tenant_id):
+                # 4D ownership, not metadata consent, retires this old publisher.
+                # Roll back the read-only prefix; no global/provenance/access write.
+                conn.rollback()
+                return
             transient: list[tuple[str, str]] = []
             if isinstance(email_raw, str) and email_raw:
                 transient.append(("email", email_raw))

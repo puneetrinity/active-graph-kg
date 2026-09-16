@@ -864,9 +864,10 @@ def bounded_readiness_check(
     decision_inbox_enabled: bool | None = None,
     organization_candidate_intake_enabled: bool | None = None,
     candidate_consent_intake_enabled: bool | None = None,
+    candidate_index_problems: list[str] | None = None,
     sourced_candidate_ingest_mode: str | None = None,
 ) -> ReadinessResult:
-    """Run a fixed, read-only readiness census with at most eight SQL statements."""
+    """Run a fixed, read-only readiness census with at most ten SQL statements."""
 
     reasons: list[str] = []
     if unsafe_search_configuration:
@@ -877,6 +878,8 @@ def bounded_readiness_check(
         reasons.append("jwt_verification_unavailable")
     if privacy_problems:
         reasons.extend(privacy_problems)
+    if candidate_index_problems:
+        reasons.extend(candidate_index_problems)
     check_decision_inbox = decision_inbox_enabled is not None
     if decision_inbox_enabled is False:
         reasons.append("decision_inbox_disabled")
@@ -1869,6 +1872,18 @@ def bounded_readiness_check(
                     for details in privacy_function_privileges.values()
                 ):
                     reasons.append("candidate_privacy_function_privilege_missing")
+                if "028_candidate_generation_publication.sql" in MIGRATIONS:
+                    from activekg.candidate_index.repository import catalog_ready
+
+                    _check_budget(started_at)
+                    if not catalog_ready(cur):
+                        reasons.append("candidate_index_authority_unsafe")
+                    cur.execute("SELECT public.candidate_index_key_versions()")
+                    index_key_versions = {int(row[0]) for row in cur.fetchall()}
+                    if privacy_key_versions is not None and not index_key_versions.issubset(
+                        privacy_key_versions
+                    ):
+                        reasons.append("candidate_index_hmac_version_missing")
         _check_budget(started_at)
     except TimeoutError:
         reasons.append("readiness_timeout")
