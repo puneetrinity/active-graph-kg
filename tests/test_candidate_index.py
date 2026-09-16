@@ -507,6 +507,22 @@ def test_source_key_content_and_persistent_replay_boundary():
         ("content", "x" * (2 * 1024 * 1024 + 1)),
         ("privacy_subject", [{"identifier_type": "vantahire_application_id", "value": "2002"}]),
     ],
+    # Explicit ids: the default id embeds each value, and the 2 MiB oversize-content case produced a single
+    # 2 MB verbose-output line that froze the hosted CI runner's log pipeline (both CI jobs collecting this module).
+    ids=[
+        "schema_version-bool",
+        "source_version-bool",
+        "application_id-string",
+        "reference_id-uppercase",
+        "payload_sha256-wrong",
+        "content-different",
+        "content-lone-surrogate",
+        "captured_at-naive",
+        "captured_at-microseconds",
+        "content_kind-url",
+        "content-oversize-2MiB-plus-1",
+        "privacy_subject-mismatch",
+    ],
 )
 def test_strict_source_refusals(field, value):
     command = body()
