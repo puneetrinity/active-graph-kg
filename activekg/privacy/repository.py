@@ -790,7 +790,10 @@ class CandidatePrivacyRepository:
 
     def referenced_key_versions(self) -> set[int]:
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT key_version FROM candidate_privacy_token_key_versions()")
+            cur.execute(
+                "SELECT key_version FROM candidate_privacy_token_key_versions() "
+                "UNION SELECT candidate_index_key_versions()"
+            )
             return {int(row[0]) for row in cur.fetchall()}
 
 

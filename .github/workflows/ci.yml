@@ -49,6 +49,7 @@ jobs:
           python scripts/sourced_candidate_ingest_guard.py
           python scripts/organization_candidate_intake_guard.py
           python scripts/candidate_consent_guard.py
+          python scripts/candidate_index_guard.py
 
       - name: Run type checking
         run: |
@@ -113,6 +114,9 @@ jobs:
             tests/test_organization_candidate_intake_guard.py \
             tests/test_candidate_consent.py \
             tests/test_candidate_consent_guard.py \
+            tests/test_candidate_index.py \
+            tests/test_candidate_index_guard.py \
+            tests/test_candidate_index_workers.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -437,6 +441,38 @@ jobs:
             tests/test_candidate_private_search.py \
             tests/test_public_memory_integration.py \
             -v --tb=short --timeout=60
+
+      - name: Run generation engine with fresh non-superuser owner, runtime and verifier
+        env:
+          ACTIVEKG_INDEX_TEST_DISPOSABLE: "1"
+          ACTIVEKG_INDEX_TEST_OWNER_DSN: postgresql://index_owner_test:owner-fixture@127.0.0.1:5432/memory_index_test
+          ACTIVEKG_INDEX_TEST_RUNTIME_DSN: postgresql://index_runtime_test:runtime-fixture@127.0.0.1:5432/memory_index_test
+          ACTIVEKG_INDEX_TEST_READONLY_DSN: postgresql://index_readonly_test:readonly-fixture@127.0.0.1:5432/memory_index_test
+          ACTIVEKG_SCHEMA_TARGET_ID: "44444444-4444-4444-8444-444444444444"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: development
+          ACTIVEKG_RUNTIME_ROLE: index_runtime_test
+          ACTIVEKG_RUNTIME_PASSWORD: runtime-fixture
+        run: |
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE index_owner_test LOGIN CREATEROLE NOINHERIT PASSWORD 'owner-fixture';
+          CREATE ROLE index_runtime_test LOGIN NOINHERIT PASSWORD 'runtime-fixture';
+          CREATE ROLE index_readonly_test LOGIN NOINHERIT PASSWORD 'readonly-fixture';
+          GRANT index_runtime_test TO index_owner_test WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+          CREATE DATABASE memory_index_test OWNER index_owner_test;
+          REVOKE TEMPORARY ON DATABASE memory_index_test FROM PUBLIC;
+          GRANT TEMPORARY ON DATABASE memory_index_test TO index_owner_test,index_runtime_test;
+          ALTER ROLE index_readonly_test SET default_transaction_read_only=on;
+          SQL
+          sudo -u postgres psql -d memory_index_test -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION vector; CREATE EXTENSION pgcrypto;'
+          ACTIVEKG_MIGRATE_DSN="$ACTIVEKG_INDEX_TEST_OWNER_DSN" ACTIVEKG_MIGRATION_APPLY=1 ACTIVEKG_SCHEMA_FRESH_INIT=1 python scripts/init_railway_db.py
+          ACTIVEKG_MIGRATE_DSN="$ACTIVEKG_INDEX_TEST_OWNER_DSN" ACTIVEKG_MIGRATION_APPLY=1 python scripts/init_railway_db.py
+          psql "$ACTIVEKG_INDEX_TEST_OWNER_DSN" -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA public TO index_readonly_test;
+          GRANT SELECT ON candidate_index_sources,candidate_index_generations,candidate_index_extractions,
+            candidate_index_vectors,candidate_index_publication_events,candidate_index_jobs,
+            candidate_index_heads,candidate_index_scheduler TO index_readonly_test;
+          SQL
+          pytest tests/test_candidate_index_postgres.py -v --tb=short --timeout=240
 
       - name: Start API under the restricted runtime DSN
         env:

@@ -13,11 +13,17 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import redis
 
+from activekg.candidate_index.processing import (
+    GenerationRuntime,
+    GenerationWorker,
+    worker_configuration,
+)
+from activekg.candidate_index.repository import IndexRepository
 from activekg.embedding.queue import (
     DLQ_KEY,
     QUEUE_KEY,
@@ -29,6 +35,9 @@ from activekg.engine.embedding_provider import EmbeddingProvider
 from activekg.graph.repository import GraphRepository
 from activekg.privacy.models import CandidatePrivacyDecision
 from activekg.privacy.repository import CandidatePrivacyRepository, CandidatePrivacyUnavailable
+
+if TYPE_CHECKING:
+    from activekg.extraction.worker import WorkerHealthState
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,8 @@ class EmbeddingWorker:
         retry_max_seconds: float = 300.0,
         global_candidate_embedder=None,
         privacy_repository: CandidatePrivacyRepository | None = None,
+        index_runtime: GenerationRuntime | None = None,
+        health_state: WorkerHealthState | None = None,
     ):
         self.redis_client = redis_client
         self.repo = repo
@@ -70,6 +81,8 @@ class EmbeddingWorker:
         self.global_candidate_embedder = global_candidate_embedder
         self.privacy_repository = privacy_repository
         self.running = True
+        self.index_runtime = index_runtime
+        self.health_state = health_state
 
         signal.signal(signal.SIGINT, self._shutdown_handler)
         signal.signal(signal.SIGTERM, self._shutdown_handler)
@@ -87,6 +100,10 @@ class EmbeddingWorker:
     def _shutdown_handler(self, signum, frame):
         logger.info("Embedding worker shutting down", extra={"signal": signum})
         self.running = False
+        if self.index_runtime is not None:
+            self.index_runtime.request_stop()
+        if self.health_state is not None:
+            self.health_state.stop()
 
     def _process_job(self, raw: bytes | str) -> None:
         if isinstance(raw, bytes):
@@ -235,11 +252,15 @@ class EmbeddingWorker:
                     # Redis producer; they are polled by embedding_status.
                     self.global_candidate_embedder.maybe_sweep()
                 item = self.redis_client.brpop(QUEUE_KEY, timeout=int(self.poll_interval))
+                if self.health_state is not None:
+                    self.health_state.loop_cycle_success()
                 if not item:
                     continue
                 _, payload = item
                 self._process_job(payload)
             except Exception as e:
+                if self.health_state is not None:
+                    self.health_state.loop_error()
                 logger.error("Worker loop error", extra={"error": str(e)})
                 time.sleep(self.poll_interval)
 
@@ -249,6 +270,7 @@ def start_worker() -> None:
     from activekg.common.metrics import get_redis_client
     from activekg.common.schema_control import SchemaControlError, assert_startup_schema_ready
 
+    index_config = worker_configuration("embed")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
@@ -278,18 +300,62 @@ def start_worker() -> None:
             sweep_interval_seconds=float(os.getenv("GLOBAL_EMBED_SWEEP_INTERVAL", "15")),
         )
 
-    worker = EmbeddingWorker(
-        redis_client=redis_client,
-        repo=repo,
-        embedder=embedder,
-        poll_interval_seconds=float(os.getenv("EMBEDDING_WORKER_POLL_INTERVAL", "1.0")),
-        max_attempts=int(os.getenv("EMBEDDING_MAX_ATTEMPTS", "5")),
-        retry_base_seconds=float(os.getenv("EMBEDDING_RETRY_BASE_SECONDS", "10")),
-        retry_max_seconds=float(os.getenv("EMBEDDING_RETRY_MAX_SECONDS", "300")),
-        global_candidate_embedder=global_candidate_embedder,
-        privacy_repository=privacy_repository,
+    index_runtime = (
+        GenerationRuntime(
+            GenerationWorker(
+                IndexRepository(dsn, tunables=index_config.tunables), index_config.policy
+            ),
+            "embed",
+        )
+        if index_config is not None
+        else None
     )
-    worker.run()
+    poll_interval = float(os.getenv("EMBEDDING_WORKER_POLL_INTERVAL", "1.0"))
+    health_state = None
+    server = None
+    monitor = None
+    if index_runtime is not None:
+        from activekg.extraction.worker import (
+            WorkerHealthState,
+            start_database_monitor,
+            start_healthcheck_server,
+        )
+
+        health_state = WorkerHealthState(
+            poll_interval, index_runtime=index_runtime, service="embedding-worker"
+        )
+        health_state.provider_configured()
+        server = start_healthcheck_server(health_state)
+        monitor = start_database_monitor(health_state, dsn)
+    try:
+        worker = EmbeddingWorker(
+            redis_client=redis_client,
+            repo=repo,
+            embedder=embedder,
+            poll_interval_seconds=poll_interval,
+            max_attempts=int(os.getenv("EMBEDDING_MAX_ATTEMPTS", "5")),
+            retry_base_seconds=float(os.getenv("EMBEDDING_RETRY_BASE_SECONDS", "10")),
+            retry_max_seconds=float(os.getenv("EMBEDDING_RETRY_MAX_SECONDS", "300")),
+            global_candidate_embedder=global_candidate_embedder,
+            privacy_repository=privacy_repository,
+            index_runtime=index_runtime,
+            health_state=health_state,
+        )
+        if index_runtime is not None:
+            index_runtime.start()
+        worker.run()
+    finally:
+        if index_runtime is not None:
+            index_runtime.request_stop()
+        if health_state is not None:
+            health_state.stop()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if monitor is not None:
+            monitor.join(timeout=5)
+        if index_runtime is not None:
+            index_runtime.close()
 
 
 if __name__ == "__main__":

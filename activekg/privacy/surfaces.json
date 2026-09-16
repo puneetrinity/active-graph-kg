@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 134,
+    "discovered_rows": 165,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -37,6 +37,294 @@
     }
   ],
   "references": [
+    {
+      "file": "activekg/candidate_index/catchup.py",
+      "symbol": "<module>",
+      "tables": ["candidate_consent_sources", "organization_candidate_references"],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Bounded read-only Flow census joins the exact immutable consent command, acknowledged source, live verified account and optional live private resume tuple; source values remain in process.",
+      "test_id": "privacy-candidate-index-catchup",
+      "reason": "Explicit operator catchup only; neither a startup sweep nor an identity-only grant reconstruction."
+    },
+    {
+      "file": "activekg/candidate_index/catchup.py",
+      "symbol": "_memory",
+      "tables": ["candidate_consent_receipts", "candidate_consent_sources", "candidate_consent_state", "candidate_index_sources", "global_candidates"],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read-write",
+      "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Exact effective grant and receipt under consent lock; current verified-email binding, ordered token and anchor locks, shipped global privacy decision; generation capture never mutates the approved source or fabricates a consent receipt.",
+      "test_id": "privacy-candidate-index-catchup",
+      "reason": "Sealed, separately approved, target/policy-bound maintenance capture; withdrawn, orphaned, ambiguous, changed and already managed sources are skipped with fixed reasons."
+    },
+    {
+      "file": "activekg/api/candidate_index.py",
+      "symbol": "private_search",
+      "tables": [],
+      "calls": [],
+      "routes": ["POST /organization-candidates/search"],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Exact Flow service and single reader scope precede body parsing; tenant derives only from signed claims.",
+      "test_id": "privacy-candidate-index-search",
+      "reason": "Private search exposes professional hits only; no caller-supplied tenant or global branch."
+    },
+    {
+      "file": "activekg/candidate_index/search.py",
+      "symbol": "LegacyPrivateReader._conn",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Exact admitted tenant, read-only transaction, bounded SQL; delegates search algorithms and privacy-before-limit to frozen GraphRepository.",
+      "test_id": "privacy-candidate-index-search",
+      "reason": "Legacy compatibility cannot fall back to a global/default tenant or write fabricated nodes."
+    },
+    {
+      "file": "activekg/candidate_index/search.py",
+      "symbol": "retrieve",
+      "tables": ["candidate_index_sources", "organization_candidate_references"],
+      "calls": ["candidate_index_read_private", "candidate_index_status"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Scoped publication/status routines and frozen exact-tenant graph reader apply authority before retrieval limits, with explicit supported filters and bounded counts.",
+      "test_id": "privacy-candidate-index-search",
+      "reason": "Generation and legacy hits are fused by application without copying source text, identities, contacts or locators into the serializer."
+    },
+    {
+      "file": "activekg/candidate_index/search.py",
+      "symbol": "search",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Filter admission before model work; authorised bounded union only enters local reranking; a second read rejects changed authority/generation before response.",
+      "test_id": "privacy-candidate-index-search",
+      "reason": "Local model work is outside SQL and cannot revive an obsolete generation or privacy-restricted hit."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "embed_query_once",
+      "tables": [],
+      "calls": ["child_work"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Same pinned cached vector space; bounded isolated offline child, validated dimension and no silent token truncation.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "Recruiter query is encoded locally with no provider request, database or credential inheritance."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "rerank_once",
+      "tables": [],
+      "calls": ["child_work"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Authorised union supplied by search, fixed cached cross-encoder in isolated offline child, deadline/kill/reap and finite exact response cardinality.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "No external model call, implicit download or credential inheritance; fallback is explicit and authority is re-read afterward."
+    },
+    {
+      "file": "activekg/candidate_index/processing.py",
+      "symbol": "<module>",
+      "tables": [],
+      "calls": ["embed_once", "extract_once", "parse_original"],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "import",
+      "candidate_scope": "none",
+      "actions": [],
+      "reason": "Function imports only, no timer/client creation or IO. Model dispatch is governed separately at GenerationWorker.process."
+    },
+    {
+      "file": "activekg/candidate_index/processing.py",
+      "symbol": "GenerationWorker._authority",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Keyed SQL status under the dispatch scope; current eligibility and exact generation must match before any model dispatch after parsing/waits.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "Private global-opt-out versus consent-global-use authority stays in the existing SQL resolver; failure is closed."
+    },
+    {
+      "file": "activekg/candidate_index/processing.py",
+      "symbol": "GenerationWorker.process",
+      "tables": [],
+      "calls": ["embed_once", "extract_once", "parse_original"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Durable privacy-fenced reservation, current generation/policy checks, fresh before-send callback, and SQL completion recheck. No source values in errors.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "Only two approved source kinds; no provider-kind dispatch, no model work inside a database transaction."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "extract_once",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "provider_disclosure",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Mandatory await before_send immediately before the one fixed-origin HTTPS attempt; no SDK retries, redirects or output logging.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "Called only after a committed generation attempt; full HTTP lifetime is cancellable and byte/deadline bounded."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "parse_original",
+      "tables": [],
+      "calls": ["child_work"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "derive",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Only the claimed exact immutable source enters the no-network parser child, bounded at 15 seconds and 256MiB; recheck before later disclosure.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "No third-party locator and no OCR; incomplete parsing cannot publish."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "embed_once",
+      "tables": [],
+      "calls": ["child_work"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "derive",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "After a privacy-fenced reservation, exact cached model revision in a no-network child, complete chunk/vector validation, and current authority at publication.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "No downloads, legacy singleton changes or remote embeddings."
+    },
+    {
+      "file": "activekg/candidate_index/providers.py",
+      "symbol": "_run_child",
+      "tables": [],
+      "calls": ["_parse_document"],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "derive",
+      "candidate_scope": "source_authority",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Network refusals installed before any parser/model import, scrubbed child environment, zero forbidden attempts, ephemeral pipe-only source/result transfer.",
+      "test_id": "privacy-candidate-index-workers",
+      "reason": "This isolated local child has no database or service/provider credentials; only the parent may commit through the fenced routines."
+    },
+    {
+      "file": "activekg/api/candidate_index.py",
+      "symbol": "source_content",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/source-content"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact Flow service scope and tenant; keyed 026 evidence, private privacy composition and scoped status routine. No locator or raw error projection.",
+      "test_id": "privacy-candidate-index-adopters",
+      "reason": "Source admission and private status only; model work and publication remain separate."
+    },
+    {
+      "file": "activekg/api/candidate_index.py",
+      "symbol": "_statuses",
+      "tables": [
+        "candidate_index_sources"
+      ],
+      "calls": [
+        "candidate_index_status"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact Flow service scope and tenant; keyed 026 evidence, private privacy composition and scoped status routine. No locator or raw error projection.",
+      "test_id": "privacy-candidate-index-adopters",
+      "reason": "Source admission and private status only; model work and publication remain separate."
+    },
+    {
+      "file": "activekg/api/candidate_index.py",
+      "symbol": "index_status",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/index-status"
+      ],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact Flow service scope and tenant; keyed 026 evidence, private privacy composition and scoped status routine. No locator or raw error projection.",
+      "test_id": "privacy-candidate-index-adopters",
+      "reason": "Source admission and private status only; model work and publication remain separate."
+    },
+    {
+      "file": "activekg/candidate_index/admission.py",
+      "symbol": "_evidence",
+      "tables": [
+        "organization_candidate_ingest_receipts",
+        "organization_candidate_references",
+        "organization_candidate_resume_evidence"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact Flow service scope and tenant; keyed 026 evidence, private privacy composition and scoped status routine. No locator or raw error projection.",
+      "test_id": "privacy-candidate-index-adopters",
+      "reason": "Source admission and private status only; model work and publication remain separate."
+    },
     {
       "file": "activekg/api/admin_connectors.py",
       "symbol": "ingest",
@@ -1049,7 +1337,9 @@
         "candidate_privacy_identity_tokens",
         "global_candidates"
       ],
-      "calls": [],
+      "calls": [
+        "candidate_index_key_versions"
+      ],
       "routes": [],
       "classification": "fenced",
       "direction": "read_write",
@@ -2567,6 +2857,225 @@
       "candidate_scope": "schema_catalog",
       "actions": [],
       "reason": "SQL constant checks relation/policy/ACL metadata only, not candidate values; existing migration-and-health-catalog exclusion applies."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "legacy_applicant_is_managed",
+      "tables": ["candidate_index_sources", "nodes", "organization_candidate_references", "organization_candidate_resume_evidence"],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "source_authority",
+      "actions": [],
+      "enforcement": "Transaction-scoped tenant RLS and exact persisted node/4B/source tuple return one boolean only. Managed always suppresses the legacy publisher; unmanaged still passes the unchanged global-use privacy gate before writes; unavailable authority raises and rolls back.",
+      "test_id": "privacy-candidate-index-legacy-ownership",
+      "reason": "Internal ownership control, no candidate content or external disclosure. Retains exclusion for pending/restricted sources without depending on generation readiness.",
+      "anchors": ["n.id=%s::uuid AND n.tenant_id=%s", "s.resume_version_id=e.resume_version_id"]
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "<module>",
+      "tables": [
+        "candidate_index_sources"
+      ],
+      "calls": [],
+      "routes": [],
+      "classification": "excluded",
+      "direction": "read",
+      "candidate_scope": "catalog_only",
+      "actions": [],
+      "reason": "Exact schema/ACL catalog SQL only. The source table name identifies its owner; no candidate rows or content are selected."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.capture_on_cursor",
+      "tables": [],
+      "calls": [
+        "candidate_index_capture_source"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.claim",
+      "tables": [],
+      "calls": [
+        "candidate_index_claim"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.reserve",
+      "tables": [],
+      "calls": [
+        "candidate_index_claim"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.complete_extract",
+      "tables": [],
+      "calls": [
+        "candidate_index_complete_extract"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.complete_embed",
+      "tables": [],
+      "calls": [
+        "candidate_index_complete_embed"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.fail",
+      "tables": [],
+      "calls": [
+        "candidate_index_fail"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.status",
+      "tables": [],
+      "calls": [
+        "candidate_index_status"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.invalidate",
+      "tables": [],
+      "calls": [
+        "candidate_index_invalidate"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/candidate_index/repository.py",
+      "symbol": "IndexRepository.catchup",
+      "tables": [],
+      "calls": [
+        "candidate_index_catchup"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read_write",
+      "candidate_scope": "private_or_effective_consent",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Exact SECURITY DEFINER routine enforces persisted source/scope, fresh privacy and effective consent; transaction completes before external work.",
+      "test_id": "privacy-candidate-index-routines",
+      "reason": "Generation source, lease, dispatch, completion and invalidation are bounded by the named SQL authority; no direct table write."
+    },
+    {
+      "file": "activekg/privacy/repository.py",
+      "symbol": "CandidatePrivacyRepository.referenced_key_versions",
+      "tables": [],
+      "calls": [
+        "candidate_index_key_versions"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "privacy_authority",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Key-version integers only from the bounded retained-token routine; preserves privacy HMAC retention.",
+      "test_id": "privacy-readiness-contract",
+      "reason": "A required matching key cannot be retired while immutable generations retain its tokens."
     }
   ]
 }

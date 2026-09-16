@@ -22,6 +22,8 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from activekg.candidate_index.contracts import INDEX_TABLES, OWNER_FUNCTIONS, RUNTIME_FUNCTIONS
+
 OWNER_DSN = os.getenv("ACTIVEKG_RLS_TEST_OWNER_DSN")
 
 pytestmark = pytest.mark.skipif(not OWNER_DSN, reason="ACTIVEKG_RLS_TEST_OWNER_DSN not configured")
@@ -139,13 +141,14 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-027; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-028; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
         "025_approved_provider_candidate_ingest.sql",
         "026_organization_private_candidate_intake.sql",
         "027_candidate_consent.sql",
+        "028_candidate_generation_publication.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -155,6 +158,14 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
             ).fetchall()
         )
         baselines = tuple(rows[name] for name in files)
+        # Drop the complete 028 dependency closure inside the same transaction.
+        # The injected failure below must restore these objects and their rows too.
+        conn.execute(
+            sql.SQL("DROP TABLE ")
+            + sql.SQL(",").join(sql.Identifier("public", table) for table in INDEX_TABLES)
+        )
+        for signature in RUNTIME_FUNCTIONS + OWNER_FUNCTIONS:
+            conn.execute(sql.SQL("DROP FUNCTION public." + signature))
         # Break the single source/state cycle explicitly; don't use broad CASCADE.
         conn.execute("ALTER TABLE candidate_consent_state DROP CONSTRAINT consent_active_source_fk")
         conn.execute("DROP TABLE candidate_consent_receipts")
@@ -200,6 +211,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         source_was_baselined,
         organization_candidate_was_baselined,
         consent_was_baselined,
+        index_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -228,6 +240,11 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
     _sql(
         "UPDATE schema_migrations SET baselined=%s WHERE filename='027_candidate_consent.sql'",
         (consent_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s "
+        "WHERE filename='028_candidate_generation_publication.sql'",
+        (index_was_baselined,),
     )
 
 

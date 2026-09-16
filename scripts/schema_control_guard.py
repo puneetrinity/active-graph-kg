@@ -155,6 +155,7 @@ def check(root: Path) -> list[str]:
         "enable_rls_policies.sql",
         "railway.schema-release.json",
         "scripts/README.md",
+        "scripts/candidate_index_guard.py",  # Static source inspection only; not a release caller.
     }
     for path in root.rglob("*"):
         if not path.is_file() or any(

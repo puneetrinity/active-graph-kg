@@ -20,6 +20,12 @@ from urllib.parse import urlsplit
 
 import redis
 
+from activekg.candidate_index.processing import (
+    GenerationRuntime,
+    GenerationWorker,
+    worker_configuration,
+)
+from activekg.candidate_index.repository import IndexRepository
 from activekg.common.control_plane import (
     ControlPlaneUnauthorized,
     ControlPlaneUnavailable,
@@ -53,7 +59,17 @@ HEALTHCHECK_PORT = int(os.getenv("EXTRACTION_HEALTHCHECK_PORT", "8080"))
 class WorkerHealthState:
     """Thread-safe in-memory readiness state; request handlers perform no I/O."""
 
-    def __init__(self, poll_interval_seconds: float) -> None:
+    def __init__(
+        self,
+        poll_interval_seconds: float,
+        *,
+        index_runtime: GenerationRuntime | None = None,
+        service: str = "extraction-worker",
+    ) -> None:
+        if service not in {"extraction-worker", "embedding-worker"}:
+            raise ValueError("worker_service_invalid")
+        self.service = service
+        self.index_runtime = index_runtime
         self._lock = threading.Lock()
         self._stopped = threading.Event()
         self._poll_interval = poll_interval_seconds
@@ -144,6 +160,9 @@ class WorkerHealthState:
             and database_status == "ready"
             and provider_status in {"configured", "ready", "degraded"}
         )
+        if self.index_runtime is not None:
+            components["candidate_index"] = self.index_runtime.status()
+            ready = ready and components["candidate_index"] == "ready"
         return ready, components
 
 
@@ -183,7 +202,9 @@ def worker_health_response(
     """Return one dependency-free worker health/readiness response contract."""
 
     if path == "/health":
-        return 200, b'{"status":"alive","service":"extraction-worker"}'
+        return 200, json.dumps(
+            {"status": "alive", "service": state.service}, separators=(",", ":")
+        ).encode()
     if path != "/readyz":
         return 404, None
 
@@ -238,6 +259,7 @@ class ExtractionWorker:
         max_attempts: int = 2,  # Only one fallback attempt
         retry_base_seconds: float = 10.0,
         retry_max_seconds: float = 60.0,
+        index_runtime: GenerationRuntime | None = None,
     ):
         """Initialize extraction worker.
 
@@ -260,6 +282,7 @@ class ExtractionWorker:
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.running = True
+        self.index_runtime = index_runtime
 
         signal.signal(signal.SIGINT, self._shutdown_handler)
         signal.signal(signal.SIGTERM, self._shutdown_handler)
@@ -276,6 +299,8 @@ class ExtractionWorker:
         logger.info("Extraction worker shutting down", extra={"signal": signum})
         self.running = False
         self.health_state.stop()
+        if self.index_runtime is not None:
+            self.index_runtime.request_stop()
 
     def _process_job(self, raw: bytes | str) -> None:
         """Process a single extraction job."""
@@ -665,6 +690,7 @@ def start_extraction_worker() -> None:
     from activekg.common.metrics import get_redis_client
     from activekg.common.schema_control import SchemaControlError, assert_startup_schema_ready
 
+    index_config = worker_configuration("extract")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -684,30 +710,54 @@ def start_extraction_worker() -> None:
         sys.exit(1)
 
     poll_interval = float(os.getenv("EXTRACTION_WORKER_POLL_INTERVAL", "1.0"))
-    health_state = WorkerHealthState(poll_interval)
+    index_runtime = (
+        GenerationRuntime(
+            GenerationWorker(
+                IndexRepository(dsn, tunables=index_config.tunables),
+                index_config.policy,
+                api_key=groq_key,
+            ),
+            "extract",
+        )
+        if index_config is not None
+        else None
+    )
+    health_state = WorkerHealthState(poll_interval, index_runtime=index_runtime)
     health_state.provider_configured()
 
     # Start healthcheck server for Railway
-    start_healthcheck_server(health_state)
-    start_database_monitor(health_state, dsn)
+    server = start_healthcheck_server(health_state)
+    monitor = start_database_monitor(health_state, dsn)
+    try:
+        redis_client = get_redis_client()
+        repo = GraphRepository(dsn)
+        privacy_repository = CandidatePrivacyRepository(dsn)
+        extraction_client = ExtractionClient(api_key=groq_key)
 
-    redis_client = get_redis_client()
-    repo = GraphRepository(dsn)
-    privacy_repository = CandidatePrivacyRepository(dsn)
-    extraction_client = ExtractionClient(api_key=groq_key)
-
-    worker = ExtractionWorker(
-        redis_client=redis_client,
-        repo=repo,
-        extraction_client=extraction_client,
-        health_state=health_state,
-        privacy_repository=privacy_repository,
-        poll_interval_seconds=poll_interval,
-        max_attempts=int(os.getenv("EXTRACTION_MAX_ATTEMPTS", "2")),
-        retry_base_seconds=float(os.getenv("EXTRACTION_RETRY_BASE_SECONDS", "10")),
-        retry_max_seconds=float(os.getenv("EXTRACTION_RETRY_MAX_SECONDS", "60")),
-    )
-    worker.run()
+        worker = ExtractionWorker(
+            redis_client=redis_client,
+            repo=repo,
+            extraction_client=extraction_client,
+            health_state=health_state,
+            privacy_repository=privacy_repository,
+            poll_interval_seconds=poll_interval,
+            max_attempts=int(os.getenv("EXTRACTION_MAX_ATTEMPTS", "2")),
+            retry_base_seconds=float(os.getenv("EXTRACTION_RETRY_BASE_SECONDS", "10")),
+            retry_max_seconds=float(os.getenv("EXTRACTION_RETRY_MAX_SECONDS", "60")),
+            index_runtime=index_runtime,
+        )
+        if index_runtime is not None:
+            index_runtime.start()
+        worker.run()
+    finally:
+        if index_runtime is not None:
+            index_runtime.request_stop()
+        health_state.stop()
+        server.shutdown()
+        server.server_close()
+        monitor.join(timeout=5)
+        if index_runtime is not None:
+            index_runtime.close()
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
     assert len(MIGRATIONS) == len(manifest["migration_manifest"]) == len(set(MIGRATIONS))
-    assert MIGRATIONS[-1] == "027_candidate_consent.sql"
+    assert MIGRATIONS[-1] == "028_candidate_generation_publication.sql"
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
     )

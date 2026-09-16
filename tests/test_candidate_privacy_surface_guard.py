@@ -29,6 +29,24 @@ def test_checked_in_surface_manifest_is_complete() -> None:
     guard.validate()
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "consent._require_global(cur, tokens, global_id)",
+        'ops.admit_flow_user(row["live_user"])',
+        'row["auth_version"] != row["account_auth_version"]',
+        "operator_approved is not True",
+        "hmac.compare_digest(plan.seal, _mac(key, body))",
+        "_posture(ops) != sealed.posture",
+    ],
+)
+def test_guard_rejects_catchup_authority_mutation(token):
+    with _temporary_mutation("activekg/candidate_index/catchup.py", token.encode(), b"False"):
+        with pytest.raises(guard.GuardError):
+            guard.validate()
+    guard.validate()
+
+
 def test_guard_rejects_duplicate_manifest_keys_and_restores_exact_bytes() -> None:
     old = b'  "version": 1,\n'
     new = old + b'  "version": 1,\n'
@@ -177,6 +195,23 @@ def test_guard_rejects_private_intake_privacy_authority_mutation() -> None:
 )
 def test_guard_rejects_consent_authority_mutation(old: bytes, new: bytes) -> None:
     with _temporary_mutation("activekg/api/candidate_consent.py", old, new):
+        with pytest.raises(guard.GuardError):
+            guard.validate()
+    guard.validate()
+
+
+@pytest.mark.parametrize(
+    "path,old,new",
+    [
+        ("activekg/api/candidate_index.py", b"Depends(reader)", b"Depends(get_jwt_claims)"),
+        ("activekg/candidate_index/search.py", b"tenant_id != self.tenant", b"False"),
+        ("activekg/candidate_index/search.py", b"SET LOCAL transaction_read_only=on", b"SELECT 1"),
+        ("activekg/candidate_index/search.py", b"hit.identity in admitted", b"True"),
+        ("activekg/candidate_index/search.py", b"use_reranker=False", b"use_reranker=True"),
+    ],
+)
+def test_guard_rejects_private_search_authority_mutation(path, old, new):
+    with _temporary_mutation(path, old, new):
         with pytest.raises(guard.GuardError):
             guard.validate()
     guard.validate()
