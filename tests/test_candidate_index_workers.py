@@ -41,6 +41,91 @@ from activekg.candidate_index.providers import (
 from tests.test_candidate_index import POLICY
 
 TEXT = "Backend engineer. Python and SQL. Distributed systems."
+
+
+@pytest.mark.parametrize("case", ["clean", "network", "overflow", "failure", "insecure"])
+def test_ml_import_is_bounded_before_stdin_and_processing_is_zero(tmp_path, case):
+    scratch = tmp_path / "import"
+    scratch.mkdir(mode=0o700)
+    if case == "insecure":
+        scratch.chmod(0o755)
+    script = r"""
+import builtins, importlib.util, io, json, os, resource, signal, socket, sys, types
+spec = importlib.util.spec_from_file_location('bounded_child', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+case = sys.argv[2]
+original = builtins.__import__
+imported = False
+class Input:
+    @property
+    def buffer(self): return self
+    def read(self, size):
+        assert imported
+        assert resource.getrlimit(resource.RLIMIT_FSIZE) == (0, 0)
+        return b'{}'  # malformed payload must still be read only after the fence
+sys.stdin = Input()
+def load(name, *args, **kwargs):
+    global imported
+    if name in ('torch', 'sentence_transformers'):
+        assert resource.getrlimit(resource.RLIMIT_FSIZE) == (1048576, 1048576)
+        assert os.stat(os.getcwd()).st_mode & 0o777 == 0o700
+        if name == 'sentence_transformers':
+            if case == 'network':
+                try: socket.getaddrinfo('synthetic.invalid', 443)
+                except module.WorkRefused: pass
+            if case == 'failure': raise ImportError('synthetic')
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            with open('trusted-template', 'wb', buffering=0) as output:
+                if case == 'overflow':
+                    output.write(b'x' * 1048576)
+                    try: output.write(b'x')
+                    except OSError as exc:
+                        assert exc.errno == 27
+                        raise ImportError('bounded') from None
+                    raise AssertionError('limit not enforced')
+                output.write(b'trusted')
+            imported = True
+        return types.ModuleType(name)
+    return original(name, *args, **kwargs)
+builtins.__import__ = load
+module._run_child('embed')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, providers.__file__, case],
+        env={**providers._child_environment(), "CANDIDATE_INDEX_IMPORT_DIR": str(scratch)},
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not result.stderr
+    assert json.loads(result.stdout) == {
+        "error": "incomplete" if case == "clean" else "provider_unavailable"
+    }
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+def test_parent_removes_ml_scratch_after_reaped_child(monkeypatch, outcome):
+    observed = []
+
+    async def child(mode, payload, *, deadline, scratch):
+        path = Path(scratch)
+        observed.append(path)
+        assert path.stat().st_mode & 0o777 == 0o700
+        (path / "trusted-template").write_bytes(b"synthetic")
+        if outcome == "failure":
+            raise WorkRefused("provider_unavailable")
+        if outcome == "cancel":
+            raise asyncio.CancelledError()
+        return []
+
+    monkeypatch.setattr(providers, "_child_work", child)
+    try:
+        asyncio.run(providers.child_work("embed", {}, deadline=time.monotonic() + 1))
+    except (WorkRefused, asyncio.CancelledError):
+        assert outcome != "success"
+    assert len(observed) == 1 and not observed[0].exists()
+
+
 RESULT = {"current_title": "Backend engineer", "skills_raw": ["Python", "SQL"], "confidence": 0.9}
 
 
@@ -519,6 +604,8 @@ def test_reranker_child_uses_exact_frozen_model_options_with_network_fenced(
 ):
     path = tmp_path / "models--cross-encoder--ms-marco-MiniLM-L-6-v2" / "snapshots" / ("a" * 40)
     path.mkdir(parents=True)
+    scratch = tmp_path / "import"
+    scratch.mkdir(mode=0o700)
     script = """
 import importlib.util, sys, types, socket
 spec = importlib.util.spec_from_file_location('bounded_child', sys.argv[1])
@@ -560,10 +647,12 @@ module._run_child('rerank')
         input=json.dumps(payload).encode(),
         capture_output=True,
         timeout=5,
-        env=providers._child_environment(),
+        env={**providers._child_environment(), "CANDIDATE_INDEX_IMPORT_DIR": str(scratch)},
     )
     assert result.returncode == 0 and not result.stderr
-    assert json.loads(result.stdout) == (
+    output = json.loads(result.stdout)
+    output.pop("fence", None)
+    assert output == (
         {"error": "provider_unavailable"} if network_probe else {"value": [1.0, -2.0]}
     )
 
@@ -616,6 +705,8 @@ module._run_child('parse')
 def test_embedding_child_never_silently_truncates_to_token_limit(tmp_path, tokens, expected):
     path = tmp_path / "snapshots" / ("a" * 40)
     path.mkdir(parents=True)
+    scratch = tmp_path / "import"
+    scratch.mkdir(mode=0o700)
     script = """
 import importlib.util, sys, types
 spec = importlib.util.spec_from_file_location('bounded_child', sys.argv[1])
@@ -636,6 +727,8 @@ class Fake:
 stub = types.ModuleType('activekg.engine.embedding_provider')
 stub.EmbeddingProvider = Fake
 sys.modules[stub.__name__] = stub
+sys.modules['torch'] = types.ModuleType('torch')
+sys.modules['sentence_transformers'] = types.ModuleType('sentence_transformers')
 module._run_child('embed')
 """
     payload = {"path": str(path), "texts": ["Python"], "revision": "a" * 40}
@@ -644,10 +737,11 @@ module._run_child('embed')
         input=json.dumps(payload).encode(),
         capture_output=True,
         timeout=5,
-        env=providers._child_environment(),
+        env={**providers._child_environment(), "CANDIDATE_INDEX_IMPORT_DIR": str(scratch)},
     )
     assert result.returncode == 0 and not result.stderr
     output = json.loads(result.stdout)
+    output.pop("fence", None)
     assert list(output) == [expected]
     if expected == "error":
         assert output["error"] == "chunk_overflow"

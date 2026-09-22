@@ -24,6 +24,7 @@ MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_ORIGINAL_BYTES = 5 * 1024 * 1024
 PARSER_SECONDS = 15
 PARSER_MEMORY_BYTES = 256 * 1024 * 1024
+ML_IMPORT_FILE_BYTES = 1024 * 1024
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -246,6 +247,19 @@ def _child_environment() -> dict[str, str]:
 
 
 async def child_work(mode: str, payload: dict[str, Any], *, deadline: float) -> Any:
+    if mode in {"embed", "rerank"}:
+        import tempfile
+
+        # Parent owns cleanup, including timeout/cancellation after killing and
+        # reaping the child. No candidate bytes are written to this directory.
+        with tempfile.TemporaryDirectory(prefix="candidate-index-import-") as scratch:
+            return await _child_work(mode, payload, deadline=deadline, scratch=scratch)
+    return await _child_work(mode, payload, deadline=deadline)
+
+
+async def _child_work(
+    mode: str, payload: dict[str, Any], *, deadline: float, scratch: str | None = None
+) -> Any:
     if mode not in {"parse", "embed", "rerank"}:
         raise WorkRefused("policy_mismatch")
     limit = MAX_TEXT_BYTES + MAX_RESPONSE_BYTES
@@ -264,7 +278,10 @@ async def child_work(mode: str, payload: dict[str, Any], *, deadline: float) -> 
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
-        env=_child_environment(),
+        env={
+            **_child_environment(),
+            **({"CANDIDATE_INDEX_IMPORT_DIR": scratch} if scratch else {}),
+        },
         limit=65536,
     )
     try:
@@ -281,6 +298,13 @@ async def child_work(mode: str, payload: dict[str, Any], *, deadline: float) -> 
         if code != 0:
             raise WorkRefused("incomplete" if mode == "parse" else "provider_unavailable")
         result = strict_json(bytes(output))
+        if mode in {"embed", "rerank"} and isinstance(result, dict) and "value" in result:
+            if result.pop("fence", None) != {
+                "network_attempts": 0,
+                "processing_file_limit": [0, 0],
+                "import_file_limit": ML_IMPORT_FILE_BYTES,
+            }:
+                raise WorkRefused("provider_unavailable")
         if not isinstance(result, dict) or set(result) not in ({"value"}, {"error"}):
             raise WorkRefused("incomplete")
         if "error" in result:
@@ -511,7 +535,8 @@ def _run_child(mode: str) -> None:
 
     logging.disable(logging.CRITICAL)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    if mode == "parse":
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     if mode == "parse":
         resource.setrlimit(resource.RLIMIT_AS, (PARSER_MEMORY_BYTES, PARSER_MEMORY_BYTES))
         resource.setrlimit(resource.RLIMIT_CPU, (PARSER_SECONDS, PARSER_SECONDS))
@@ -529,6 +554,32 @@ def _run_child(mode: str) -> None:
     # -I discards cwd/PYTHONPATH. Only this installed product root is admitted.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     try:
+        if mode in {"embed", "rerank"}:
+            import os
+            import stat
+            import tempfile
+
+            scratch = Path(os.environ["CANDIDATE_INDEX_IMPORT_DIR"])
+            info = scratch.lstat()
+            if (
+                not scratch.is_absolute()
+                or not stat.S_ISDIR(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_uid != os.getuid()
+            ):
+                raise WorkRefused("provider_unavailable")
+            os.chdir(scratch)
+            tempfile.tempdir = str(scratch)
+            # This is a per-file kernel limit, not an aggregate disk quota.
+            # Trusted imports only: stdin remains unread until the hard limit
+            # is irreversibly lowered to zero below.
+            resource.setrlimit(resource.RLIMIT_FSIZE, (ML_IMPORT_FILE_BYTES, ML_IMPORT_FILE_BYTES))
+            import sentence_transformers  # noqa: F401
+            import torch  # noqa: F401
+
+            resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+            if forbidden:
+                raise WorkRefused("provider_unavailable")
         raw = sys.stdin.buffer.read(8 * 1024 * 1024 + 1)
         if len(raw) > 8 * 1024 * 1024:
             raise WorkRefused("incomplete")
@@ -609,6 +660,14 @@ def _run_child(mode: str) -> None:
         if forbidden:
             raise WorkRefused("provider_unavailable")
         result = {"value": value}
+        if mode in {"embed", "rerank"}:
+            if resource.getrlimit(resource.RLIMIT_FSIZE) != (0, 0):
+                raise WorkRefused("provider_unavailable")
+            result["fence"] = {
+                "network_attempts": forbidden,
+                "processing_file_limit": [0, 0],
+                "import_file_limit": ML_IMPORT_FILE_BYTES,
+            }
     except WorkRefused as exc:
         result = {
             "error": exc.code

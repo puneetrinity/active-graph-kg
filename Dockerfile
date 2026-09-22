@@ -20,7 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r requirements.txt
 
+# Exact public artifacts are acquired at build time, never on index startup.
+# Keep this cache separate from an operator home and copy every referenced blob.
+ENV HF_HUB_CACHE=/opt/ealana-models/hub
+COPY scripts/candidate_index_artifacts.json scripts/provision_candidate_index_artifacts.py /app/scripts/
+RUN python /app/scripts/provision_candidate_index_artifacts.py
+
 COPY . /app
+
+RUN python /app/scripts/provision_candidate_index_artifacts.py --verify-only
 
 # Default runtime env (override in Railway/production)
 ENV HOST=0.0.0.0 \

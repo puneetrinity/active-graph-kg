@@ -12,6 +12,21 @@ env:
   POSTGRES_VERSION: "16"
 
 jobs:
+  candidate-index-image:
+    name: Pinned candidate index image (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build final image with pinned public artifacts
+        run: docker build --tag ealana-index-proof:${{ github.sha }} .
+      - name: Prove final image with no network, credentials or mounts
+        run: |
+          docker image inspect ealana-index-proof:${{ github.sha }} --format '{{.Id}}'
+          docker run --rm --network none --entrypoint python ealana-index-proof:${{ github.sha }} /app/scripts/check_candidate_index_image.py
+
   # ============================================================================
   # Job 1: Linting and Code Quality
   # ============================================================================
@@ -92,6 +107,7 @@ jobs:
           CANDIDATE_PRIVACY_SIGNAL_ACTOR_ID: "signal-service"
         run: |
           pytest \
+            tests/test_candidate_index_artifacts.py \
             tests/test_security_limits.py \
             tests/test_embedding_provider.py \
             tests/test_global_candidate_embedding_text.py \
@@ -1114,7 +1130,7 @@ jobs:
   build-summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [lint, fast-unit-tests, unit-tests, deploy-path-db, integration-tests]
+    needs: [lint, fast-unit-tests, unit-tests, deploy-path-db, integration-tests, candidate-index-image]
     if: always()
     steps:
       - name: Check build status
@@ -1126,7 +1142,8 @@ jobs:
           echo "  Deploy Path (DB): ${{ needs.deploy-path-db.result }}"
           echo "  Integration Tests: ${{ needs.integration-tests.result }}"
 
-          if [ "${{ needs.fast-unit-tests.result }}" != "success" ] || \
+          if [ "${{ needs.candidate-index-image.result }}" != "success" ] || \
+             [ "${{ needs.fast-unit-tests.result }}" != "success" ] || \
              [ "${{ needs.unit-tests.result }}" != "success" ] || \
              [ "${{ needs.deploy-path-db.result }}" != "success" ] || \
              [ "${{ needs.integration-tests.result }}" != "success" ]; then

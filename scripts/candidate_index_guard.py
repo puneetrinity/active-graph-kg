@@ -66,7 +66,7 @@ FROZEN = {
     "db/migrations/027_candidate_consent.sql": "d82dc142db35e1de81afc6fc9272a498a02c7e8eceb95e2b01d292b8fa50f72b",
     "db/migrations/add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
     "db/migrations/rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad",
-    "Dockerfile": "0f344c67fe9921f70c1a572a462aac40295337862527460ed349b7cbb972637c",
+    "Dockerfile": "7cbbb6f532cb81e7ac423b11eb2d37acb1afc8e2ca8361bc60798b63f4b66054",
     "pyproject.toml": "a208641d045be3aace8fa8b84851986a238e1c7b2769e4142d0837078f335d4a",
     "requirements.txt": "788182870906a59c8ebc772a71ce066228dba7dd27804c6701273cae6e2a336b",
     "tests/test_embedding_provider.py": "c6a73a33efe347aedb82bddf9b5a41112b7275b188adb0eaa3b9ceb4d083f8a8",
@@ -86,6 +86,10 @@ MIXED = {
     ),
 }
 AUTHORITIES = (
+    "scripts/provision_candidate_index_artifacts.py",
+    "scripts/candidate_index_artifacts.json",
+    "scripts/check_candidate_index_image.py",
+    ".github/workflows/ci.yml",
     MIGRATION,
     "activekg/candidate_index/contracts.py",
     "activekg/candidate_index/repository.py",
@@ -173,6 +177,27 @@ def literal(source: str, name: str):
 
 
 def validate(root: Path = ROOT) -> None:
+    docker = read(root, "Dockerfile")
+    if "HF_HUB_OFFLINE" in docker or "TRANSFORMERS_OFFLINE" in docker:
+        raise GuardError("index_image_offline_global")
+    require(
+        docker,
+        (
+            "HF_HUB_CACHE=/opt/ealana-models/hub",
+            "provision_candidate_index_artifacts.py --verify-only",
+        ),
+        "index_image_provision",
+    )
+    require(
+        read(root, "scripts/candidate_index_artifacts.json"),
+        ("1110a243fdf4706b3f48f1d95db1a4f5529b4d41", "233902d25c440f23af6f7d6e94d2946bac0bee0a"),
+        "index_image_pins",
+    )
+    require(
+        read(root, ".github/workflows/ci.yml"),
+        ("--network none", "needs.candidate-index-image.result", "check_candidate_index_image.py"),
+        "index_image_ci",
+    )
     catchup = read(root, "activekg/candidate_index/catchup.py")
     require(catchup, CATCHUP_REQUIRED, "index_catchup_authority")
     for path in (
@@ -287,7 +312,14 @@ def validate(root: Path = ROOT) -> None:
             'choice.get("finish_reason") != "stop"',
             '"-I"',
             '"-B"',
-            "env=_child_environment()",
+            "**_child_environment(),",
+            '**({"CANDIDATE_INDEX_IMPORT_DIR": scratch} if scratch else {})',
+            "ML_IMPORT_FILE_BYTES = 1024 * 1024",
+            'tempfile.TemporaryDirectory(prefix="candidate-index-import-")',
+            "resource.RLIMIT_FSIZE, (ML_IMPORT_FILE_BYTES, ML_IMPORT_FILE_BYTES)",
+            "resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))",
+            "stat.S_IMODE(info.st_mode) != 0o700",
+            '"processing_file_limit": [0, 0]',
             "child.kill()",
             "await child.wait()",
             "resource.setrlimit(resource.RLIMIT_AS, (PARSER_MEMORY_BYTES, PARSER_MEMORY_BYTES))",

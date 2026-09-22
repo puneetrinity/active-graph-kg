@@ -24,6 +24,40 @@ def test_current_engine_guard():
     guard.validate()
 
 
+@pytest.mark.parametrize(
+    "path,token,code",
+    [
+        (
+            "scripts/candidate_index_artifacts.json",
+            "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+            "index_image_pins",
+        ),
+        (
+            "scripts/candidate_index_artifacts.json",
+            "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+            "index_image_pins",
+        ),
+        (".github/workflows/ci.yml", "--network none", "index_image_ci"),
+        (".github/workflows/ci.yml", "needs.candidate-index-image.result", "index_image_ci"),
+    ],
+    ids=["embedding-pin", "reranker-pin", "offline-network", "required-ci"],
+)
+def test_image_tripwires(tmp_path, path, token, code):
+    root = copied(tmp_path)
+    file = root / path
+    file.write_text(file.read_text().replace(token, "REMOVED"))
+    with pytest.raises(guard.GuardError, match=code):
+        guard.validate(root)
+
+
+def test_no_global_offline(tmp_path):
+    root = copied(tmp_path)
+    file = root / "Dockerfile"
+    file.write_text(file.read_text() + "\nENV HF_HUB_OFFLINE=1\n")
+    with pytest.raises(guard.GuardError, match="index_image_offline_global"):
+        guard.validate(root)
+
+
 @pytest.mark.parametrize("token", guard.CATCHUP_REQUIRED)
 def test_catchup_authority_tokens(tmp_path, token):
     root = copied(tmp_path)
