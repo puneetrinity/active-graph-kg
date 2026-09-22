@@ -66,7 +66,7 @@ FROZEN = {
     "db/migrations/027_candidate_consent.sql": "d82dc142db35e1de81afc6fc9272a498a02c7e8eceb95e2b01d292b8fa50f72b",
     "db/migrations/add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
     "db/migrations/rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad",
-    "Dockerfile": "7cbbb6f532cb81e7ac423b11eb2d37acb1afc8e2ca8361bc60798b63f4b66054",
+    "Dockerfile": "ca6f50032caf424f75cc9a6a7653c2017d2a0c539d2cb53dccd1e4bf0b268d46",
     "pyproject.toml": "a208641d045be3aace8fa8b84851986a238e1c7b2769e4142d0837078f335d4a",
     "requirements.txt": "788182870906a59c8ebc772a71ce066228dba7dd27804c6701273cae6e2a336b",
     "tests/test_embedding_provider.py": "c6a73a33efe347aedb82bddf9b5a41112b7275b188adb0eaa3b9ceb4d083f8a8",

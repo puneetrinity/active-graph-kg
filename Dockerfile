@@ -30,6 +30,10 @@ COPY . /app
 
 RUN python /app/scripts/provision_candidate_index_artifacts.py --verify-only
 
+# Emit the proof from the exact image build. The operator binds this JSON line
+# to Railway's deployment image digest; it must never substitute a local/CI run.
+RUN python /app/scripts/check_candidate_index_image.py
+
 # Default runtime env (override in Railway/production)
 ENV HOST=0.0.0.0 \
     PORT=8000 \
