@@ -141,7 +141,7 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-028; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-029; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -149,6 +149,7 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         "026_organization_private_candidate_intake.sql",
         "027_candidate_consent.sql",
         "028_candidate_generation_publication.sql",
+        "029_organization_candidate_history.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -158,6 +159,21 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
             ).fetchall()
         )
         baselines = tuple(rows[name] for name in files)
+        # 029 dependencies go first, in the same transaction. The existing
+        # injected failure must restore these tables, policies and routines too.
+        from activekg.candidate_history.contracts import OWNER_FUNCTIONS as HISTORY_OWNER
+        from activekg.candidate_history.contracts import RUNTIME_FUNCTIONS as HISTORY_RUNTIME
+        from activekg.candidate_history.contracts import TABLES as HISTORY_TABLES
+
+        conn.execute(
+            sql.SQL("DROP TABLE ")
+            + sql.SQL(",").join(sql.Identifier("public", table) for table in HISTORY_TABLES)
+        )
+        for signature in HISTORY_RUNTIME + HISTORY_OWNER:
+            conn.execute(sql.SQL("DROP FUNCTION public." + signature))
+        conn.execute("DROP POLICY och_inbox_owner_read ON organization_decision_event_inbox")
+        conn.execute("DROP POLICY och_stream_owner_read ON organization_decision_stream_state")
+        conn.execute("DROP INDEX och_inbox_app_seq_idx")
         # Drop the complete 028 dependency closure inside the same transaction.
         # The injected failure below must restore these objects and their rows too.
         conn.execute(
@@ -212,6 +228,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         organization_candidate_was_baselined,
         consent_was_baselined,
         index_was_baselined,
+        history_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -245,6 +262,10 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         "UPDATE schema_migrations SET baselined=%s "
         "WHERE filename='028_candidate_generation_publication.sql'",
         (index_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s WHERE filename='029_organization_candidate_history.sql'",
+        (history_was_baselined,),
     )
 
 

@@ -793,7 +793,7 @@ def validate(root: Path = ROOT) -> None:
     )
     require(
         read(root, "activekg/api/operational.py"),
-        ("catalog_ready(cur)", "candidate_index_hmac_version_missing"),
+        ("if not catalog_ready(cur):", "candidate_index_hmac_version_missing"),
         "index_readiness",
     )
     if "/global-candidates/search-generations" in read(root, "activekg/api/main.py"):
@@ -806,8 +806,13 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-1] != Path(MIGRATION).name
-        or len(caller["migration_manifest"]) != 28
+        caller["migration_manifest"][-2:]
+        != [Path(MIGRATION).name, "029_organization_candidate_history.sql"]
+        or len(caller["migration_manifest"]) != 29
+        or hashlib.sha256(
+            json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
+        ).hexdigest()
+        != "54391d4a465f043f81cbde7b5d86cb1c4431cf53f740813f09a362adbae24beb"
     ):
         raise GuardError("index_ledger")
     if hashlib.sha256(sql.encode()).hexdigest() != caller["migration_files"][Path(MIGRATION).name]:

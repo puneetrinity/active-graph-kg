@@ -1055,7 +1055,7 @@ def test_full_main_registration_startup_and_readiness_bind_index_posture():
     from activekg.api.candidate_index import reader, writer
     from activekg.api.operational import ReadinessCoordinator, ReadinessResult
 
-    assert len(main.app.routes) == 82
+    assert len(main.app.routes) == 83
     registered = {route.path: route for route in main.app.routes}
     for path, authority in [
         ("/organization-candidates/source-content", writer),

@@ -64,6 +64,8 @@ def test_a2_existing_runtime_attribute_reconciliation(monkeypatch, attributes) -
                 return attributes
             if self.last.startswith("SELECT pg_has_role"):
                 return (False,)
+            if self.last == "SELECT to_regclass('public.organization_candidate_history_bindings')":
+                return (None,)  # Existing-role contract before the optional 029 tail.
             raise AssertionError("unexpected query")
 
     cur = Cursor()
@@ -82,7 +84,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
     assert len(MIGRATIONS) == len(manifest["migration_manifest"]) == len(set(MIGRATIONS))
-    assert MIGRATIONS[-1] == "028_candidate_generation_publication.sql"
+    assert MIGRATIONS[-1] == "029_organization_candidate_history.sql"
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
     )

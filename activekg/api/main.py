@@ -76,6 +76,7 @@ from activekg.api.operational import (
     ReadinessCoordinator,
     bounded_readiness_check,
 )
+from activekg.api.organization_candidate_history import router as candidate_history_router
 from activekg.api.organization_candidates import (
     organization_candidate_intake_enabled,
     organization_candidates_router,
@@ -95,6 +96,9 @@ from activekg.api.sourced_candidates import (
     sourced_candidate_ingest_mode,
     sourced_candidates_router,
 )
+from activekg.candidate_history.contracts import HistoryConfig
+from activekg.candidate_history.repository import HistoryRepository
+from activekg.candidate_history.worker import HistoryProjector
 from activekg.common.control_plane import (
     ControlPlaneUnauthorized,
     ControlPlaneUnavailable,
@@ -406,6 +410,30 @@ app.include_router(organization_decision_events_router)
 app.include_router(organization_candidates_router)
 app.include_router(candidate_consent_router)
 app.include_router(candidate_index_router)
+
+app.include_router(candidate_history_router)
+app.state.candidate_history_projector = None
+
+
+@app.on_event("startup")
+async def start_candidate_history_projector():
+    config = HistoryConfig.from_env(dict(os.environ))
+    if config.enabled:
+        projector = HistoryProjector(
+            HistoryRepository(os.getenv("ACTIVEKG_DSN") or os.getenv("DATABASE_URL") or ""), config
+        )
+        app.state.candidate_history_projector = projector
+        projector.start()
+
+
+@app.on_event("shutdown")
+async def stop_candidate_history_projector():
+    projector = app.state.candidate_history_projector
+    if projector is not None:
+        await projector.stop()
+        app.state.candidate_history_projector = None
+
+
 app.include_router(sourced_candidates_router)
 app.include_router(semantic_triggers_router)
 app.include_router(connector_retirement_router)
@@ -651,6 +679,13 @@ def readyz(
                 organization_candidate_intake_enabled=(organization_candidate_intake_enabled()),
                 candidate_consent_intake_enabled=candidate_consent_intake_enabled(),
                 candidate_index_problems=candidate_index_api_configuration_problems(),
+                candidate_history_healthy=(
+                    os.getenv("ORG_CANDIDATE_HISTORY_ENABLED", "false") == "false"
+                    or (
+                        app.state.candidate_history_projector is not None
+                        and app.state.candidate_history_projector.healthy()
+                    )
+                ),
                 sourced_candidate_ingest_mode=os.getenv(
                     "SOURCED_CANDIDATE_INGEST_MODE", "off"
                 ).strip(),

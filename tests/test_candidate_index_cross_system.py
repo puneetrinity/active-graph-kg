@@ -553,7 +553,7 @@ const {Client}=require('pg');const connect=async dsn=>{const c=new Client({conne
 const {runReleaseMigration}=await load('server/schema-control/runner.ts');
 const result=await runReleaseMigration({migrationsDir:join(process.env.TEST_FLOW_APP,'server/schema-migrations'),
  creds:{migrateUrl:process.env.TEST_OWNER,expectedTargetId:input,environment:'development',allowFreshInitialization:true},connect});
-if(result.applied.length!==13)throw Error('fixture_ledger');
+if(result.applied.length!==14)throw Error('fixture_ledger');
 const {provisionRuntimeRole}=await load('server/schema-control/runtimeRole.ts');
 await provisionRuntimeRole({migrateUrl:process.env.TEST_OWNER,runtimeUrl:process.env.DATABASE_URL,runtimeRole:new URL(process.env.DATABASE_URL).username,
  expectedTargetId:input,connectMigration:()=>connect(process.env.TEST_OWNER),connectRuntime:()=>connect(process.env.DATABASE_URL)});answer=true;
@@ -586,7 +586,7 @@ await provisionRuntimeRole({migrateUrl:process.env.TEST_OWNER,runtimeUrl:process
         self.owner = psycopg.connect(mo, autocommit=True)
         self.owned_memory_connection = self.owner
         assert (
-            self.owner.execute("SELECT count(*) FROM public.schema_migrations").fetchone()[0] == 28
+            self.owner.execute("SELECT count(*) FROM public.schema_migrations").fetchone()[0] == 29
         )
 
     def wait(self, predicate, seconds=75):

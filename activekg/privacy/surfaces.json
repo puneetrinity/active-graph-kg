@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 165,
+    "discovered_rows": 169,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -37,6 +37,47 @@
     }
   ],
   "references": [
+    {
+      "file": "activekg/api/organization_candidate_history.py",
+      "symbol": "read_history",
+      "tables": [], "calls": [],
+      "routes": ["POST /organization-candidate-history/read"],
+      "classification": "fenced", "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Service actor, scope and tenant binding precede the bounded read-only routine; current private source authority is checked again in SQL.",
+      "test_id": "privacy-history-route-authority",
+      "reason": "One application slice only, no admin bypass or global profile read."
+    },
+    {
+      "file": "activekg/candidate_history/repository.py",
+      "symbol": "<module>",
+      "tables": ["organization_candidate_history_bindings"], "calls": [], "routes": [],
+      "classification": "excluded",
+      "reason": "Catalog and privilege evidence queries only; no candidate row values or history data are read by this declaration."
+    },
+    {
+      "file": "activekg/candidate_history/repository.py",
+      "symbol": "HistoryRepository.step",
+      "tables": [], "calls": ["organization_candidate_history_step"], "routes": [],
+      "classification": "fenced", "direction": "derive",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "One event per transaction; exact tenant/application reference and nonblocking source status hold privacy locks until commit.",
+      "test_id": "privacy-history-projector",
+      "reason": "Only captured stage events are compacted; private-use authority does not require global matching permission."
+    },
+    {
+      "file": "activekg/candidate_history/repository.py",
+      "symbol": "HistoryRepository.read",
+      "tables": [], "calls": ["organization_candidate_history_read"], "routes": [],
+      "classification": "fenced", "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "READ ONLY transaction invokes one fixed routine with exact keyed tuple and fresh source/privacy authority; response tuple and watermarks validated.",
+      "test_id": "privacy-history-read",
+      "reason": "No raw event stream, identity expansion or cross-job aggregation is exposed."
+    },
     {
       "file": "activekg/candidate_index/catchup.py",
       "symbol": "<module>",

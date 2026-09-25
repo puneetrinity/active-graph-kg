@@ -682,7 +682,9 @@ def test_force_rls_and_actual_append_only_privileges(consent_target):
             "TRUNCATE candidate_consent_state,candidate_consent_sources,candidate_consent_receipts,"
             "candidate_index_sources,candidate_index_generations,candidate_index_extractions,"
             "candidate_index_vectors,candidate_index_publication_events,candidate_index_jobs,"
-            "candidate_index_heads,candidate_index_scheduler"
+            "candidate_index_heads,candidate_index_scheduler,"
+            "organization_candidate_history_bindings,"
+            "organization_candidate_history_applications,organization_candidate_history_subjects"
         )
 
 

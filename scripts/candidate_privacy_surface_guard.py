@@ -46,8 +46,15 @@ GOVERNED_TABLES = (
     "candidate_index_jobs",
     "candidate_index_heads",
     "candidate_index_scheduler",
+    "organization_candidate_history_bindings",
+    "organization_candidate_history_event_state",
+    "organization_candidate_history_applications",
+    "organization_candidate_history_subjects",
+    "organization_candidate_history_scan_state",
 )
 GOVERNED_SQL_FUNCTIONS = (
+    "organization_candidate_history_step",
+    "organization_candidate_history_read",
     "candidate_index_capture_source",
     "candidate_index_claim",
     "candidate_index_complete_extract",
@@ -235,6 +242,9 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
     "privacy-candidate-index-routines": tuple(
         f"SELECT public.{name}(" for name in GOVERNED_SQL_FUNCTIONS
     ),
+    "privacy-history-route-authority": ("Depends(require_history_reader)",),
+    "privacy-history-projector": ("public.organization_candidate_history_step(%s,%s)",),
+    "privacy-history-read": ("public.organization_candidate_history_read(",),
     "privacy-candidate-index-adopters": (
         "Depends(writer)",
         "Depends(reader)",
@@ -282,6 +292,28 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
 
 def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
     source = _reference_source(reference)
+    history_contracts = {
+        "privacy-history-route-authority": (
+            "Depends(require_history_reader)",
+            'claims.tenant_id != f"org_{command.organization_id}"',
+            "await asyncio.to_thread(repo.read, command)",
+            "HistoryReadRequest.model_validate_json(bytes(body))",
+        ),
+        "privacy-history-projector": (
+            "public.organization_candidate_history_step(%s,%s)",
+            "readonly=False",
+        ),
+        "privacy-history-read": (
+            "public.organization_candidate_history_read(%s,%s,%s,%s,%s,%s,%s)",
+            "readonly=True",
+            'f"org_{command.organization_id}"',
+            "HistoryResponse.model_validate_json",
+        ),
+    }
+    if row["test_id"] in history_contracts and any(
+        anchor not in source for anchor in history_contracts[row["test_id"]]
+    ):
+        raise GuardError("candidate history authority boundary changed")
     if row["test_id"] == "privacy-candidate-index-legacy-ownership":
         required = (
             "SELECT EXISTS (",

@@ -814,6 +814,8 @@ def test_runtime_evidence_is_scoped_and_cannot_mutate_coordination(target):
 
 
 def test_owner_append_only_and_complete_truncate_guard(target):
+    from activekg.candidate_history.contracts import TABLES as HISTORY_TABLES
+
     _, _, accepted, _ = source()
     with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
         target.execute(
@@ -821,7 +823,9 @@ def test_owner_append_only_and_complete_truncate_guard(target):
         )
     with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
         target.execute(
-            sql.SQL("TRUNCATE {}").format(sql.SQL(",").join(map(sql.Identifier, INDEX_TABLES)))
+            sql.SQL("TRUNCATE {}").format(
+                sql.SQL(",").join(map(sql.Identifier, (*INDEX_TABLES, *HISTORY_TABLES)))
+            )
         )
 
 
