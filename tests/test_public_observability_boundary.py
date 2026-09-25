@@ -49,7 +49,7 @@ def test_control_plane_verifier_fails_closed_and_compares_exact_bearer() -> None
 def test_route_registration_count_and_public_retirement_contract() -> None:
     routes = [route for route in main.app.routes if isinstance(route, APIRoute)]
     registrations = {(method, route.path) for route in routes for method in route.methods}
-    assert len(routes) == 82
+    assert len(routes) == 83
     assert {
         ("GET", "/openapi.json"),
         ("GET", "/docs"),
@@ -166,7 +166,11 @@ def test_authenticated_no_cache_directive_forces_a_fresh_readiness_snapshot() ->
     assert coordinator.force_refresh is True
 
 
-def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() -> None:
+def test_readiness_is_single_flight_and_uses_at_most_eleven_catalog_statements() -> None:
+    from activekg.candidate_history import repository as history_repository
+    from activekg.candidate_history.contracts import OWNER_FUNCTIONS as HISTORY_OWNER
+    from activekg.candidate_history.contracts import RUNTIME_FUNCTIONS as HISTORY_RUNTIME
+    from activekg.candidate_history.contracts import TABLES as HISTORY_TABLES
     from activekg.candidate_index import repository as index_repository
     from activekg.candidate_index.contracts import (
         IMMUTABLE_TABLES,
@@ -179,8 +183,9 @@ def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() ->
 
     # The fake catalog has a synthetic structure digest, but the real validator
     # still checks every table/column/routine privilege. PostgreSQL drift proofs
-    # bind the real digest separately. 028 adds one catalog and one key-set query.
+    # bind the real digests separately. 029 adds one exact catalog/ACL query.
     index_structure = {"synthetic": "candidate-index-catalog"}
+    history_structure = {"synthetic": "candidate-history-catalog"}
 
     class FakeCursor:
         def __init__(self) -> None:
@@ -195,9 +200,28 @@ def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() ->
 
         def execute(self, statement: str, _params=None) -> None:
             self.last = " ".join(statement.split())
+            self.params = _params
             self.statements.append(self.last)
 
         def fetchone(self):
+            if self.last.startswith("WITH chosen AS") and self.params[1] == list(HISTORY_TABLES):
+                return history_structure, {
+                    "tables": {
+                        name: {
+                            "table": [False] * 7,
+                            "columns": [False] * 4,
+                            "public": False,
+                            "public_columns": False,
+                            "grant_option": False,
+                            "column_grant_option": False,
+                        }
+                        for name in HISTORY_TABLES
+                    },
+                    "routines": {
+                        name: [name in HISTORY_RUNTIME, False, False]
+                        for name in HISTORY_RUNTIME + HISTORY_OWNER
+                    },
+                }
             if self.last.startswith("WITH chosen AS"):
                 return index_structure, {
                     "tables": {
@@ -529,6 +553,9 @@ def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() ->
         patch.object(
             index_repository, "INDEX_CATALOG_SHA256", sha256(canonical_json(index_structure))
         ),
+        patch.object(
+            history_repository, "HISTORY_CATALOG_SHA256", sha256(canonical_json(history_structure))
+        ),
     ):
         result = bounded_readiness_check(
             FakeRepository(),
@@ -538,8 +565,8 @@ def test_readiness_is_single_flight_and_uses_at_most_ten_catalog_statements() ->
         )
     assert result == ReadinessResult(True)
     assert FakeRepository.pool.timeout == 0.25
-    assert len(cursor.statements) == 10
-    assert sum(statement.startswith("WITH chosen AS") for statement in cursor.statements) == 1
+    assert len(cursor.statements) == 11
+    assert sum(statement.startswith("WITH chosen AS") for statement in cursor.statements) == 2
     assert cursor.statements.count("SELECT public.candidate_index_key_versions()") == 1
     assert not any("from candidates" in statement.lower() for statement in cursor.statements)
 

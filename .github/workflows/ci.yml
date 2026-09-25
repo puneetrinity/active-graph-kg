@@ -33,6 +33,7 @@ jobs:
   lint:
     name: Lint and Type Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       
@@ -65,6 +66,7 @@ jobs:
           python scripts/organization_candidate_intake_guard.py
           python scripts/candidate_consent_guard.py
           python scripts/candidate_index_guard.py
+          python scripts/organization_candidate_history_guard.py
 
       - name: Run type checking
         run: |
@@ -77,6 +79,7 @@ jobs:
   fast-unit-tests:
     name: Fast Unit Tests (No DB)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +96,9 @@ jobs:
           pip install --upgrade pip
           pip install pytest pytest-timeout
           pip install -r requirements.txt
+
+      - name: Check bounded collected test identifiers
+        run: python scripts/organization_candidate_history_guard.py --collect
 
       - name: Run unit tests (no database)
         env:
@@ -133,6 +139,8 @@ jobs:
             tests/test_candidate_index.py \
             tests/test_candidate_index_guard.py \
             tests/test_candidate_index_workers.py \
+            tests/test_organization_candidate_history.py \
+            tests/test_organization_candidate_history_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -142,6 +150,7 @@ jobs:
   unit-tests:
     name: Unit Tests (PG ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       matrix:
         postgres: ["15", "16"]
@@ -267,6 +276,7 @@ jobs:
   deploy-path-db:
     name: Deploy Path (clean DB + candidate schema)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       ACTIVEKG_CONTROL_PLANE_TOKEN: "ci-control-plane-token-for-deploy-path-verification"
       ACTIVEKG_SCHEMA_TARGET_ID: "11111111-1111-4111-8111-111111111111"
@@ -489,6 +499,39 @@ jobs:
             candidate_index_heads,candidate_index_scheduler TO index_readonly_test;
           SQL
           pytest tests/test_candidate_index_postgres.py -v --tb=short --timeout=240
+
+      - name: Run private history with both owner kinds and fresh roles
+        env:
+          ACTIVEKG_HISTORY_TEST_DISPOSABLE: "1"
+          ACTIVEKG_SCHEMA_ENVIRONMENT: development
+          ACTIVEKG_SCHEMA_TARGET_ID: "44444444-4444-4444-8444-444444444444"
+          ACTIVEKG_RUNTIME_PASSWORD: "history-runtime-fixture"
+        run: |
+          set -euo pipefail
+          for history_kind in ordinary super; do
+            history_owner="history_${history_kind}_owner_test"
+            history_runtime="history_${history_kind}_runtime_test"
+            history_database="history_${history_kind}_test"
+            history_attribute=NOSUPERUSER
+            export ACTIVEKG_HISTORY_EXPECT_SUPERUSER=0
+            if [ "$history_kind" = super ]; then
+              history_attribute=SUPERUSER
+              export ACTIVEKG_HISTORY_EXPECT_SUPERUSER=1
+            fi
+            sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<SQL
+          CREATE ROLE $history_owner LOGIN CREATEROLE NOINHERIT $history_attribute PASSWORD 'history-owner-fixture';
+          CREATE ROLE $history_runtime LOGIN NOINHERIT PASSWORD 'history-runtime-fixture';
+          GRANT $history_runtime TO $history_owner WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+          CREATE DATABASE $history_database OWNER $history_owner;
+          SQL
+            sudo -u postgres psql -d "$history_database" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION vector; CREATE EXTENSION pgcrypto;'
+            export ACTIVEKG_HISTORY_TEST_OWNER_DSN="postgresql://$history_owner:history-owner-fixture@127.0.0.1:5432/$history_database"
+            export ACTIVEKG_HISTORY_TEST_RUNTIME_DSN="postgresql://$history_runtime:history-runtime-fixture@127.0.0.1:5432/$history_database"
+            export ACTIVEKG_MIGRATE_DSN="$ACTIVEKG_HISTORY_TEST_OWNER_DSN" ACTIVEKG_RUNTIME_ROLE="$history_runtime"
+            ACTIVEKG_MIGRATION_APPLY=1 ACTIVEKG_SCHEMA_FRESH_INIT=1 python scripts/init_railway_db.py
+            ACTIVEKG_MIGRATION_APPLY=1 python scripts/init_railway_db.py
+            pytest tests/test_organization_candidate_history_postgres.py -v --tb=short --timeout=240
+          done
 
       - name: Start API under the restricted runtime DSN
         env:
@@ -766,6 +809,7 @@ jobs:
   integration-tests:
     name: E2E Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     
     services:
       redis:
@@ -961,6 +1005,7 @@ jobs:
   benchmarks:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: github.ref == 'refs/heads/main'
     
     services:
@@ -1092,6 +1137,7 @@ jobs:
   security:
     name: Security Scanning
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       
@@ -1130,6 +1176,7 @@ jobs:
   build-summary:
     name: Build Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [lint, fast-unit-tests, unit-tests, deploy-path-db, integration-tests, candidate-index-image]
     if: always()
     steps:

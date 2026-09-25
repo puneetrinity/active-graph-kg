@@ -865,6 +865,7 @@ def bounded_readiness_check(
     organization_candidate_intake_enabled: bool | None = None,
     candidate_consent_intake_enabled: bool | None = None,
     candidate_index_problems: list[str] | None = None,
+    candidate_history_healthy: bool | None = None,
     sourced_candidate_ingest_mode: str | None = None,
 ) -> ReadinessResult:
     """Run a fixed, read-only readiness census with at most ten SQL statements."""
@@ -880,6 +881,8 @@ def bounded_readiness_check(
         reasons.extend(privacy_problems)
     if candidate_index_problems:
         reasons.extend(candidate_index_problems)
+    if candidate_history_healthy is False:
+        reasons.append("candidate_history_projector_unavailable")
     check_decision_inbox = decision_inbox_enabled is not None
     if decision_inbox_enabled is False:
         reasons.append("decision_inbox_disabled")
@@ -1207,11 +1210,27 @@ def bounded_readiness_check(
                         break
                 if check_decision_inbox and any(
                     table in _DECISION_INBOX_TABLES
-                    and policy_name
+                    and (table, policy_name)
                     not in {
-                        "organization_decision_event_inbox_tenant",
-                        "organization_decision_stream_state_tenant",
+                        (
+                            "organization_decision_event_inbox",
+                            "organization_decision_event_inbox_tenant",
+                        ),
+                        (
+                            "organization_decision_stream_state",
+                            "organization_decision_stream_state_tenant",
+                        ),
                     }
+                    # 029's exact catalog binds these SELECT policies to the
+                    # table owner's role OID, including their expressions.
+                    and not (
+                        "029_organization_candidate_history.sql" in MIGRATIONS
+                        and (table, policy_name)
+                        in {
+                            ("organization_decision_event_inbox", "och_inbox_owner_read"),
+                            ("organization_decision_stream_state", "och_stream_owner_read"),
+                        }
+                    )
                     for table, policy_name in policies
                 ):
                     reasons.append("decision_inbox_policy_unexpected")
@@ -1884,6 +1903,14 @@ def bounded_readiness_check(
                         privacy_key_versions
                     ):
                         reasons.append("candidate_index_hmac_version_missing")
+                if "029_organization_candidate_history.sql" in MIGRATIONS:
+                    from activekg.candidate_history.repository import (
+                        catalog_ready as history_catalog_ready,
+                    )
+
+                    _check_budget(started_at)
+                    if not history_catalog_ready(cur):
+                        reasons.append("candidate_history_authority_unsafe")
         _check_budget(started_at)
     except TimeoutError:
         reasons.append("readiness_timeout")

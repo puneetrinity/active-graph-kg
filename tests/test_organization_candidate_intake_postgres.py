@@ -274,7 +274,10 @@ def test_private_intake_replay_conflict_rls_acl_and_append_only() -> None:
                 "candidate_index_sources, candidate_index_generations, "
                 "candidate_index_extractions, candidate_index_vectors, "
                 "candidate_index_publication_events, candidate_index_jobs, "
-                "candidate_index_heads, candidate_index_scheduler"
+                "candidate_index_heads, candidate_index_scheduler, "
+                "organization_candidate_history_bindings, organization_candidate_history_event_state, "
+                "organization_candidate_history_applications, organization_candidate_history_subjects, "
+                "organization_candidate_history_scan_state"
             )
         assert truncation.value.sqlstate == "55000"
         assert truncation.value.diag.message_primary == (

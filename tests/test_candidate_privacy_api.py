@@ -375,7 +375,7 @@ print(repr(privacy))
         check=True,
     )
     lines = result.stdout.strip().splitlines()
-    assert lines[-2] == "82"
+    assert lines[-2] == "83"
     assert lines[-1] == repr(
         sorted(
             {
