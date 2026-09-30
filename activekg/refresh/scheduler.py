@@ -61,15 +61,11 @@ class RefreshScheduler:
         if self.trigger_engine:
             self.scheduler.add_job(self.run_triggers, "interval", minutes=2, id="trigger_cycle")
 
-        # Run daily purge of soft-deleted nodes at 02:00 UTC
-        self.scheduler.add_job(self.run_purge, "cron", hour=2, minute=0, id="purge_deleted_cycle")
-
         self.scheduler.start()
         self.logger.info(
             "RefreshScheduler started",
             extra_fields={
                 "has_triggers": self.trigger_engine is not None,
-                "purge_enabled": True,
             },
         )
 
@@ -211,41 +207,6 @@ class RefreshScheduler:
             self.last_runs["trigger_cycle"] = {"fired": count, "ts": now_ts}
         except Exception as e:
             self.logger.error("Trigger cycle failed", extra_fields={"error": str(e)})
-
-    def run_purge(self):
-        """Execute daily purge of soft-deleted nodes across all tenants."""
-        try:
-            self.logger.info("Purge cycle begin")
-            now_ts = _now()
-            last = self._last_times.get("purge_deleted_cycle")
-            try:
-                if last is not None:
-                    track_schedule_run(
-                        "purge_deleted_cycle", kind="cron", inter_run_s=max(0.0, now_ts - last)
-                    )
-                else:
-                    track_schedule_run("purge_deleted_cycle", kind="cron", inter_run_s=None)
-            except Exception:
-                pass
-            self._last_times["purge_deleted_cycle"] = now_ts
-
-            # Purge across all tenants (tenant_id=None means all tenants)
-            result = self.repo.purge_deleted_nodes(
-                tenant_id=None,  # All tenants
-                batch_size=500,
-                dry_run=False,
-            )
-
-            self.logger.info(
-                "Purge cycle end",
-                extra_fields={
-                    "total_purged": result.get("total_purged", 0),
-                    "tenants_processed": result.get("tenants_processed", 0),
-                },
-            )
-            self.last_runs["purge_deleted_cycle"] = {"result": result, "ts": now_ts}
-        except Exception as e:
-            self.logger.error("Purge cycle failed", extra_fields={"error": str(e)})
 
     def run_drive_poller(self):
         """Poll Google Drive changes for all enabled tenants and enqueue events.

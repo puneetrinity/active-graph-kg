@@ -468,36 +468,7 @@ Expected:
  gs://activekg-staging-test/test-docs/staging-test.txt#0 | 2025-11-12 10:40:00+00    | 2025-12-12 10:40:00+00
 ```
 
-### Test Manual Purge
-
-```bash
-curl -X POST http://staging.activekg.example.com/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dry_run": false,
-    "tenant_id": "staging-tenant"
-  }' | jq .
-```
-
-Expected response:
-```json
-{
-  "purged_chunks": 1,
-  "purged_parents": 1,
-  "dry_run": false
-}
-```
-
-Verify deletion:
-
-```bash
-psql $ACTIVEKG_DSN -c "
-  SELECT COUNT(*) FROM document_chunks
-  WHERE tenant_id = 'staging-tenant' AND uri LIKE '%staging-test.txt%';
-"
-```
-
-Should return `0`.
+Hard deletion is not enabled; do not run a manual purge. Retain the soft-delete evidence for the separate retention package.
 
 ## Stage 7: Error Handling and Recovery
 
@@ -584,7 +555,6 @@ Expected metrics:
 - `connector_ingest_total`
 - `connector_ingest_errors_total`
 - `connector_worker_process_duration_bucket`
-- `connector_purger_total`
 - `connector_rotation_total`
 - `connector_config_decrypt_failures_total`
 
@@ -688,15 +658,16 @@ kubectl logs -l app=activekg-api --tail=50 | grep scheduler
 
 Expected log:
 ```
-INFO  RefreshScheduler started has_triggers=True purge_enabled=True
-INFO  Next purge cycle scheduled for 2025-11-13 02:00:00 UTC
+INFO  RefreshScheduler started has_triggers=True
 ```
 
-### Test Manual Purge Cycle
+No hard-delete purge job is registered or expected.
+
+### Test Soft Delete
 
 ```bash
 # Upload and delete test file
-echo "Purge test" > purge-test.txt
+echo "Soft-delete test" > purge-test.txt
 gsutil cp purge-test.txt gs://activekg-staging-test/test-docs/purge-test.txt
 sleep 60  # Wait for ingestion
 gsutil rm gs://activekg-staging-test/test-docs/purge-test.txt
@@ -708,17 +679,7 @@ psql $ACTIVEKG_DSN -c "
   WHERE tenant_id = 'staging-tenant' AND deleted_at IS NOT NULL;
 "
 
-# Trigger manual purge (don't wait for 02:00 UTC)
-curl -X POST http://staging.activekg.example.com/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": false, "tenant_id": "staging-tenant"}'
-
-# Verify purge
-psql $ACTIVEKG_DSN -c "
-  SELECT COUNT(*) FROM document_chunks
-  WHERE tenant_id = 'staging-tenant' AND deleted_at IS NOT NULL;
-"
-# Should return 0
+# Hard deletion is deliberately unavailable. Confirm the soft-delete row remains.
 ```
 
 ## Rollout Acceptance Criteria
@@ -733,7 +694,7 @@ Before promoting to production, all criteria must be met:
 - [ ] Search returns ingested documents
 - [ ] Updates replace existing chunks
 - [ ] Deletes soft-delete chunks
-- [ ] Purge removes soft-deleted chunks
+- [ ] Soft-deleted chunks are hidden while retained for the later deletion design
 - [ ] Backfill processes all historical objects
 
 ### Performance

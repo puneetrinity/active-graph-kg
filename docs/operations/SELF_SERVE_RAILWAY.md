@@ -162,7 +162,7 @@ ACTIVEKG_SCHEMA_ENVIRONMENT=production
 EMBEDDING_BACKEND=sentence-transformers
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 
-# Refresh/purge scheduler (set true on exactly one instance)
+# Refresh/trigger scheduler (set true on exactly one instance)
 RUN_SCHEDULER=true
 
 # Async embeddings (recommended for production)
@@ -176,7 +176,7 @@ WORKERS=2  # API server worker processes
 **Responsibilities:**
 - REST API endpoints (`/search`, `/upload`, `/nodes`, etc.); Q&A compatibility routes return HTTP 410
 - Connector compatibility routes return HTTP 410 without work
-- Background scheduler runs refresh and purge only
+- Background scheduler runs refresh and trigger work only; no purge is scheduled
 - Health checks and metrics
 
 ### Service 2: Embedding Worker
@@ -276,7 +276,7 @@ connector credentials during import or startup.
 ### Scheduler
 - **CRITICAL:** Run `RUN_SCHEDULER=true` on exactly ONE API instance
 - If you scale API horizontally, set `RUN_SCHEDULER=false` on replica instances
-- Scheduler runs only node refresh and purge work
+- Scheduler runs node refresh and optional trigger work, never hard deletion
 
 ### Workers
 - Follow the embedding/extraction worker runbooks for their independent scaling and retry behavior

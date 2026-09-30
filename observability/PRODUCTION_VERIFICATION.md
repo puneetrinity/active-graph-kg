@@ -235,14 +235,13 @@ All alerts include `runbook_url` pointing to `docs/operations/OPERATIONS.md#<sec
 ### Verify Links Accessible
 ```bash
 # Check runbook sections exist
-grep -E "^## (Webhook|Worker|Ingestion|Purger|Cache|Key)" docs/operations/OPERATIONS.md
+grep -E "^## (Webhook|Worker|Ingestion|Cache|Key)" docs/operations/OPERATIONS.md
 ```
 
 **Expected sections**:
 - `## Webhook Troubleshooting`
 - `## Worker Troubleshooting`
 - `## Ingestion Troubleshooting`
-- `## Purger`
 - `## Cache Subscriber`
 - `## Key Rotation`
 

@@ -200,30 +200,6 @@
         }
       },
       {
-        "id": 8,
-        "title": "Purger Activity",
-        "type": "timeseries",
-        "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
-        "targets": [
-          {
-            "expr": "sum(increase(connector_purger_total{result=\"success\"}[1h])) or vector(0)",
-            "legendFormat": "Successful Purges",
-            "refId": "A"
-          },
-          {
-            "expr": "sum(increase(connector_purger_total{result=\"error\"}[1h])) or vector(0)",
-            "legendFormat": "Failed Purges",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {"mode": "palette-classic"}
-          }
-        }
-      },
-      {
         "id": 9,
         "title": "Pub/Sub Subscriber Reconnects",
         "type": "stat",

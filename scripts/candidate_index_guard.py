@@ -34,7 +34,7 @@ FROZEN = {
     "activekg/extraction/queue.py": "bc6f16473d28055d1d363225f043862408f940b891ca6159842ff17b2f9a2be6",
     "activekg/extraction/schema.py": "3ad7aa7b677838d7311508c9f361d501b5dd74514d6a3d0ecd6b554010399e1c",
     "activekg/graph/candidate_repository.py": "11307b9bb4719532667592f20940ddca5c47bda05e2ca69bdbd495d9812e60f7",
-    "activekg/graph/repository.py": "fd9103046938e20de768554edaaad9ed350ce9d3c91fc46ab990a692e8a161c8",
+    "activekg/graph/repository.py": "288b86d355aab2a5256f89fbf5114c2ee84cbb0adddc3bc45a2934011d1ec970",
     "activekg/privacy/config.py": "97c6bc67fafcf4953c85e7b86579fae4b537f0c264550f378cad4ea159fa9546",
     "activekg/privacy/identity.py": "3c5bc791e51d0e8b5bd01964ab0f7ddd52a53420b44e0684f7a52c2ac16fa65c",
     "activekg/privacy/models.py": "078caf25e85a7e07aa32dad47c7ed86fe7bd9b75f3aeb3852527efad4e99522f",

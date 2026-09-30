@@ -132,7 +132,6 @@ curl -s http://localhost:8000/prometheus | grep connector_dlq_depth
 - `connector_worker_batch_latency_seconds_bucket` - Processing latency histogram
 - `connector_dlq_depth` - Dead letter queue depth gauge
 - `connector_dlq_total` - DLQ items counter
-- `connector_purger_total` - Purge operations counter
 - `connector_pubsub_reconnect_total` - Subscriber reconnect counter
 - `connector_rotation_total` - Key rotation operations counter
 - `connector_config_decrypt_failures_total` - Config decryption failures
@@ -160,7 +159,6 @@ If metrics are missing, ensure:
 | **WebhookTopicRejected** | >0 rejections | 1m | Topic not in allowlist |
 | **ConnectorQueueDepthHigh** | >1000 items | 10m | Worker queue backlog growing |
 | **IngestStalled** | 0 docs/sec | 30m | No ingestion activity detected |
-| **PurgerErrors** | >0 errors | 30m | Soft-delete purger errors |
 | **PubSubReconnectsHigh** | >5 reconnects | 15m | Subscriber connection instability |
 | **RotationErrors** | >0 errors | 30m | Key rotation failures |
 
@@ -178,7 +176,6 @@ If metrics are missing, ensure:
 - **Ingestion Rate**: Documents processed per second
 - **Ingestion Error Rate**: Percentage of failed ingests
 - **Worker Processing Latency**: p50/p95/p99 latencies
-- **Purger Activity**: Successful vs failed purge operations
 - **Pub/Sub Reconnects**: Subscriber stability metric
 - **Key Rotation Errors**: KEK rotation failures
 - **Config Decryption Failures**: Credential decryption issues
@@ -287,14 +284,6 @@ rate(connector_dlq_total[10m])
 increase(connector_dlq_total[1h])
 ```
 
-### Purger Metrics
-
-```promql
-# Purge activity
-increase(connector_purger_total{result="success"}[1h])
-increase(connector_purger_total{result="error"}[1h])
-```
-
 ### Rotation Metrics
 
 ```promql
@@ -388,7 +377,6 @@ docs/operations/OPERATIONS.md#<section>
 - `#webhook-troubleshooting` - Webhook verification and topic issues
 - `#worker-troubleshooting` - Queue depth and processing errors
 - `#ingestion-troubleshooting` - Error rates and stalled ingestion
-- `#purger` - Purger operation and errors
 - `#cache-subscriber` - Pub/Sub reconnection issues
 - `#key-rotation` - KEK rotation and decryption failures
 

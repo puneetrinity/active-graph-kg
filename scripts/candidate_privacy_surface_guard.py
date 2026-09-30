@@ -747,6 +747,20 @@ def _validate_raw_output_ban() -> None:
 
 def validate() -> None:
     manifest = _load_manifest()
+    retired_symbols = (
+        ("activekg/graph/repository.py", "purge_deleted_nodes"),
+        ("activekg/refresh/scheduler.py", "run_purge"),
+    )
+    for relative, symbol in retired_symbols:
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol
+            for node in ast.walk(tree)
+        ):
+            raise GuardError(f"retired purge symbol returned: {symbol}")
+    scheduler_source = (ROOT / "activekg/refresh/scheduler.py").read_text(encoding="utf-8")
+    if "purge_deleted_cycle" in scheduler_source:
+        raise GuardError("retired purge schedule returned")
     rows = manifest.get("references")
     if not isinstance(rows, list):
         raise GuardError("candidate privacy manifest references must be a list")
@@ -760,6 +774,8 @@ def validate() -> None:
         if not isinstance(row, dict):
             raise GuardError("candidate privacy manifest row is malformed")
         key = f"{row.get('file')}::{row.get('symbol')}"
+        if "purge_deleted_nodes" in key or "run_purge" in key or "purge_deleted_cycle" in key:
+            raise GuardError("retired purge manifest entry returned")
         if key in declared:
             raise GuardError(f"duplicate candidate privacy manifest row: {key}")
         if row.get("classification") not in {"fenced", "excluded"}:

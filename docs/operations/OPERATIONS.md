@@ -18,7 +18,6 @@ This guide covers operational procedures for Active Graph KG connector infrastru
 - [Worker Troubleshooting](#worker-troubleshooting)
 - [Ingestion Troubleshooting](#ingestion-troubleshooting)
 - [Embedding Queue](#embedding-queue)
-- [Purger Operations](#purger)
 - [Cache Subscriber](#cache-subscriber)
 - [Key Rotation](#key-rotation)
 - [Common Operations](#common-operations)
@@ -35,7 +34,7 @@ Active Graph KG connector system consists of:
 - **Worker**: Background process that polls queues and processes changes
 - **Embedding Queue (Redis)**: Stores async embedding jobs (`embedding:queue`, `embedding:retry`, `embedding:dlq`)
 - **Embedding Worker**: Background process that generates embeddings and updates node status
-- **Scheduler**: APScheduler-based cron tasks (purger runs daily at 02:00 UTC)
+- **Scheduler**: APScheduler-based refresh and trigger tasks; no hard-delete job is scheduled.
 - **Config Store**: Encrypted connector configurations in PostgreSQL
 
 ### Data Flow
@@ -61,7 +60,6 @@ POST /nodes or /nodes/batch
 | `connector_worker_queue_depth{provider,tenant}` | Queue backlog per tenant | >1000 items for 10m |
 | `connector_ingest_total` | Successful ingestions | 0 for 30m (stalled) |
 | `connector_ingest_errors_total` | Ingestion failures | Error rate >1% |
-| `connector_purger_total{result}` | Purger executions | Any errors |
 | `connector_rotation_total{result}` | Key rotation results | Any errors |
 
 ---
@@ -107,7 +105,6 @@ Import `observability/dashboards/connector_overview.json` for:
 - Ingestion rate/errors by provider
 - Queue depth heatmap
 - Webhook verification success rate
-- Purger execution history
 - P50/P95/P99 latency
 
 **Quick metrics queries**:
@@ -481,58 +478,6 @@ curl -X POST http://localhost:8000/admin/embedding/requeue \
 
 ---
 
-## Purger
-
-### Daily Purge Schedule
-
-Purger runs daily at 02:00 UTC via APScheduler cron job.
-
-**Configuration**:
-```bash
-export RUN_SCHEDULER=true  # Enable scheduler
-export PURGER_BATCH_SIZE=500  # Items per batch (default: 500)
-export PURGER_RETENTION_DAYS=30  # Grace period before hard delete (default: 30)
-```
-
-### Problem: Purger Errors
-
-**Alert**: `PurgerErrors`
-
-**Symptoms**:
-- `connector_purger_total{result="error"}` > 0
-
-**Diagnosis**:
-```bash
-# Check scheduler logs
-kubectl logs -l app=activekg-api | grep "purge cycle"
-
-# Manual purge dry-run
-curl -X POST http://$HOST/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": true, "tenant_id": "default"}'
-```
-
-**Common Errors**:
-- Database connection lost during purge
-- Transaction timeout (purging too many items)
-- Permission denied on connector_configs table
-
-**Resolution**:
-1. **Transaction timeout**:
-```bash
-# Reduce batch size
-export PURGER_BATCH_SIZE=100
-```
-
-2. **Manual purge** (if scheduler broken):
-```bash
-curl -X POST http://$HOST/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": false, "tenant_id": "default", "batch_size": 100}'
-```
-
----
-
 ## Cache Subscriber
 
 GCS Pub/Sub subscriber maintains long-lived connection to receive real-time notifications.
@@ -726,20 +671,6 @@ curl -X POST http://$HOST/_admin/connectors/gcs/backfill \
   }'
 ```
 
-### Manual Purge
-
-```bash
-# Dry-run first
-curl -X POST http://$HOST/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": true, "tenant_id": "acme-corp"}'
-
-# Execute
-curl -X POST http://$HOST/_admin/connectors/purge_deleted \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": false, "tenant_id": "acme-corp", "batch_size": 500}'
-```
-
 ### Check Health
 
 ```bash
@@ -805,8 +736,6 @@ curl -H "Authorization: Bearer $ACTIVEKG_CONTROL_PLANE_TOKEN" http://$HOST/metri
 | `CONNECTOR_KEK_ACTIVE_VERSION` | Active KEK version | `1` |
 | `CONNECTOR_WORKER_BATCH_SIZE` | Worker batch size | `10` |
 | `CONNECTOR_WORKER_POLL_INTERVAL` | Worker poll interval (seconds) | `1.0` |
-| `PURGER_BATCH_SIZE` | Purger batch size | `500` |
-| `PURGER_RETENTION_DAYS` | Soft-delete retention | `30` |
 
 ### Useful Queries
 

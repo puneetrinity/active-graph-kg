@@ -460,7 +460,6 @@ def _function_source(source: str, qualified: str) -> str:
     [
         ("activekg/graph/candidate_repository.py", "CandidateRepository.delete_candidate"),
         ("activekg/graph/repository.py", "GraphRepository.delete_node"),
-        ("activekg/graph/repository.py", "GraphRepository.purge_deleted_nodes"),
     ],
 )
 def test_destructive_helpers_are_byte_identical_to_the_deployed_base(
@@ -496,7 +495,6 @@ def test_increment_adds_no_destructive_candidate_data_path() -> None:
         "DROP TABLE",
         ".delete_candidate(",
         ".delete_node(",
-        ".purge_deleted_nodes(",
         "delete_blob(",
         "delete_file(",
     ):
