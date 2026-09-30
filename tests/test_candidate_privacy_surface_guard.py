@@ -30,6 +30,50 @@ def test_checked_in_surface_manifest_is_complete() -> None:
 
 
 @pytest.mark.parametrize(
+    ("relative", "old", "new"),
+    [
+        (
+            "activekg/refresh/scheduler.py",
+            b"    def shutdown(self):",
+            b"    def run_purge(self):\n        pass\n\n    def shutdown(self):",
+        ),
+        (
+            "activekg/refresh/scheduler.py",
+            b"    def shutdown(self):",
+            b"    purge_deleted_cycle = None\n\n    def shutdown(self):",
+        ),
+    ],
+)
+def test_guard_refuses_retired_purge_names(relative: str, old: bytes, new: bytes) -> None:
+    with _temporary_mutation(relative, old, new):
+        with pytest.raises(guard.GuardError, match="retired purge"):
+            guard.validate()
+
+
+def test_guard_refuses_retired_repository_method() -> None:
+    path = ROOT / "activekg/graph/repository.py"
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original + b"\n    def purge_deleted_nodes(self):\n        pass\n")
+        with pytest.raises(guard.GuardError, match="retired purge"):
+            guard.validate()
+    finally:
+        path.write_bytes(original)
+    guard.validate()
+
+
+def test_guard_refuses_retired_purge_manifest_entry() -> None:
+    with _temporary_mutation(
+        "activekg/privacy/surfaces.json",
+        b'"symbol": "GraphRepository.delete_node"',
+        b'"symbol": "GraphRepository.purge_deleted_nodes"',
+    ):
+        with pytest.raises(guard.GuardError, match="retired purge manifest"):
+            guard.validate()
+    guard.validate()
+
+
+@pytest.mark.parametrize(
     "token",
     [
         "consent._require_global(cur, tokens, global_id)",

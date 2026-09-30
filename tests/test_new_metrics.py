@@ -3,15 +3,12 @@
 Test script to verify new Prometheus metrics are being emitted correctly.
 
 Tests:
-1. Purger metrics (connector_purger_total, connector_purger_latency_seconds)
-2. Rate limiting metrics (api_rate_limited_total) - check existence
-3. Webhook topic rejection metrics (webhook_topic_rejected_total) - check existence
-4. DLQ metrics (connector_dlq_depth, connector_dlq_total) - check existence
+1. Rate limiting metrics (api_rate_limited_total) - check existence
+2. Webhook topic rejection metrics (webhook_topic_rejected_total) - check existence
+3. DLQ metrics (connector_dlq_depth, connector_dlq_total) - check existence
 """
 
-import json
 import os
-import time
 
 import requests
 
@@ -88,83 +85,6 @@ def test_metric_exists(
     return True
 
 
-def test_purger_endpoint() -> bool:
-    """Test purger endpoint and verify metrics are emitted."""
-    print("\n=== Testing Purger Endpoint ===")
-
-    # Get baseline metrics
-    print("Fetching baseline metrics...")
-    baseline = get_prometheus_metrics()
-    baseline_metrics = parse_metrics(baseline)
-
-    baseline_purger_total = 0
-    if "connector_purger_total" in baseline_metrics:
-        for line in baseline_metrics["connector_purger_total"]:
-            if 'result="success"' in line:
-                baseline_purger_total = float(line.split()[-1])
-                print(
-                    f'Baseline connector_purger_total{{result="success"}}: {baseline_purger_total}'
-                )
-                break
-
-    # Call purger endpoint
-    print("\nCalling purger endpoint (dry_run=true)...")
-    try:
-        response = requests.post(
-            "http://localhost:8000/_admin/connectors/purge_deleted",
-            json={"dry_run": True, "tenant_id": "default"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        result = response.json()
-        print(f"✅ Purger response: {json.dumps(result, indent=2)}")
-    except Exception as e:
-        print(f"❌ Purger endpoint failed: {e}")
-        return False
-
-    # Wait a bit for metrics to be recorded
-    time.sleep(2)
-
-    # Get updated metrics
-    print("\nFetching updated metrics...")
-    updated = get_prometheus_metrics()
-    updated_metrics = parse_metrics(updated)
-
-    # Check connector_purger_total incremented
-    success = True
-    if "connector_purger_total" in updated_metrics:
-        for line in updated_metrics["connector_purger_total"]:
-            if 'result="success"' in line:
-                new_count = float(line.split()[-1])
-                print(f'\n✅ connector_purger_total{{result="success"}}: {new_count}')
-                if new_count > baseline_purger_total:
-                    print(f"   ✓ Metric incremented (was {baseline_purger_total})")
-                else:
-                    print(f"   ⚠️  Metric did not increment (still {baseline_purger_total})")
-                    success = False
-                break
-    else:
-        print("❌ connector_purger_total not found in updated metrics")
-        success = False
-
-    # Check connector_purger_latency_seconds exists
-    if (
-        "connector_purger_latency_seconds_bucket" in updated_metrics
-        or "connector_purger_latency_seconds_sum" in updated_metrics
-    ):
-        print("✅ connector_purger_latency_seconds histogram exists")
-        # Show some buckets
-        if "connector_purger_latency_seconds_bucket" in updated_metrics:
-            print("   Sample buckets:")
-            for line in updated_metrics["connector_purger_latency_seconds_bucket"][:3]:
-                print(f"     {line}")
-    else:
-        print("❌ connector_purger_latency_seconds not found")
-        success = False
-
-    return success
-
-
 def test_rate_limiting_metrics(metrics: dict[str, list[str]]) -> bool:
     """Test that rate limiting metrics are defined (even if zero)."""
     print("\n=== Testing Rate Limiting Metrics ===")
@@ -229,9 +149,6 @@ def main():
     print("Prometheus Metrics Verification Test")
     print("=" * 70)
 
-    # Test purger endpoint (this will actually trigger metrics)
-    purger_success = test_purger_endpoint()
-
     # Fetch latest metrics for other tests
     print("\n=== Fetching All Metrics for Verification ===")
     metrics_text = get_prometheus_metrics()
@@ -251,13 +168,12 @@ def main():
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(f"Purger metrics:        {'✅ PASS' if purger_success else '❌ FAIL'}")
     print(f"Rate limiting metrics: {'✅ PASS' if rate_limiting_success else '❌ FAIL'}")
     print(f"Webhook metrics:       {'✅ PASS' if webhook_success else '❌ FAIL'}")
     print(f"DLQ metrics:           {'✅ PASS' if dlq_success else '❌ FAIL'}")
     print()
 
-    all_success = purger_success and rate_limiting_success and webhook_success and dlq_success
+    all_success = rate_limiting_success and webhook_success and dlq_success
 
     if all_success:
         print("✅ All metrics tests passed!")

@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 169,
+    "discovered_rows": 168,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -2652,21 +2652,6 @@
       "candidate_scope": "candidate_linked_node",
       "actions": [],
       "reason": "Incident-only class predicate; it does not return candidate/profile/resume nodes."
-    },
-    {
-      "file": "activekg/graph/repository.py",
-      "symbol": "GraphRepository.purge_deleted_nodes",
-      "tables": [
-        "candidates",
-        "nodes"
-      ],
-      "calls": [],
-      "routes": [],
-      "classification": "excluded",
-      "direction": "read_write",
-      "candidate_scope": "candidate_linked_node",
-      "actions": [],
-      "reason": "Broken legacy purge is unchanged, unscheduled, and uncalled; F401/CP159 remain open."
     },
     {
       "file": "activekg/privacy/repository.py",

@@ -231,7 +231,7 @@ class _RecordedScheduler:
         self.started = True
 
 
-def test_scheduler_registers_refresh_and_purge_but_no_connector_jobs() -> None:
+def test_scheduler_registers_refresh_but_no_purge_or_connector_jobs() -> None:
     refresh_scheduler = RefreshScheduler(object(), object(), trigger_engine=None)
     recorded = _RecordedScheduler()
     refresh_scheduler.scheduler = recorded  # type: ignore[assignment]
@@ -239,9 +239,11 @@ def test_scheduler_registers_refresh_and_purge_but_no_connector_jobs() -> None:
     refresh_scheduler.start()
 
     assert recorded.started
-    assert recorded.job_ids == ["refresh_cycle", "purge_deleted_cycle"]
+    assert recorded.job_ids == ["refresh_cycle"]
 
     scheduler_source = Path("activekg/refresh/scheduler.py").read_text()
+    assert "purge_deleted_cycle" not in scheduler_source
+    assert "def run_purge(" not in scheduler_source
     assert 'id="drive_poller"' not in scheduler_source
     assert 'id="gcs_poller"' not in scheduler_source
     assert "def run_drive_poller(" in scheduler_source

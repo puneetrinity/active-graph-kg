@@ -146,21 +146,6 @@ groups:
           runbook_url: "docs/operations/OPERATIONS.md#ingestion-troubleshooting"
 
       # ========================================
-      # PURGER ALERTS
-      # ========================================
-
-      # Purger errors
-      - alert: PurgerErrors
-        expr: increase(connector_purger_total{result="error"}[30m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Purger encountered errors"
-          description: "Soft-delete purger reported errors in the last 30m."
-          runbook_url: "docs/operations/OPERATIONS.md#purger"
-
-      # ========================================
       # SUBSCRIBER HEALTH ALERTS
       # ========================================
 
