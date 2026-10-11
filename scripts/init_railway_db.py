@@ -96,6 +96,8 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "031_rc_clock_tolerance.sql": [("rc_skills_catalog",)],
+    "030_rc_skill_observations.sql": [("rc_skills_catalog_base",)],
     "029_organization_candidate_history.sql": [("candidate_history_catalog",)],
     "028_candidate_generation_publication.sql": [("candidate_index_catalog",)],
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
@@ -997,6 +999,17 @@ def _normalize_sql_definition(value: str) -> str:
 
 def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
     kind = check[0]
+    if kind in {"rc_skills_catalog", "rc_skills_catalog_base"}:
+        from activekg.rc_skills.repository import RC_CATALOG_SHA256, catalog_evidence
+
+        digest = catalog_evidence(cur)[0]
+        # 030 is verified before forward 031 on a fresh database. Only that
+        # historical checkpoint permits its frozen catalogue; 031 and runtime
+        # readiness always require the current catalogue.
+        return digest == RC_CATALOG_SHA256 or (
+            kind == "rc_skills_catalog_base"
+            and digest == "6de2a5b81f5be4c54af7a969a82cf6ae74f12a86d15315ef61e553905d900a17"
+        )
     if kind == "candidate_history_catalog":
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence
 
@@ -1549,6 +1562,7 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
     # this common provisioner without knowing the new package's hardener.
     # No-op before 029; within the same transaction as the blanket grants.
     _harden_candidate_history_runtime_privileges(cur, role)
+    _harden_rc_skills_runtime_privileges(cur, role)
     print(f"✓ Runtime role {role} granted table access (no ownership; ledger/receipts hardened)")
 
 
@@ -1857,6 +1871,52 @@ def _harden_candidate_history_runtime_privileges(cur: psycopg.Cursor, role: str)
         )
 
 
+def _harden_rc_skills_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.rc_skills.contracts import RUNTIME_FUNCTIONS, TABLES
+
+    cur.execute("SELECT to_regclass('public.rc_skill_observations')")
+    if cur.fetchone()[0] is None:
+        return
+    for table in TABLES:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON TABLE public.{} FROM {}, PUBLIC").format(
+                sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) "
+            "AND attnum>0 AND NOT attisdropped ORDER BY attnum",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({}),INSERT({}),UPDATE({}),REFERENCES({}) "
+                "ON TABLE public.{} FROM {}, PUBLIC"
+            ).format(
+                columns, columns, columns, columns, sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+    for signature in RUNTIME_FUNCTIONS:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION public.{} FROM {}, PUBLIC").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+
+
+def _assert_rc_skills_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.rc_skills.repository import catalog_ready
+
+    if not catalog_ready(cur, role):
+        raise SchemaControlError("RC skills schema/privileges invalid")
+
+
 def _assert_candidate_history_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
     from activekg.candidate_history.repository import catalog_ready
 
@@ -2155,6 +2215,8 @@ def main():
                     _harden_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:
                     _harden_candidate_history_runtime_privileges(cur, runtime_role)
+                if "030_rc_skill_observations.sql" in migrations:
+                    _harden_rc_skills_runtime_privileges(cur, runtime_role)
                 assert_ledger(read_ledger(cur), records, allow_prefix=False)
                 _assert_full_baseline(cur, migrations)
                 _assert_runtime_role_catalog(cur, runtime_role)
@@ -2167,6 +2229,8 @@ def main():
                     _assert_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:
                     _assert_candidate_history_runtime_privileges(cur, runtime_role)
+                if "030_rc_skill_observations.sql" in migrations:
+                    _assert_rc_skills_runtime_privileges(cur, runtime_role)
                 finish_attempt(cur, attempt_id, "success")
             except BaseException as exc:
                 if attempt_id is not None:

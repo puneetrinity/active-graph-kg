@@ -67,6 +67,7 @@ jobs:
           python scripts/candidate_consent_guard.py
           python scripts/candidate_index_guard.py
           python scripts/organization_candidate_history_guard.py
+          python scripts/rc_skills_guard.py
 
       - name: Run type checking
         run: |
@@ -142,6 +143,9 @@ jobs:
             tests/test_candidate_index_workers.py \
             tests/test_organization_candidate_history.py \
             tests/test_organization_candidate_history_guard.py \
+            tests/test_rc_skills.py \
+            tests/test_rc_skills_api.py \
+            tests/test_rc_skills_guard.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -270,6 +274,74 @@ jobs:
             tests/test_base_engine_gaps.py \
             -v --tb=short --timeout=60
         continue-on-error: false
+
+  # ============================================================================
+  # RC authority on production-major PostgreSQL, including locale-independent catalog proof.
+  # The server listens on loopback itself, preserving the fresh-target proof.
+  # No provider key, external lookup, profile fixture or real spend is used.
+  # ============================================================================
+  rc-skills-postgres:
+    name: RC skills (PG17, ${{ matrix.locale }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        locale: ["C", "en_US.utf8"]
+    env:
+      ACTIVEKG_RC_TEST_DISPOSABLE: "1"
+      ACTIVEKG_RC_TEST_OWNER_DSN: postgresql://rc_memory_owner_test@127.0.0.1:55510/rc_memory_ci_test
+      ACTIVEKG_RC_TEST_RUNTIME_DSN: postgresql://rc_memory_runtime_test:synthetic-only@127.0.0.1:55510/rc_memory_ci_test
+      ACTIVEKG_MIGRATE_DSN: postgresql://rc_memory_owner_test@127.0.0.1:55510/rc_memory_ci_test
+      ACTIVEKG_SCHEMA_TARGET_ID: "11111111-1111-4111-8111-111111111111"
+      ACTIVEKG_SCHEMA_ENVIRONMENT: development
+      ACTIVEKG_SCHEMA_SOURCE_COMMIT: "0000000000000000000000000000000000000000"
+      ACTIVEKG_RUNTIME_ROLE: rc_memory_runtime_test
+      ACTIVEKG_RUNTIME_PASSWORD: synthetic-only
+      ACTIVEKG_MIGRATION_APPLY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install existing test dependencies
+        run: pip install -r requirements.txt pytest pytest-timeout
+      - name: Start loopback-only PG17 with pgvector
+        env:
+          RC_TEST_LOCALE: ${{ matrix.locale }}
+        run: |
+          docker run -d --name rc-memory-ci --network=host --memory=512m --cpus=2 \
+            -e POSTGRES_HOST_AUTH_METHOD=trust pgvector/pgvector:pg17 \
+            -c listen_addresses=127.0.0.1 -c port=55510 -c shared_buffers=32MB -c max_parallel_workers=0
+          for attempt in $(seq 1 30); do
+            if docker exec rc-memory-ci pg_isready -h 127.0.0.1 -p 55510 -U postgres; then break; fi
+            sleep 1
+          done
+          python - <<'PY'
+          import os
+          import psycopg
+          from psycopg import sql
+          with psycopg.connect('postgresql://postgres@127.0.0.1:55510/postgres',autocommit=True) as conn:
+              conn.execute('CREATE ROLE rc_memory_owner_test LOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE')
+              conn.execute('CREATE ROLE rc_memory_runtime_test LOGIN NOSUPERUSER NOBYPASSRLS')
+              conn.execute('GRANT rc_memory_runtime_test TO rc_memory_owner_test WITH ADMIN TRUE, INHERIT FALSE, SET FALSE')
+              locale=os.environ['RC_TEST_LOCALE']
+              assert locale in {'C','en_US.utf8'}
+              conn.execute(sql.SQL('CREATE DATABASE rc_memory_ci_test OWNER rc_memory_owner_test TEMPLATE template0 LC_COLLATE {} LC_CTYPE {}').format(sql.Literal(locale),sql.Literal(locale)))
+          with psycopg.connect('postgresql://postgres@127.0.0.1:55510/rc_memory_ci_test',autocommit=True) as conn:
+              conn.execute('CREATE EXTENSION vector')
+              conn.execute('CREATE EXTENSION pgcrypto')
+          PY
+      - name: Fresh release and idempotent release replay
+        run: |
+          ACTIVEKG_SCHEMA_FRESH_INIT=1 python scripts/init_railway_db.py
+          python scripts/init_railway_db.py
+      - name: RC database privacy, cache and privilege regressions
+        run: pytest tests/test_rc_skills_postgres.py -v --tb=short --timeout=60
+      - name: Stop owned test database
+        if: always()
+        run: docker stop rc-memory-ci || true
 
   # ============================================================================
   # Job 3.5: Deploy Path — clean-DB init via the real Railway script

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import re
 import sys
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "activekg" / "privacy" / "surfaces.json"
 
 GOVERNED_TABLES = (
+    "rc_skill_observations",
     "global_candidates",
     "candidates",
     "candidate_identifiers",
@@ -53,6 +55,8 @@ GOVERNED_TABLES = (
     "organization_candidate_history_scan_state",
 )
 GOVERNED_SQL_FUNCTIONS = (
+    "memory_rc_read",
+    "memory_rc_finish",
     "organization_candidate_history_step",
     "organization_candidate_history_read",
     "candidate_index_capture_source",
@@ -68,6 +72,7 @@ GOVERNED_SQL_FUNCTIONS = (
     "candidate_index_key_versions",
 )
 GOVERNED_CALLS = (
+    "RcRepository",
     "CandidateRepository",
     "upsert_global_candidate",
     "upsert_signal_candidate_to_global",
@@ -87,7 +92,7 @@ GOVERNED_CALLS = (
     "child_work",
     "_parse_document",
 )
-ROUTE_MARKERS = ("candidate", "profile", "resume")
+ROUTE_MARKERS = ("candidate", "profile", "resume", "rc-skills")
 ROUTE_DECORATORS = {"get", "post", "put", "patch", "delete"}
 GOVERNED_ROUTES = {
     ("get", "/nodes"),
@@ -197,6 +202,13 @@ def _reference_source(reference: Reference) -> str:
 
 
 _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
+    "privacy-rc-cache": (
+        "self._privacy(",
+        "candidate_privacy_match(",
+        "Depends(require_reader)",
+        "Depends(require_writer)",
+        "claims.actor_id",
+    ),
     "privacy-api-contract": ("require_candidate_privacy_", "_repo()"),
     "privacy-candidate-fences": (
         "_require_privacy_allowed",
@@ -292,6 +304,18 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
 
 def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
     source = _reference_source(reference)
+    if row["test_id"] == "privacy-rc-cache":
+        spec = importlib.util.spec_from_file_location(
+            "rc_guard", ROOT / "scripts/rc_skills_guard.py"
+        )
+        if spec is None or spec.loader is None:
+            raise GuardError("RC guard is missing")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.validate(ROOT)
+        if reference.symbol in {"RcRepository.read", "RcRepository.finish"}:
+            if source.index("self._privacy(") > source.index("SELECT public.memory_rc_"):
+                raise GuardError("RC privacy check moved after cache authority")
     history_contracts = {
         "privacy-history-route-authority": (
             "Depends(require_history_reader)",

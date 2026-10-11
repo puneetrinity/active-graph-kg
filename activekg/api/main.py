@@ -153,6 +153,7 @@ from activekg.privacy.repository import (
     CandidatePrivacyRepository,
     CandidatePrivacyUnavailable,
 )
+from activekg.rc_skills.router import router as rc_skills_router
 from activekg.refresh.scheduler import RefreshScheduler
 
 # Metrics enabled flag
@@ -412,6 +413,7 @@ app.include_router(candidate_consent_router)
 app.include_router(candidate_index_router)
 
 app.include_router(candidate_history_router)
+app.include_router(rc_skills_router)
 app.state.candidate_history_projector = None
 
 
