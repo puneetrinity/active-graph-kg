@@ -141,7 +141,7 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-029; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-030; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -150,6 +150,7 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         "027_candidate_consent.sql",
         "028_candidate_generation_publication.sql",
         "029_organization_candidate_history.sql",
+        "030_rc_skill_observations.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -159,6 +160,11 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
             ).fetchall()
         )
         baselines = tuple(rows[name] for name in files)
+        # 030 retains a RESTRICT FK and the existing privacy append-only trigger.
+        # Drop its exact disposable dependency closure before rewinding privacy.
+        conn.execute("DROP TABLE public.rc_skill_observations")
+        conn.execute("DROP FUNCTION public.memory_rc_read(text,jsonb)")
+        conn.execute("DROP FUNCTION public.memory_rc_finish(text,uuid,jsonb)")
         # 029 dependencies go first, in the same transaction. The existing
         # injected failure must restore these tables, policies and routines too.
         from activekg.candidate_history.contracts import OWNER_FUNCTIONS as HISTORY_OWNER
@@ -229,6 +235,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         consent_was_baselined,
         index_was_baselined,
         history_was_baselined,
+        rc_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -266,6 +273,10 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
     _sql(
         "UPDATE schema_migrations SET baselined=%s WHERE filename='029_organization_candidate_history.sql'",
         (history_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s WHERE filename='030_rc_skill_observations.sql'",
+        (rc_was_baselined,),
     )
 
 

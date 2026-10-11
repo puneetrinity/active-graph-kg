@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 168,
+    "discovered_rows": 175,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -37,6 +37,60 @@
     }
   ],
   "references": [
+    {
+      "file": "activekg/rc_skills/repository.py", "symbol": "<module>",
+      "tables": ["rc_skill_observations"], "calls": [], "routes": [],
+      "classification": "excluded",
+      "reason": "Schema catalog and privilege declarations only; no candidate rows are read."
+    },
+    {
+      "file": "activekg/rc_skills/repository.py", "symbol": "RcRepository._privacy",
+      "tables": ["global_candidate_source_identities"], "calls": [], "routes": [],
+      "classification": "fenced", "direction": "read", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Public provider mappings only; token-before-global locks and current token directives fence the whole cache transaction.",
+      "test_id": "privacy-rc-cache", "reason": "Unknown and private-only identities cannot authorize skill reuse."
+    },
+    {
+      "file": "activekg/rc_skills/repository.py", "symbol": "RcRepository.read",
+      "tables": [], "calls": ["memory_rc_read"], "routes": [],
+      "classification": "fenced", "direction": "read", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Read-only transaction checks privacy before the minimal routine and validates every returned observation.",
+      "test_id": "privacy-rc-cache", "reason": "Cached skills are not a privacy bypass."
+    },
+    {
+      "file": "activekg/rc_skills/repository.py", "symbol": "RcRepository.finish",
+      "tables": [], "calls": ["memory_rc_finish"], "routes": [],
+      "classification": "fenced", "direction": "write", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Privacy locks span idempotent append; replay after withdrawal is refused, no raw table grant.",
+      "test_id": "privacy-rc-cache", "reason": "Only minimal skill outcomes enter the public cache."
+    },
+    {
+      "file": "activekg/rc_skills/router.py", "symbol": "_execute",
+      "tables": [], "calls": ["RcRepository"], "routes": [],
+      "classification": "fenced", "direction": "derive", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Authenticated Signal actor is forwarded, bounded strict body and response; disabled routes never open a repository.",
+      "test_id": "privacy-rc-cache", "reason": "No provider call or contact payload."
+    },
+    {
+      "file": "activekg/rc_skills/router.py", "symbol": "read_skills",
+      "tables": [], "calls": [], "routes": ["POST /internal/rc-skills/read"],
+      "classification": "fenced", "direction": "read", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Exact Signal service issuer, actor, org tenant and rc-skills:read scope required before body parsing.",
+      "test_id": "privacy-rc-cache", "reason": "Service-private, never a browser enumeration endpoint."
+    },
+    {
+      "file": "activekg/rc_skills/router.py", "symbol": "finish_skills",
+      "tables": [], "calls": [], "routes": ["POST /internal/rc-skills/finish"],
+      "classification": "fenced", "direction": "write", "candidate_scope": "global",
+      "actions": ["withdraw_global_matching", "request_erasure"],
+      "enforcement": "Exact Signal service issuer, actor, org tenant and rc-skills:write scope required before body parsing.",
+      "test_id": "privacy-rc-cache", "reason": "Paid-attempt identity and immutable observation hash bind replay."
+    },
     {
       "file": "activekg/api/organization_candidate_history.py",
       "symbol": "read_history",

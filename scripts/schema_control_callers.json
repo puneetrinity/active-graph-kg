@@ -34,7 +34,8 @@
     "026_organization_private_candidate_intake.sql",
     "027_candidate_consent.sql",
     "028_candidate_generation_publication.sql",
-    "029_organization_candidate_history.sql"
+    "029_organization_candidate_history.sql",
+    "030_rc_skill_observations.sql"
   ],
   "migration_files": {
     "001_add_embedding_history_index.sql": "f109a2eb8da22cbcd1efdbadb5d9fa3a166784740bfe48f7e5c85805fc1556fa",
@@ -65,6 +66,7 @@
     "027_candidate_consent.sql": "d82dc142db35e1de81afc6fc9272a498a02c7e8eceb95e2b01d292b8fa50f72b",
     "028_candidate_generation_publication.sql": "96cee916ce9e9b261cc573a806d9f80105badc97524e0e094a4e9c671938f86d",
     "029_organization_candidate_history.sql": "d4e1bb06178d9bbf3e8f911eead574b2573ae166cd26a72eee6b465d88aa7c59",
+    "030_rc_skill_observations.sql": "4b42a74fdf3a65bc7e2a255e949d50301f1345712500d3a5d323dc256a58dbe9",
     "add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
     "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad"
   },
