@@ -141,7 +141,7 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-030; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-031; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -151,6 +151,7 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         "028_candidate_generation_publication.sql",
         "029_organization_candidate_history.sql",
         "030_rc_skill_observations.sql",
+        "031_rc_clock_tolerance.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -236,6 +237,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         index_was_baselined,
         history_was_baselined,
         rc_was_baselined,
+        rc_clock_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -277,6 +279,10 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
     _sql(
         "UPDATE schema_migrations SET baselined=%s WHERE filename='030_rc_skill_observations.sql'",
         (rc_was_baselined,),
+    )
+    _sql(
+        "UPDATE schema_migrations SET baselined=%s WHERE filename='031_rc_clock_tolerance.sql'",
+        (rc_clock_was_baselined,),
     )
 
 

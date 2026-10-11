@@ -96,7 +96,8 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
-    "030_rc_skill_observations.sql": [("rc_skills_catalog",)],
+    "031_rc_clock_tolerance.sql": [("rc_skills_catalog",)],
+    "030_rc_skill_observations.sql": [("rc_skills_catalog_base",)],
     "029_organization_candidate_history.sql": [("candidate_history_catalog",)],
     "028_candidate_generation_publication.sql": [("candidate_index_catalog",)],
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
@@ -998,10 +999,17 @@ def _normalize_sql_definition(value: str) -> str:
 
 def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
     kind = check[0]
-    if kind == "rc_skills_catalog":
+    if kind in {"rc_skills_catalog", "rc_skills_catalog_base"}:
         from activekg.rc_skills.repository import RC_CATALOG_SHA256, catalog_evidence
 
-        return catalog_evidence(cur)[0] == RC_CATALOG_SHA256
+        digest = catalog_evidence(cur)[0]
+        # 030 is verified before forward 031 on a fresh database. Only that
+        # historical checkpoint permits its frozen catalogue; 031 and runtime
+        # readiness always require the current catalogue.
+        return digest == RC_CATALOG_SHA256 or (
+            kind == "rc_skills_catalog_base"
+            and digest == "6de2a5b81f5be4c54af7a969a82cf6ae74f12a86d15315ef61e553905d900a17"
+        )
     if kind == "candidate_history_catalog":
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence
 

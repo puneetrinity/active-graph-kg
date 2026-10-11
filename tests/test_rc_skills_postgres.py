@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -19,6 +20,7 @@ from activekg.rc_skills.repository import RcRepository, RcUnavailable, catalog_r
 from scripts.init_railway_db import _harden_rc_skills_runtime_privileges
 
 OWNER = os.getenv("ACTIVEKG_RC_TEST_OWNER_DSN")
+UTC = timezone.utc
 RUNTIME = os.getenv("ACTIVEKG_RC_TEST_RUNTIME_DSN")
 pytestmark = pytest.mark.skipif(
     not OWNER or not RUNTIME, reason="explicit disposable RC DSNs required"
@@ -96,6 +98,46 @@ def read(subject):
         )
         .candidates[0]
     )
+
+
+def test_clock_skew_old_refusal_bounded_acceptance_and_far_future_refusal():
+    subject = person()
+    root = Path(__file__).resolve().parents[1]
+    original = (root / "db/migrations/030_rc_skill_observations.sql").read_text()
+    original = original[original.index("CREATE FUNCTION public.memory_rc_finish(") :]
+    original = original[: original.index("FROM PUBLIC;") + len("FROM PUBLIC;")]
+    original = original.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+    with psycopg.connect(OWNER) as conn:
+
+        def value(seconds):
+            body = command(subject).model_dump(by_alias=True)
+            at = conn.execute(
+                "SELECT clock_timestamp()+%s*interval '1 second'", (seconds,)
+            ).fetchone()[0]
+            obs = body["observation"]
+            obs["observedAt"] = at.isoformat(timespec="microseconds").replace("+00:00", "Z")
+            obs["contentHash"] = content_hash({k: v for k, v in obs.items() if k != "contentHash"})
+            return body
+
+        def finish(body):
+            return conn.execute(
+                "SELECT memory_rc_finish('signal-service',%s,%s::jsonb)",
+                (body["originAttempt"], json.dumps(body)),
+            ).fetchone()[0]
+
+        def refused(body):
+            with pytest.raises(psycopg.errors.RaiseException, match="RC_INVALID_OBSERVATION"):
+                with conn.transaction():
+                    finish(body)
+
+        conn.execute(original)
+        refused(value(2))
+        conn.execute((root / "db/migrations/031_rc_clock_tolerance.sql").read_text())
+        refused(value(60))
+        near = value(2)
+        assert finish(near)["status"] == "stored"
+        assert finish(near)["status"] == "replayed"
+        conn.rollback()
 
 
 def withdraw(subject, *, token_only=False, connection=None):

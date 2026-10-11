@@ -6,13 +6,14 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
 HORIZON_DAYS = 1095
+UTC = timezone.utc
 MAX_BODY_BYTES = 65536
 MAX_RESPONSE_BYTES = 1048576
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]

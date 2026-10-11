@@ -33,6 +33,8 @@ def test_mutated_boundary_is_refused(tmp_path, path, before, after):
     migration = Path("db/migrations/030_rc_skill_observations.sql")
     (tmp_path / migration).parent.mkdir(parents=True)
     shutil.copyfile(ROOT / migration, tmp_path / migration)
+    tolerance = Path("db/migrations/031_rc_clock_tolerance.sql")
+    shutil.copyfile(ROOT / tolerance, tmp_path / tolerance)
     target = tmp_path / path
     assert before in target.read_text()
     target.write_text(target.read_text().replace(before, after))

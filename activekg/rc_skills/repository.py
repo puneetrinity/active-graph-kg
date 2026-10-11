@@ -175,7 +175,7 @@ class RcRepository:
 
 
 # Filled only from both real disposable collation proofs, never trusted from DB.
-RC_CATALOG_SHA256 = "6de2a5b81f5be4c54af7a969a82cf6ae74f12a86d15315ef61e553905d900a17"
+RC_CATALOG_SHA256 = "ab135c9dd47ac87d96533e29ff8d59858f36d067de9a9025017cf92006b7d34a"
 RC_CATALOG_SQL = """
 WITH chosen AS (SELECT coalesce(%s,current_user) AS runtime_role),
 relations AS (SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

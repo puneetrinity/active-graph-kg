@@ -16,6 +16,14 @@ class GuardError(RuntimeError):
 
 def validate(root: Path = ROOT) -> None:
     migration = (root / "db/migrations/030_rc_skill_observations.sql").read_text()
+    tolerance = (root / "db/migrations/031_rc_clock_tolerance.sql").read_text()
+    original = migration[migration.index("CREATE FUNCTION public.memory_rc_finish(") :]
+    original = original[: original.index("FROM PUBLIC;") + len("FROM PUBLIC;")]
+    expected = original.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1).replace(
+        "observed>clock_timestamp()", "observed>clock_timestamp()+interval '5 seconds'"
+    )
+    if tolerance[tolerance.index("CREATE OR REPLACE FUNCTION") :].strip() != expected.strip():
+        raise GuardError("rc_clock_tolerance_delta")
     repository = (root / "activekg/rc_skills/repository.py").read_text()
     router = (root / "activekg/rc_skills/router.py").read_text()
     contracts = (root / "activekg/rc_skills/contracts.py").read_text()

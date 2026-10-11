@@ -806,13 +806,14 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-3:]
+        caller["migration_manifest"][-4:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
             "030_rc_skill_observations.sql",
+            "031_rc_clock_tolerance.sql",
         ]
-        or len(caller["migration_manifest"]) != 30
+        or len(caller["migration_manifest"]) != 31
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()
