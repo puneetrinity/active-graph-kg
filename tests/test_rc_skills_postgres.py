@@ -177,6 +177,27 @@ def test_migrated_catalog_and_runtime_denials():
                 conn.execute(query)
 
 
+@pytest.mark.parametrize("outcome", ["success", "no_skills", "not_found", "unusable_age"])
+def test_direct_fetch_provenance_roundtrip_and_replay(outcome):
+    subject = person()
+    raw = command(subject, outcome=outcome).model_dump(by_alias=True)
+    raw["observation"]["timestampSource"] = "fetch_updated_at"
+    raw["observation"]["contentHash"] = content_hash(
+        {key: value for key, value in raw["observation"].items() if key != "contentHash"}
+    )
+    value = FinishRequest.model_validate(raw)
+    repo = RcRepository(RUNTIME)
+    assert repo.finish("signal-service", value).status == "stored"
+    assert repo.finish("signal-service", value).status == "replayed"
+    assert read(subject).observation.model_dump(by_alias=True) == raw["observation"]
+    raw["observation"]["timestampSource"] = "check_last_update"
+    raw["observation"]["contentHash"] = content_hash(
+        {key: value for key, value in raw["observation"].items() if key != "contentHash"}
+    )
+    with pytest.raises(RcUnavailable):
+        repo.finish("signal-service", FinishRequest.model_validate(raw))
+
+
 def test_replay_concurrent_write_and_conflicting_run():
     subject = person()
     value = command(subject)

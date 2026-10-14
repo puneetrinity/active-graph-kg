@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FROZEN = {
     "activekg/api/organization_candidates.py": "311df4f1385eb1c4756cf5f61f850c50f831b1dad16411e226402e7c07cba50a",
     "activekg/api/sourced_candidates.py": "2d3342ff555c29f006df4a3aec9d607202f5f093023097b5f359740e74863d2c",
-    "activekg/api/global_memory.py": "79ab675b6f5cb48004785ae01586bc5c1ea8460855408d68b34a0c613ba6cfe0",
+    # Seven-fix A1: counts/timing-only instrumentation; consent filtering unchanged.
+    "activekg/api/global_memory.py": "b63e518a28414952ca3de5a41d3775135babf1ba829ef8907ca71eb4fa222a5f",
     "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
     "activekg/privacy/config.py": "97c6bc67fafcf4953c85e7b86579fae4b537f0c264550f378cad4ea159fa9546",
     "activekg/privacy/identity.py": "3c5bc791e51d0e8b5bd01964ab0f7ddd52a53420b44e0684f7a52c2ac16fa65c",

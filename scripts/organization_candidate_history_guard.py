@@ -45,10 +45,11 @@ def validate_sources(sources: dict[str, str]) -> None:
             raise GuardError("history_ci_job_timeout")
     migration = sources[MIGRATION]
     manifest = json.loads(sources["scripts/schema_control_callers.json"])
-    if manifest["migration_manifest"][-3:] != [
+    if manifest["migration_manifest"][-4:] != [
         Path(MIGRATION).name,
         "030_rc_skill_observations.sql",
         "031_rc_clock_tolerance.sql",
+        "032_rc_fetch_provenance.sql",
     ]:
         raise GuardError("history_ledger_tail")
     if (

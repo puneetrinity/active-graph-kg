@@ -36,6 +36,14 @@ def test_cross_system_hash_and_microseconds() -> None:
     assert parsed.valid_until == "2028-12-31T00:00:00.123456Z"
 
 
+def test_fetch_provenance_is_preserved_and_committed() -> None:
+    value = changed(timestampSource="fetch_updated_at")
+    assert Observation.model_validate(value).model_dump(by_alias=True) == value
+    assert value["contentHash"] != VECTOR["contentHash"]
+    with pytest.raises(ValidationError):
+        Observation.model_validate({**VECTOR, "timestampSource": "fetch_updated_at"})
+
+
 @pytest.mark.parametrize("extra", ["email", "linkedinUrl", "profile", "employer", "candidateId"])
 def test_no_provider_payload_fields(extra: str) -> None:
     with pytest.raises(ValidationError):

@@ -17,6 +17,53 @@ class GuardError(RuntimeError):
 def validate(root: Path = ROOT) -> None:
     migration = (root / "db/migrations/030_rc_skill_observations.sql").read_text()
     tolerance = (root / "db/migrations/031_rc_clock_tolerance.sql").read_text()
+    provenance = (root / "db/migrations/032_rc_fetch_provenance.sql").read_text()
+    expected_read = migration[
+        migration.index("CREATE FUNCTION public.memory_rc_read") : migration.index(
+            "CREATE FUNCTION public.memory_rc_finish"
+        )
+    ]
+    expected_read = expected_read.replace(
+        "CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1
+    ).replace(
+        "'timestampSource','check_last_update'", "'timestampSource',row_value.timestamp_source"
+    )
+    expected_finish = tolerance[
+        tolerance.index("CREATE OR REPLACE FUNCTION") : tolerance.index("REVOKE ALL")
+    ]
+    expected_finish = (
+        expected_finish.replace(
+            "obs->'timestampSource' IS DISTINCT FROM '\"check_last_update\"'::jsonb",
+            "coalesce(obs->>'timestampSource','') NOT IN ('check_last_update','fetch_updated_at')",
+        )
+        .replace(
+            "schema_version,content_hash,origin_service,origin_attempt)",
+            "schema_version,content_hash,origin_service,origin_attempt,timestamp_source)",
+        )
+        .replace(
+            "valid,'rc-skills-v1',expected_hash,p_service,p_attempt);",
+            "valid,'rc-skills-v1',expected_hash,p_service,p_attempt,obs->>'timestampSource');",
+        )
+    )
+    expected_provenance = (expected_read + "\n" + expected_finish).strip()
+    actual_provenance = provenance[
+        provenance.index("CREATE OR REPLACE FUNCTION") : provenance.index("REVOKE ALL")
+    ]
+    if actual_provenance.strip() != expected_provenance:
+        raise GuardError("rc_fetch_provenance_delta")
+    header = provenance[: provenance.index("CREATE OR REPLACE FUNCTION")]
+    header = re.sub(r"--[^\n]*", "", header).strip()
+    if header != (
+        "ALTER TABLE public.rc_skill_observations\n"
+        " ADD COLUMN timestamp_source text NOT NULL DEFAULT 'check_last_update'\n"
+        " CHECK (timestamp_source IN ('check_last_update','fetch_updated_at'));"
+    ):
+        raise GuardError("rc_fetch_provenance_column")
+    if provenance[provenance.index("REVOKE ALL") :].strip() != (
+        "REVOKE ALL ON FUNCTION public.memory_rc_read(text,jsonb) FROM PUBLIC;\n"
+        "REVOKE ALL ON FUNCTION public.memory_rc_finish(text,uuid,jsonb) FROM PUBLIC;"
+    ):
+        raise GuardError("rc_fetch_provenance_privileges")
     original = migration[migration.index("CREATE FUNCTION public.memory_rc_finish(") :]
     original = original[: original.index("FROM PUBLIC;") + len("FROM PUBLIC;")]
     expected = original.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1).replace(

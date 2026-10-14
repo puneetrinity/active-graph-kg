@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
@@ -24,7 +25,7 @@ from activekg.api.auth import (
     get_jwt_claims,
     require_scope,
 )
-from activekg.common.logger import get_enhanced_logger
+from activekg.common.logger import _log_context, get_enhanced_logger
 from activekg.embedding.global_candidates import (  # noqa: F401 — shared with the embedding producer
     PUBLIC_EMBED_VERSION,
     build_candidate_embedding_text,
@@ -41,6 +42,45 @@ from activekg.privacy.identity import identity_token, normalize_privacy_identifi
 from activekg.privacy.models import CandidatePrivacyDecision
 
 logger = get_enhanced_logger(__name__)
+
+
+def _log_search_phases(
+    surface: str,
+    requested_limit: int,
+    applied_limit: int,
+    returned_count: int,
+    embed_ms: float,
+    query_ms: float,
+    projection_ms: float,
+) -> None:
+    """Counts/timing only; suppress ambient tenant/request identifiers on this log."""
+    if surface not in {"public_v1", "legacy_v0", "tenant_private"}:
+        return
+    context = _log_context.get() or {}
+    request_id = context.get("request_id")
+    request_hash = (
+        hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        if isinstance(request_id, str) and len(request_id) <= 512
+        else None
+    )
+    token = _log_context.set(None)
+    try:
+        logger.info(
+            "candidate_search_phase_timings",
+            extra_fields={
+                "surface": surface,
+                "request_id_hash": request_hash,
+                "requested_limit": requested_limit,
+                "applied_limit": applied_limit,
+                "returned_count": returned_count,
+                "embed_ms": round(embed_ms, 3),
+                "query_ms": round(query_ms, 3),
+                "projection_ms": round(projection_ms, 3),
+            },
+        )
+    finally:
+        _log_context.reset(token)
+
 
 router = APIRouter(tags=["global-memory"])
 
@@ -2813,8 +2853,10 @@ def search_global_candidates(
     # (Stage-3 offline gate finding).
     limit = max(1, min(body.limit, _SEARCH_LIMIT_MAX))
 
+    embed_started = time.perf_counter()
     vec = _embedder.encode([body.query_text])[0]
     vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec.tolist()) + "]"
+    embed_ms = (time.perf_counter() - embed_started) * 1000
 
     public_surface = body.surface == "public_v1"
     if public_surface:
@@ -2940,12 +2982,26 @@ def search_global_candidates(
             LIMIT %s
         """
 
+    query_started = time.perf_counter()
     conn = _get_tenant_conn(tenant_id)
     try:
         with conn.cursor() as cur:
             cur.execute(sql, [vec_literal, *params, vec_literal, limit])
-            rows = [_row_to_dict(cur, r) for r in cur.fetchall()]
+            raw_rows = cur.fetchall()
+            query_ms = (time.perf_counter() - query_started) * 1000
+            projection_started = time.perf_counter()
+            rows = [_row_to_dict(cur, r) for r in raw_rows]
+            projection_ms = (time.perf_counter() - projection_started) * 1000
         conn.commit()
+        _log_search_phases(
+            "public_v1" if public_surface else "legacy_v0",
+            body.limit,
+            limit,
+            len(rows),
+            embed_ms,
+            query_ms,
+            projection_ms,
+        )
         return {
             "surface": "public_v1" if public_surface else "legacy_v0",
             "results": rows,

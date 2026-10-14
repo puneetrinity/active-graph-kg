@@ -96,7 +96,8 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
-    "031_rc_clock_tolerance.sql": [("rc_skills_catalog",)],
+    "032_rc_fetch_provenance.sql": [("rc_skills_catalog",)],
+    "031_rc_clock_tolerance.sql": [("rc_skills_catalog_clock",)],
     "030_rc_skill_observations.sql": [("rc_skills_catalog_base",)],
     "029_organization_candidate_history.sql": [("candidate_history_catalog",)],
     "028_candidate_generation_publication.sql": [("candidate_index_catalog",)],
@@ -999,16 +1000,22 @@ def _normalize_sql_definition(value: str) -> str:
 
 def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
     kind = check[0]
-    if kind in {"rc_skills_catalog", "rc_skills_catalog_base"}:
+    if kind in {"rc_skills_catalog", "rc_skills_catalog_base", "rc_skills_catalog_clock"}:
         from activekg.rc_skills.repository import RC_CATALOG_SHA256, catalog_evidence
 
         digest = catalog_evidence(cur)[0]
-        # 030 is verified before forward 031 on a fresh database. Only that
-        # historical checkpoint permits its frozen catalogue; 031 and runtime
-        # readiness always require the current catalogue.
-        return digest == RC_CATALOG_SHA256 or (
-            kind == "rc_skills_catalog_base"
-            and digest == "6de2a5b81f5be4c54af7a969a82cf6ae74f12a86d15315ef61e553905d900a17"
+        # Historical migration checkpoints accept their own frozen catalogue.
+        # Forward032 and runtime readiness require only the current catalogue.
+        return (
+            digest == RC_CATALOG_SHA256
+            or (
+                kind == "rc_skills_catalog_base"
+                and digest == "6de2a5b81f5be4c54af7a969a82cf6ae74f12a86d15315ef61e553905d900a17"
+            )
+            or (
+                kind in {"rc_skills_catalog_base", "rc_skills_catalog_clock"}
+                and digest == "ab135c9dd47ac87d96533e29ff8d59858f36d067de9a9025017cf92006b7d34a"
+            )
         )
     if kind == "candidate_history_catalog":
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence

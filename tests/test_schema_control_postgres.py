@@ -147,6 +147,7 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         .replace('    "029_organization_candidate_history.sql",\n', "")
         .replace('    "030_rc_skill_observations.sql",\n', "")
         .replace('    "031_rc_clock_tolerance.sql",\n', "")
+        .replace('    "032_rc_fetch_provenance.sql",\n', "")
         .replace(f"len(MIGRATIONS) != {len(MIGRATIONS)}", "len(MIGRATIONS) != 24")
         .replace(
             f"contain {len(MIGRATIONS)} unique ordered entries", "contain 24 unique ordered entries"
