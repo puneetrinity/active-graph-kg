@@ -66,7 +66,9 @@ class Observation(StrictModel):
     upstream_at: str | None = Field(alias="upstreamAt")
     observed_at: str = Field(alias="observedAt")
     valid_until: str | None = Field(alias="validUntil")
-    timestamp_source: Literal["check_last_update"] = Field(alias="timestampSource")
+    timestamp_source: Literal["check_last_update", "fetch_updated_at"] = Field(
+        alias="timestampSource"
+    )
     content_hash: Hash = Field(alias="contentHash")
 
     @field_validator("observed_at", "upstream_at", "valid_until")

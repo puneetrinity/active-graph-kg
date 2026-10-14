@@ -23,6 +23,16 @@ def test_real_rc_boundary():
         ("activekg/rc_skills/router.py", "claims.scopes != [scope]", "False"),
         ("activekg/rc_skills/router.py", "claims.issuer != auth.SIGNAL_JWT_ISSUER", "False"),
         ("activekg/rc_skills/contracts.py", 'extra="forbid"', 'extra="ignore"'),
+        (
+            "db/migrations/032_rc_fetch_provenance.sql",
+            "row_value.timestamp_source",
+            "'check_last_update'",
+        ),
+        (
+            "db/migrations/032_rc_fetch_provenance.sql",
+            "interval '5 seconds'",
+            "interval '60 seconds'",
+        ),
     ],
 )
 def test_mutated_boundary_is_refused(tmp_path, path, before, after):
@@ -35,6 +45,8 @@ def test_mutated_boundary_is_refused(tmp_path, path, before, after):
     shutil.copyfile(ROOT / migration, tmp_path / migration)
     tolerance = Path("db/migrations/031_rc_clock_tolerance.sql")
     shutil.copyfile(ROOT / tolerance, tmp_path / tolerance)
+    provenance = Path("db/migrations/032_rc_fetch_provenance.sql")
+    shutil.copyfile(ROOT / provenance, tmp_path / provenance)
     target = tmp_path / path
     assert before in target.read_text()
     target.write_text(target.read_text().replace(before, after))

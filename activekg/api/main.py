@@ -4597,12 +4597,15 @@ def search_tenant_private_candidates(
         payload.skills_any,
     )
     applied_limit = min(payload.limit, PRIVATE_SEARCH_MAX_LIMIT)
+    query_started = time.perf_counter()
     rows, total_available = candidate_repo.search_tenant_private_candidates(
         tenant_id=tenant_id,
         query_terms=query_terms,
         skills_any=normalized_skills,
         limit=applied_limit,
     )
+    query_ms = (time.perf_counter() - query_started) * 1000
+    projection_started = time.perf_counter()
     results = [
         TenantPrivateCandidateSearchResult(
             candidate_id=row.candidate_id,
@@ -4619,13 +4622,25 @@ def search_tenant_private_candidates(
         )
         for row in rows
     ]
-    return TenantPrivateCandidateSearchResponse(
+    response = TenantPrivateCandidateSearchResponse(
         results=results,
         total=len(results),
         total_available=total_available,
         truncated=total_available > len(results),
         applied_limit=applied_limit,
     )
+    from activekg.api.global_memory import _log_search_phases
+
+    _log_search_phases(
+        "tenant_private",
+        payload.limit,
+        applied_limit,
+        len(results),
+        0.0,  # Private retrieval is lexical, not an embedding/model call.
+        query_ms,
+        (time.perf_counter() - projection_started) * 1000,
+    )
+    return response
 
 
 # deploy-trigger: 2026-07-28 — CI-skip recovery (docs workflow is Pages-only; excluded from this trigger).
