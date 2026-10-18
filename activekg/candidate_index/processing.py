@@ -136,6 +136,19 @@ def resume_extraction(
 
     from activekg.extraction import schema
 
+    if policy.extraction_adapter_version.startswith("candidate-index-extraction:v3:"):
+        from activekg.candidate_index.resume_history_policy import policy_fields, validate
+
+        if any(getattr(policy, name) != value for name, value in policy_fields().items()):
+            raise WorkRefused("policy_mismatch")
+        _bounded_value(raw)
+        details = diagnostics if diagnostics is not None else {}
+        parsed = validate(raw, text, details)
+        if type(raw.get("confidence")) not in (int, float):
+            raise WorkRefused("incomplete")
+        if parsed["confidence"] < policy.minimum_confidence:
+            raise WorkRefused("low_confidence")
+        return _assemble(parsed, PROFESSIONAL_FIELDS, text, parsed["confidence"], policy, model)
     managed_v2 = policy.extraction_adapter_version.startswith("candidate-index-extraction:v2:")
     if managed_v2:
         from activekg.candidate_index.resume_policy import LIST_LIMITS, policy_fields, refuse
@@ -350,7 +363,10 @@ class GenerationWorker:
                         else self.policy.fallback_model_id
                     )
                     managed_v2 = self.policy.extraction_adapter_version.startswith(
-                        "candidate-index-extraction:v2:"
+                        ("candidate-index-extraction:v2:", "candidate-index-extraction:v3:")
+                    )
+                    managed_v3 = self.policy.extraction_adapter_version.startswith(
+                        "candidate-index-extraction:v3:"
                     )
                     effort = "medium"
                     if managed_v2:
@@ -412,6 +428,7 @@ class GenerationWorker:
                                     "diagnostics": diagnostics,
                                     "reasoning_effort": effort,
                                     "on_response": response_received,
+                                    **({"managed_v3": True} if managed_v3 else {}),
                                 }
                                 if managed_v2
                                 else {}

@@ -141,7 +141,7 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-034; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-037; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -156,6 +156,9 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         # 033/034 objects are inside the 028 index contract closure dropped below.
         "033_resume_cutoff_retry.sql",
         "034_resume_attempt_diagnostics.sql",
+        "035_private_resume_sourcing.sql",
+        "036_resume_history_policy.sql",
+        "037_sourcing_public_applicant_check.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -245,6 +248,9 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         rc_fetch_was_baselined,
         resume_retry_was_baselined,
         resume_diagnostics_was_baselined,
+        resume_sourcing_was_baselined,
+        resume_history_was_baselined,
+        public_applicants_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -304,6 +310,12 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         "WHERE filename='034_resume_attempt_diagnostics.sql'",
         (resume_diagnostics_was_baselined,),
     )
+    for filename, baselined in (
+        ("035_private_resume_sourcing.sql", resume_sourcing_was_baselined),
+        ("036_resume_history_policy.sql", resume_history_was_baselined),
+        ("037_sourcing_public_applicant_check.sql", public_applicants_was_baselined),
+    ):
+        _sql("UPDATE schema_migrations SET baselined=%s WHERE filename=%s", (baselined, filename))
 
 
 def test_027_rewind_failure_restores_evidence_and_catalog() -> None:

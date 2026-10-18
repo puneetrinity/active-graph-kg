@@ -55,6 +55,9 @@ GOVERNED_TABLES = (
     "organization_candidate_history_scan_state",
 )
 GOVERNED_SQL_FUNCTIONS = (
+    "candidate_index_read_sourcing",
+    "candidate_index_revalidate_sourcing",
+    "candidate_index_public_applicants",
     "memory_rc_read",
     "memory_rc_finish",
     "organization_candidate_history_step",
@@ -202,6 +205,13 @@ def _reference_source(reference: Reference) -> str:
 
 
 _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
+    "privacy-candidate-sourcing": (
+        "verify_sourcing_authority",
+        "jwt.decode",
+        "_handle(",
+        "_query(",
+        "default_transaction_read_only=on",
+    ),
     "privacy-rc-cache": (
         "self._privacy(",
         "candidate_privacy_match(",
@@ -486,8 +496,9 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
         required = {
             "GenerationWorker.process": (
                 "self.repository.reserve, lease, self.policy",
-                "async def before_send() -> None:",
-                "before_send=before_send,",
+                "async def before_send()",
+                "await self._authority(dispatch, deadline)",
+                "before_send=before_send",
             ),
             "GenerationWorker._authority": (
                 'current.get("eligible") is not True',
@@ -519,15 +530,81 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
             or any(token not in source for token in required)
         ):
             raise GuardError("candidate index worker authority boundary changed")
-        # The pre-send hook must itself re-check current privacy authority before
-        # every provider call (it also records the safe diagnostic event).
-        if reference.symbol == "GenerationWorker.process" and not re.search(
-            r"async def before_send\(\) -> None:(?:(?!\n {20}async def ).)*?"
-            r"await self\._authority\(dispatch, deadline\)",
-            source,
-            re.S,
+        if reference.symbol == "GenerationWorker.process":
+            tree = ast.parse(source.lstrip())
+            callbacks = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == "before_send"
+            ]
+            if (
+                len(callbacks) != 1
+                or not callbacks[0].body
+                or not isinstance(callbacks[0].body[-1], ast.Expr)
+            ):
+                raise GuardError("candidate index presend privacy callback changed")
+            final = callbacks[0].body[-1].value
+            if (
+                not isinstance(final, ast.Await)
+                or ast.unparse(final.value) != "self._authority(dispatch, deadline)"
+            ):
+                raise GuardError("candidate index presend privacy callback changed")
+    if row["test_id"] == "privacy-candidate-sourcing":
+        required = {
+            "activekg/api/candidate_sourcing.py::search_candidates": (
+                "_handle(request, revalidation=False)",
+            ),
+            "activekg/api/candidate_sourcing.py::revalidate_candidates": (
+                "_handle(request, revalidation=True)",
+            ),
+            "activekg/api/candidate_sourcing.py::public_applicant_membership": (
+                "public_membership=True",
+            ),
+            "activekg/api/candidate_sourcing.py::_handle": (
+                "verify_sourcing_authority(",
+                "public_key=auth.SIGNAL_JWT_PUBLIC_KEY",
+                "authority.request_id != command.requestId",
+                "authority.tenant_id",
+                "asyncio.wait_for",
+            ),
+            "activekg/api/candidate_sourcing.py::verify_sourcing_authority": (
+                'algorithms=["RS256"]',
+                'issuer="signal"',
+                'audience="activekg"',
+                'claims["scopes"] != [SOURCING_SCOPE]',
+                'claims["request_id"] != request_id',
+            ),
+            "activekg/candidate_index/sourcing.py::_query": (
+                "default_transaction_read_only=on",
+                "statement_timeout=3000",
+                "lock_timeout=1500",
+                "set_config('app.current_tenant_id',%s,true)",
+                "(tenant,)",
+            ),
+            "activekg/candidate_index/sourcing.py::search": (
+                "embed_query_once(",
+                "_query(dsn, tenant,",
+                "candidate_index_read_sourcing(",
+                "asyncio.wait_for",
+            ),
+            "activekg/candidate_index/sourcing.py::revalidate": (
+                "_query(dsn, tenant,",
+                "candidate_index_revalidate_sourcing(",
+                "asyncio.wait_for",
+            ),
+            "activekg/candidate_index/sourcing.py::public_applicants": (
+                "_query(dsn, tenant,",
+                "candidate_index_public_applicants(",
+                "asyncio.wait_for",
+            ),
+        }.get(reference.key)
+        # These fences may wrap across lines after formatting. Keep every
+        # required authority token, but do not make whitespace an authority rule.
+        compact_source = "".join(source.split())
+        if required is None or any(
+            "".join(token.split()) not in compact_source for token in required
         ):
-            raise GuardError("candidate index worker authority boundary changed")
+            raise GuardError("candidate sourcing authority boundary changed")
     if row["test_id"] == "privacy-candidate-index-search":
         required = {
             "activekg/api/candidate_index.py::private_search": (
@@ -683,7 +760,18 @@ def discover() -> list[Reference]:
                 "search",
                 "LegacyPrivateReader._conn",
             }
-            if tables or calls or routes or explicit_index_worker or explicit_index_search:
+            explicit_sourcing = (
+                relative == "activekg/api/candidate_sourcing.py"
+                and symbol in {"_handle", "verify_sourcing_authority"}
+            ) or (relative == "activekg/candidate_index/sourcing.py" and symbol == "_query")
+            if (
+                tables
+                or calls
+                or routes
+                or explicit_index_worker
+                or explicit_index_search
+                or explicit_sourcing
+            ):
                 references.append(
                     Reference(
                         file=relative,

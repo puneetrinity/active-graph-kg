@@ -128,6 +128,7 @@ async def extract_once(
     before_send: Callable[[], Awaitable[None]],
     transport: Any = None,
     managed_v2: bool = False,
+    managed_v3: bool = False,
     diagnostics: dict[str, Any] | None = None,
     reasoning_effort: str = "medium",
     on_response: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -144,6 +145,8 @@ async def extract_once(
 
     if not api_key:
         raise WorkRefused("provider_unavailable")
+    if managed_v3 and not managed_v2:
+        raise WorkRefused("policy_mismatch")
     if reasoning_effort not in {"medium", "low"} or (
         not managed_v2 and reasoning_effort != "medium"
     ):
@@ -158,6 +161,10 @@ async def extract_once(
 
         system, prompt = v2_prompt(text)
         output_tokens = OUTPUT_TOKENS
+    if managed_v3:
+        from activekg.candidate_index.resume_history_policy import prompt as v3_prompt
+
+        system, prompt = v3_prompt(text)
     if diagnostics is not None:
         diagnostics.update(finish_reason="unavailable", completion_tokens=None)
     try:

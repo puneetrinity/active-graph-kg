@@ -42,6 +42,7 @@ COORDINATION_TABLES = (
 DIAGNOSTIC_TABLES = ("candidate_index_attempt_diagnostics", "candidate_index_recovery_receipts")
 INDEX_TABLES = IMMUTABLE_TABLES + COORDINATION_TABLES + DIAGNOSTIC_TABLES
 RUNTIME_FUNCTIONS = (
+    "candidate_index_public_applicants(jsonb)",
     "candidate_index_status(uuid,boolean)",
     "candidate_index_capture_source(text,uuid,text,text,text,jsonb,integer[],text,text,integer,integer)",
     "candidate_index_claim(text,integer,jsonb,uuid,uuid,bigint,text)",
@@ -50,11 +51,14 @@ RUNTIME_FUNCTIONS = (
     "candidate_index_fail(uuid,uuid,bigint,text,integer)",
     "candidate_index_invalidate(uuid)",
     "candidate_index_read_private(vector,text,text,integer,integer)",
+    "candidate_index_read_sourcing(vector,text,text,integer,integer)",
+    "candidate_index_revalidate_sourcing(integer,jsonb)",
     "candidate_index_catchup(integer,boolean,integer,integer)",
     "candidate_index_key_versions()",
     "candidate_index_record_diagnostic(uuid,uuid,bigint,text,jsonb)",
 )
 OWNER_FUNCTIONS = (
+    "candidate_index_history_valid(jsonb,text)",
     "candidate_index_read_public(integer)",
     "candidate_index_append_only()",
     "candidate_index_read_diagnostics(text,uuid)",

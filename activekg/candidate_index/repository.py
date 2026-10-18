@@ -30,7 +30,7 @@ from activekg.candidate_index.diagnostics import diagnostic_payload
 
 # Derived from PostgreSQL 16, independent of installation role/OIDs. Exact
 # structure and effective ACLs are separate gates; source hashing is not readiness.
-INDEX_CATALOG_SHA256 = "0bd6fffc0c80cd345cca614a456888fb7a3f300549886087b2b326c034654f86"
+INDEX_CATALOG_SHA256 = "5b1a66c28886d9cd6eaf234f5e363f7525d88d20d40534ad5a3f16ae95f7287d"
 
 INDEX_CATALOG_SQL = """
 WITH chosen AS (SELECT coalesce(%s,current_user) AS runtime_role),
@@ -153,7 +153,7 @@ class IndexRepository:
     def _diagnosed(dispatch: dict[str, Any]) -> bool:
         return dispatch.get("stage") == "extract" and str(
             dispatch.get("policy", {}).get("extraction_adapter_version", "")
-        ).startswith("candidate-index-extraction:v2:")
+        ).startswith(("candidate-index-extraction:v2:", "candidate-index-extraction:v3:"))
 
     @staticmethod
     def _record_on_cursor(
