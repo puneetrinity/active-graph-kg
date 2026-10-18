@@ -256,6 +256,21 @@ def worker_transport(calls, *, confidences=(0.9,)):
     return httpx.MockTransport(handler)
 
 
+TABLES_034 = ("candidate_index_attempt_diagnostics", "candidate_index_recovery_receipts")
+
+
+def test_034_tables_truncate_only_when_empty(target):
+    # First test on CI's fresh index database: the append-only guard's static
+    # empty-table branch must admit TRUNCATE. Refuse loudly, never skip, if not empty.
+    for table in TABLES_034:
+        count = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+        assert target.execute(count).fetchone() == (0,)
+    with target.transaction(force_rollback=True):
+        target.execute(
+            sql.SQL("TRUNCATE {}").format(sql.SQL(",").join(map(sql.Identifier, TABLES_034)))
+        )
+
+
 def test_generation_worker_real_restricted_roles_extract_then_atomic_publication(
     target, monkeypatch
 ):
@@ -1661,3 +1676,42 @@ def test_public_v1_search_never_returns_a_consent_only_shell(target, monkeypatch
     returned = {str(row["id"]) for row in result["results"]}
     assert str(control[0]) in returned  # the query does return public-ready people
     assert str(shell[0]) not in returned  # ...and never the consent-only shell
+
+
+def test_034_tables_populated_stay_append_only_and_runtime_restricted(target):
+    from tests.test_candidate_resume_recovery_postgres import apply, failed_source, plan
+
+    _, scope, accepted, _ = failed_source()
+    apply(target, scope, plan(target, scope, accepted))
+    for table in TABLES_034:
+        ident = sql.Identifier(table)
+        populated = sql.SQL("SELECT count(*) > 0 FROM {}").format(ident)
+        assert target.execute(populated).fetchone() == (True,)
+        for statement in (
+            "UPDATE {} SET created_at=created_at",
+            "DELETE FROM {}",
+            "TRUNCATE {}",
+        ):
+            with (
+                pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState),
+                target.transaction(),
+            ):
+                target.execute(sql.SQL(statement).format(ident))
+        assert target.execute(populated).fetchone() == (True,)
+    runtime_user = conninfo_to_dict(RUNTIME)["user"]
+    assert target.execute(
+        "SELECT bool_or(has_table_privilege(%s,t,p)) FROM unnest(%s::text[]) t, "
+        "unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p",
+        (runtime_user, list(TABLES_034)),
+    ).fetchone() == (False,)
+    with psycopg.connect(RUNTIME) as runtime:
+        for table in TABLES_034:
+            for statement in (
+                "SELECT * FROM {}",
+                "INSERT INTO {} DEFAULT VALUES",
+                "UPDATE {} SET created_at=created_at",
+                "DELETE FROM {}",
+                "TRUNCATE {}",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege), runtime.transaction():
+                    runtime.execute(sql.SQL(statement).format(sql.Identifier(table)))

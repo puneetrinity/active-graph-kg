@@ -33,6 +33,26 @@ BEGIN
  END LOOP;
 END $ddl$;
 
+-- The shared append-only guard admits TRUNCATE only of an already-empty table, by
+-- static per-table branches. Extend those branches to the two tables above; every
+-- populated-table UPDATE/DELETE/TRUNCATE still raises. Owner/ACL are preserved.
+CREATE OR REPLACE FUNCTION public.candidate_index_append_only() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+    IF TG_OP='TRUNCATE' THEN
+        -- Static branches: no caller-selected relation and no row-security-off workaround.
+        IF TG_TABLE_NAME='candidate_index_sources' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_sources) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_generations' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_generations) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_extractions' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_extractions) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_vectors' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_vectors) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_publication_events' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_publication_events) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_attempt_diagnostics' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_attempt_diagnostics) THEN RETURN NULL; END IF;
+        IF TG_TABLE_NAME='candidate_index_recovery_receipts' AND NOT EXISTS(SELECT 1 FROM public.candidate_index_recovery_receipts) THEN RETURN NULL; END IF;
+    END IF;
+    RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='candidate_index_append_only';
+END;
+$$;
+
 CREATE FUNCTION public.candidate_index_record_diagnostic(p_job uuid,p_token uuid,p_lease bigint,p_event text,p_payload jsonb)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public
 SET lock_timeout='1500ms' SET statement_timeout='3s' AS $fn$
