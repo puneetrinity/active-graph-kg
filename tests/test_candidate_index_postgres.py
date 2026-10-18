@@ -983,7 +983,9 @@ def test_all_relations_forced_and_routines_fixed_search_path(target):
         "SELECT proname,prosecdef,proconfig FROM pg_proc WHERE proname LIKE 'candidate_index_%%'"
     ).fetchall()
     assert len(rows) == len(RUNTIME_FUNCTIONS) + len(OWNER_FUNCTIONS) and all(
-        row[1] and "search_path=pg_catalog, public" in row[2] for row in rows
+        row[1] is (row[0] != "candidate_index_history_valid")
+        and "search_path=pg_catalog, public" in row[2]
+        for row in rows
     )
 
 

@@ -30,6 +30,32 @@ def test_checked_in_surface_manifest_is_complete() -> None:
 
 
 @pytest.mark.parametrize(
+    ("path", "old", "new"),
+    [
+        (
+            "activekg/candidate_index/processing.py",
+            b"                        await self._authority(dispatch, deadline)\n\n                    async def response_received",
+            b'                        await record("dispatch_attempted", {})\n\n                    async def response_received',
+        ),
+        (
+            "activekg/api/candidate_sourcing.py",
+            b"authority.request_id != command.requestId",
+            b"False",
+        ),
+        (
+            "activekg/candidate_index/sourcing.py",
+            b"default_transaction_read_only=on",
+            b"default_transaction_read_only=off",
+        ),
+    ],
+)
+def test_sourcing_and_presend_authority_mutations(path, old, new):
+    with _temporary_mutation(path, old, new):
+        with pytest.raises(guard.GuardError):
+            guard.validate()
+
+
+@pytest.mark.parametrize(
     ("relative", "old", "new"),
     [
         (

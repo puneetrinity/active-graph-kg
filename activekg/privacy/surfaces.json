@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 175,
+    "discovered_rows": 184,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -37,6 +37,171 @@
     }
   ],
   "references": [
+    {
+      "file": "activekg/api/candidate_sourcing.py",
+      "symbol": "verify_sourcing_authority",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/api/candidate_sourcing.py",
+      "symbol": "_handle",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/api/candidate_sourcing.py",
+      "symbol": "search_candidates",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/sourcing/search"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/api/candidate_sourcing.py",
+      "symbol": "revalidate_candidates",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/sourcing/revalidate"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/api/candidate_sourcing.py",
+      "symbol": "public_applicant_membership",
+      "tables": [],
+      "calls": [],
+      "routes": [
+        "POST /organization-candidates/sourcing/public-applicants"
+      ],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/candidate_index/sourcing.py",
+      "symbol": "_query",
+      "tables": [],
+      "calls": [],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/candidate_index/sourcing.py",
+      "symbol": "search",
+      "tables": [],
+      "calls": [
+        "candidate_index_read_sourcing"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/candidate_index/sourcing.py",
+      "symbol": "revalidate",
+      "tables": [],
+      "calls": [
+        "candidate_index_revalidate_sourcing"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
+    {
+      "file": "activekg/candidate_index/sourcing.py",
+      "symbol": "public_applicants",
+      "tables": [],
+      "calls": [
+        "candidate_index_public_applicants"
+      ],
+      "routes": [],
+      "classification": "fenced",
+      "direction": "read",
+      "candidate_scope": "organization_private",
+      "actions": [
+        "withdraw_global_matching",
+        "request_erasure"
+      ],
+      "enforcement": "Dedicated signed Signal scope and request; tenant from verified token only; bounded read-only SQL with current head/privacy and Flow eligibility checks.",
+      "test_id": "privacy-candidate-sourcing",
+      "reason": "Private resume facts remain organisation scoped; public membership emits only booleans, never private contact or resume content."
+    },
     {
       "file": "activekg/rc_skills/repository.py", "symbol": "<module>",
       "tables": ["rc_skill_observations"], "calls": [], "routes": [],

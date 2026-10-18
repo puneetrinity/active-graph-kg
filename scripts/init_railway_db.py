@@ -96,7 +96,10 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
-    "034_resume_attempt_diagnostics.sql": [("candidate_index_catalog",)],
+    "035_private_resume_sourcing.sql": [("candidate_index_catalog_sourcing",)],
+    "036_resume_history_policy.sql": [("candidate_index_catalog_history",)],
+    "037_sourcing_public_applicant_check.sql": [("candidate_index_catalog",)],
+    "034_resume_attempt_diagnostics.sql": [("candidate_index_catalog_diagnostics",)],
     "033_resume_cutoff_retry.sql": [("candidate_index_catalog_retry",)],
     "032_rc_fetch_provenance.sql": [("rc_skills_catalog",)],
     "031_rc_clock_tolerance.sql": [("rc_skills_catalog_clock",)],
@@ -1027,6 +1030,9 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         "candidate_index_catalog",
         "candidate_index_catalog_base",
         "candidate_index_catalog_retry",
+        "candidate_index_catalog_diagnostics",
+        "candidate_index_catalog_sourcing",
+        "candidate_index_catalog_history",
     }:
         from activekg.candidate_index.repository import INDEX_CATALOG_SHA256, catalog_evidence
 
@@ -1035,6 +1041,36 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         digest = catalog_evidence(cur)[0]
         return (
             digest == INDEX_CATALOG_SHA256
+            or (
+                kind
+                in {
+                    "candidate_index_catalog_base",
+                    "candidate_index_catalog_retry",
+                    "candidate_index_catalog_diagnostics",
+                    "candidate_index_catalog_sourcing",
+                    "candidate_index_catalog_history",
+                }
+                and digest == "61f2a8474088112853f0ad4feb8ca47a316d55b6e439094571c918282f34c25c"
+            )
+            or (
+                kind
+                in {
+                    "candidate_index_catalog_base",
+                    "candidate_index_catalog_retry",
+                    "candidate_index_catalog_diagnostics",
+                    "candidate_index_catalog_sourcing",
+                }
+                and digest == "aa87771528d13a2ef6a7aa429f3ebe31713b1ca3a10c18399af821d07eda3008"
+            )
+            or (
+                kind
+                in {
+                    "candidate_index_catalog_base",
+                    "candidate_index_catalog_retry",
+                    "candidate_index_catalog_diagnostics",
+                }
+                and digest == "0bd6fffc0c80cd345cca614a456888fb7a3f300549886087b2b326c034654f86"
+            )
             or (
                 kind in {"candidate_index_catalog_base", "candidate_index_catalog_retry"}
                 and digest == "39909e5967bcf42f1efd032dc8cbf3c3085b97cd9b6c7c9fcf01144715ffba25"

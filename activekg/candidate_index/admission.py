@@ -65,7 +65,7 @@ def configuration(env: Mapping[str, str] | None = None) -> IndexConfiguration:
     revision = env.get("CANDIDATE_INDEX_EMBEDDING_ARTIFACT_REVISION", "")
     prompt_file = Path(__file__).parents[1] / "extraction" / "prompt.py"
     adapter = env.get("CANDIDATE_INDEX_EXTRACTION_ADAPTER", "v1")
-    if adapter not in {"v1", "v2"}:
+    if adapter not in {"v1", "v2", "v3"}:
         raise IndexContractError("candidate_index_extraction_adapter_invalid")
     extraction_fields = {
         "extraction_schema_sha256": sha256(canonical_json(ExtractionResult.model_json_schema())),
@@ -73,6 +73,10 @@ def configuration(env: Mapping[str, str] | None = None) -> IndexConfiguration:
     }
     if adapter == "v2":
         from activekg.candidate_index.resume_policy import policy_fields
+
+        extraction_fields = policy_fields()
+    elif adapter == "v3":
+        from activekg.candidate_index.resume_history_policy import policy_fields
 
         extraction_fields = policy_fields()
     policy = IndexPolicy(

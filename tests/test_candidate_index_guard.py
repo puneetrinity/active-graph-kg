@@ -300,6 +300,13 @@ def test_sql_semantic_refusal_survives_checksum_repin(tmp_path, old):
             '"candidate_index_read_public(integer)"',
         ),
         ("scripts/init_railway_db.py", "if signature in RUNTIME_FUNCTIONS:", "if True:"),
+        ("activekg/api/candidate_sourcing.py", 'claims["scopes"] != [SOURCING_SCOPE]', "False"),
+        (
+            "activekg/api/candidate_sourcing.py",
+            "authority.request_id != command.requestId",
+            "False",
+        ),
+        ("activekg/api/main.py", "app.include_router(candidate_sourcing_router)", "pass"),
         (
             "scripts/init_railway_db.py",
             "_harden_candidate_index_runtime_privileges(cur, runtime_role)",

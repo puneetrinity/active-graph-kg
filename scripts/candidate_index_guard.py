@@ -92,6 +92,13 @@ AUTHORITIES = (
     ".github/workflows/ci.yml",
     MIGRATION,
     "db/migrations/034_resume_attempt_diagnostics.sql",
+    "db/migrations/035_private_resume_sourcing.sql",
+    "db/migrations/036_resume_history_policy.sql",
+    "db/migrations/037_sourcing_public_applicant_check.sql",
+    "activekg/candidate_index/resume_history_policy.py",
+    "activekg/api/candidate_sourcing.py",
+    "activekg/candidate_index/sourcing.py",
+    "activekg/candidate_index/sourcing_contracts.py",
     "activekg/candidate_index/contracts.py",
     "activekg/candidate_index/repository.py",
     "activekg/common/migration_manifest.py",
@@ -563,7 +570,89 @@ def validate(root: Path = ROOT) -> None:
     )
     if all_runtime[-1:] != added_runtime or all_owner[-3:] != added_owner:
         raise GuardError("index_diagnostic_routine_inventory")
-    runtime, owner = all_runtime[:-1], all_owner[:-3]
+    sourcing_runtime = (
+        "candidate_index_public_applicants(jsonb)",
+        "candidate_index_read_sourcing(vector,text,text,integer,integer)",
+        "candidate_index_revalidate_sourcing(integer,jsonb)",
+    )
+    if any(all_runtime.count(signature) != 1 for signature in sourcing_runtime):
+        raise GuardError("index_sourcing_routine_inventory")
+    runtime = tuple(
+        signature for signature in all_runtime[:-1] if signature not in sourcing_runtime
+    )
+    history_helper = "candidate_index_history_valid(jsonb,text)"
+    if all_owner.count(history_helper) != 1:
+        raise GuardError("index_history_routine_inventory")
+    owner = tuple(signature for signature in all_owner[:-3] if signature != history_helper)
+    history_sql = read(root, "db/migrations/036_resume_history_policy.sql")
+    require(
+        history_sql,
+        (
+            "REVOKE ALL ON FUNCTION public.candidate_index_history_valid(jsonb,text) FROM PUBLIC;",
+            "LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog,public",
+            "jsonb_array_length(p_history)>20",
+            "normalized IS DISTINCT FROM value",
+            "RESUME_HISTORY_ROUTINE_DRIFT",
+            "candidate_index_history_valid(p_namespace",
+        ),
+        "index_history_authority",
+    )
+    sourcing_sql = read(root, "db/migrations/035_private_resume_sourcing.sql")
+    membership_sql = read(root, "db/migrations/037_sourcing_public_applicant_check.sql")
+    require(
+        membership_sql,
+        (
+            "current_setting('app.current_tenant_id',true)",
+            "c.tenant_id=v_scope AND c.global_candidate_id=uid",
+            "r.tenant_id=c.tenant_id AND r.candidate_id=c.candidate_id",
+            "jsonb_array_length(p_ids) BETWEEN 1 AND 100",
+            "uid=ANY(seen)",
+            "REVOKE ALL ON FUNCTION public.candidate_index_public_applicants(jsonb) FROM PUBLIC;",
+        ),
+        "index_public_applicant_authority",
+    )
+    sourcing_sql += "\n" + membership_sql
+    if set(re.findall(r"CREATE FUNCTION public\.(\w+)", sourcing_sql)) != {
+        signature.split("(")[0] for signature in sourcing_runtime
+    }:
+        raise GuardError("index_sourcing_routine_inventory")
+    for signature in sourcing_runtime:
+        require(
+            sourcing_sql,
+            (
+                "REVOKE ALL ON FUNCTION public."
+                + signature.replace("(vector,", "(public.vector,")
+                + " FROM PUBLIC;",
+            ),
+            "index_sourcing_acl",
+        )
+    require(
+        sourcing_sql,
+        (
+            "current_setting('app.current_tenant_id',true)",
+            "r.tenant_id=v_scope AND r.job_id=p_job_id",
+            "public.candidate_index_status(s.source_id)",
+            "s.published_generation_id IS DISTINCT FROM (item->>'generationId')::uuid",
+        ),
+        "index_sourcing_authority",
+    )
+    require(
+        read(root, "activekg/api/candidate_sourcing.py"),
+        (
+            'algorithms=["RS256"]',
+            'issuer="signal"',
+            'audience="activekg"',
+            'claims["scopes"] != [SOURCING_SCOPE]',
+            "authority.request_id != command.requestId",
+            "0 < expires - issued <= 300",
+        ),
+        "index_sourcing_authentication",
+    )
+    require(
+        read(root, "activekg/api/main.py"),
+        ("app.include_router(candidate_sourcing_router)",),
+        "index_sourcing_registration",
+    )
     diagnostic_sql = read(root, "db/migrations/034_resume_attempt_diagnostics.sql")
     if set(re.findall(r"CREATE TABLE public\.(\w+)", diagnostic_sql)) != set(
         literal(contract, "DIAGNOSTIC_TABLES")
@@ -828,7 +917,7 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-7:]
+        caller["migration_manifest"][-10:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
@@ -837,8 +926,11 @@ def validate(root: Path = ROOT) -> None:
             "032_rc_fetch_provenance.sql",
             "033_resume_cutoff_retry.sql",
             "034_resume_attempt_diagnostics.sql",
+            "035_private_resume_sourcing.sql",
+            "036_resume_history_policy.sql",
+            "037_sourcing_public_applicant_check.sql",
         ]
-        or len(caller["migration_manifest"]) != 34
+        or len(caller["migration_manifest"]) != 37
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

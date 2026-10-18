@@ -139,6 +139,8 @@ jobs:
             tests/test_candidate_consent.py \
             tests/test_candidate_consent_guard.py \
             tests/test_candidate_index.py \
+            tests/test_candidate_sourcing.py \
+            tests/test_candidate_resume_history.py \
             tests/test_candidate_index_guard.py \
             tests/test_candidate_index_workers.py \
             tests/test_organization_candidate_history.py \
@@ -575,6 +577,7 @@ jobs:
           # Separate invocation preserves the generation suite's fresh-table check.
           # Uses the same disposable database and restricted runtime role; no provider calls.
           pytest tests/test_candidate_resume_recovery_postgres.py -v --tb=short --timeout=240
+          pytest tests/test_candidate_sourcing_postgres.py -v --tb=short --timeout=240
 
       - name: Run private history with both owner kinds and fresh roles
         env:
