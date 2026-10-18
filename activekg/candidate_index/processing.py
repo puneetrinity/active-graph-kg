@@ -7,6 +7,7 @@ module; the two worker entrypoints adopt its explicit lifecycle separately.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import re
@@ -125,12 +126,26 @@ def _assemble(
 
 
 def resume_extraction(
-    raw: dict[str, Any], text: str, policy: IndexPolicy, model: str
+    raw: dict[str, Any],
+    text: str,
+    policy: IndexPolicy,
+    model: str,
+    diagnostics: dict[str, Any] | None = None,
 ) -> Extraction:
     from pydantic import ValidationError
 
     from activekg.extraction import schema
 
+    managed_v2 = policy.extraction_adapter_version.startswith("candidate-index-extraction:v2:")
+    if managed_v2:
+        from activekg.candidate_index.resume_policy import LIST_LIMITS, policy_fields, refuse
+
+        if any(getattr(policy, name) != value for name, value in policy_fields().items()):
+            raise WorkRefused("policy_mismatch")
+        if isinstance(raw, dict):
+            for field, limit in LIST_LIMITS.items():
+                if isinstance(raw.get(field), list) and len(raw[field]) > limit:
+                    refuse(diagnostics if diagnostics is not None else {}, "list_limit")
     _bounded_value(raw)
     if not isinstance(raw, dict) or set(raw) - set(schema.ExtractionResult.model_fields):
         raise WorkRefused("incomplete")
@@ -156,6 +171,16 @@ def resume_extraction(
             if len(ends) == 1 or ends[0] <= ends[1]:
                 continue
         raise WorkRefused("incomplete")
+    if managed_v2:
+        from activekg.candidate_index.resume_policy import validate
+
+        details = diagnostics if diagnostics is not None else {}
+        parsed = validate(raw, text, details)
+        if type(raw.get("confidence")) not in (int, float):
+            raise WorkRefused("incomplete")
+        if parsed["confidence"] < policy.minimum_confidence:
+            raise WorkRefused("low_confidence")
+        return _assemble(parsed, PROFESSIONAL_FIELDS, text, parsed["confidence"], policy, model)
     list_limits = {
         "primary_titles": schema.MAX_PRIMARY_TITLES,
         "skills_raw": schema.MAX_SKILLS_RAW,
@@ -324,15 +349,108 @@ class GenerationWorker:
                         if attempt == 1
                         else self.policy.fallback_model_id
                     )
-                    raw = await extract_once(
-                        text,
-                        model,
-                        api_key=self.api_key,
-                        deadline=deadline,
-                        before_send=lambda: self._authority(dispatch, deadline),
-                        transport=self.transport,
+                    managed_v2 = self.policy.extraction_adapter_version.startswith(
+                        "candidate-index-extraction:v2:"
                     )
-                    extraction = resume_extraction(raw, text, self.policy, model)
+                    effort = "medium"
+                    if managed_v2:
+                        effort = dispatch.get("retry_mode")
+                        if effort not in {"medium", "low"} or (effort == "low" and attempt != 2):
+                            raise WorkRefused("policy_mismatch")
+                        if effort == "low":
+                            model = self.policy.primary_model_id
+                    diagnostics = {
+                        "finish_reason": "unavailable",
+                        "completion_tokens": None,
+                        "validation_reason": "not_validated",
+                        "attempt": attempt,
+                        "reasoning_effort": effort,
+                        "generation_hash": sha256(str(dispatch.get("generation_id", ""))),
+                    }
+
+                    async def record(event: str, values: dict[str, Any]) -> None:
+                        # Custom repositories are test adapters; production always uses IndexRepository.
+                        writer = getattr(self.repository, "record_diagnostic", None)
+                        if managed_v2 and writer is not None:
+                            remaining(deadline)
+                            await asyncio.to_thread(writer, dispatch, event, values)
+                            remaining(deadline)
+
+                    async def before_send() -> None:
+                        await record(
+                            "dispatch_attempted",
+                            {
+                                "model_slot": "primary"
+                                if model == self.policy.primary_model_id
+                                else "backup",
+                                "reasoning_effort": effort,
+                            },
+                        )
+                        await self._authority(dispatch, deadline)
+
+                    async def response_received(values: dict[str, Any]) -> None:
+                        await record(
+                            "response_received",
+                            {
+                                key: values.get(key)
+                                for key in ("finish_reason", "completion_tokens")
+                            },
+                        )
+
+                    await record("input_checked", {"input_characters": len(text)})
+                    try:
+                        raw = await extract_once(
+                            text,
+                            model,
+                            api_key=self.api_key,
+                            deadline=deadline,
+                            before_send=before_send,
+                            transport=self.transport,
+                            **(
+                                {
+                                    "managed_v2": True,
+                                    "diagnostics": diagnostics,
+                                    "reasoning_effort": effort,
+                                    "on_response": response_received,
+                                }
+                                if managed_v2
+                                else {}
+                            ),
+                        )
+                        extraction = resume_extraction(
+                            raw,
+                            text,
+                            self.policy,
+                            model,
+                            **({"diagnostics": diagnostics} if managed_v2 else {}),
+                        )
+                        await record(
+                            "validation_finished",
+                            {
+                                "validation_reason": diagnostics.get("validation_reason"),
+                                "skills_kept": diagnostics.get("retained_skills"),
+                                "skills_dropped": diagnostics.get("unsupported_skills"),
+                                "duplicates_removed": diagnostics.get("duplicate_skills"),
+                            },
+                        )
+                    except WorkRefused as exc:
+                        if diagnostics.get("validation_reason") not in {
+                            "not_validated",
+                            "accepted",
+                        }:
+                            await record(
+                                "validation_finished",
+                                {"validation_reason": diagnostics["validation_reason"]},
+                            )
+                        diagnostics["outcome"] = exc.code
+                        raise
+                    finally:
+                        if managed_v2:
+                            # Safe aggregate diagnostics only; no source text, skills,
+                            # provider body, contacts or exception strings.
+                            logging.getLogger(__name__).info(
+                                "candidate_index_extraction_v2 %s", canonical_json(diagnostics)
+                            )
                 remaining(deadline)
                 completed = await asyncio.to_thread(
                     self.repository.complete_extract,

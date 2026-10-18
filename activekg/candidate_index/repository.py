@@ -26,10 +26,11 @@ from activekg.candidate_index.contracts import (
     canonical_json,
     sha256,
 )
+from activekg.candidate_index.diagnostics import diagnostic_payload
 
 # Derived from PostgreSQL 16, independent of installation role/OIDs. Exact
 # structure and effective ACLs are separate gates; source hashing is not readiness.
-INDEX_CATALOG_SHA256 = "e8bc38e1da3ae7cdbc11d3cd083083c1761150812daab7a233f96fd158e89cf8"
+INDEX_CATALOG_SHA256 = "0bd6fffc0c80cd345cca614a456888fb7a3f300549886087b2b326c034654f86"
 
 INDEX_CATALOG_SQL = """
 WITH chosen AS (SELECT coalesce(%s,current_user) AS runtime_role),
@@ -148,6 +149,37 @@ def catalog_ready(cur: psycopg.Cursor, role: str | None = None) -> bool:
 
 
 class IndexRepository:
+    @staticmethod
+    def _diagnosed(dispatch: dict[str, Any]) -> bool:
+        return dispatch.get("stage") == "extract" and str(
+            dispatch.get("policy", {}).get("extraction_adapter_version", "")
+        ).startswith("candidate-index-extraction:v2:")
+
+    @staticmethod
+    def _record_on_cursor(
+        cur: psycopg.Cursor, dispatch: dict[str, Any], event: str, values: dict[str, Any]
+    ) -> bool:
+        cur.execute(
+            "SELECT candidate_index_record_diagnostic(%s,%s,%s,%s,%s)",
+            (
+                dispatch["job_id"],
+                dispatch["lease_token"],
+                dispatch["lease_generation"],
+                event,
+                Jsonb(diagnostic_payload(values)),
+            ),
+        )
+        return cur.fetchone()[0]
+
+    def record_diagnostic(
+        self, dispatch: dict[str, Any], event: str, values: dict[str, Any]
+    ) -> None:
+        if not self._diagnosed(dispatch):
+            return
+        with self.transaction() as cur:
+            if not self._record_on_cursor(cur, dispatch, event, values):
+                raise ValueError("candidate_index_diagnostic_fenced")
+
     def __init__(self, dsn: str, *, tunables: IndexTunables | None = None) -> None:
         self._dsn = dsn
         self.tunables = tunables or IndexTunables()
@@ -240,6 +272,10 @@ class IndexRepository:
             if row is None:
                 return None
             dispatch = row[0]
+            if self._diagnosed(dispatch) and not self._record_on_cursor(
+                cur, dispatch, "reserved", {}
+            ):
+                raise ValueError("candidate_index_diagnostic_fenced")
             # Translate the database's fixed deadline into a conservative local
             # duration. No machine-wall-clock comparison and no renewal on retry.
             cur.execute("SELECT clock_timestamp()")
@@ -261,6 +297,11 @@ class IndexRepository:
         parsed_text: str | None = None,
     ) -> bool:
         with self.transaction() as cur:
+            cur.execute("SAVEPOINT diagnostic_settlement")
+            if self._diagnosed(dispatch) and not self._record_on_cursor(
+                cur, dispatch, "settled", {"reason": "completed"}
+            ):
+                return False
             cur.execute(
                 "SELECT public.candidate_index_complete_extract(%s::uuid,%s::uuid,%s,%s,%s,%s::jsonb,"
                 "%s::jsonb,%s,%s,%s::jsonb,%s,%s)",
@@ -279,7 +320,10 @@ class IndexRepository:
                     parsed_text,
                 ),
             )
-            return cur.fetchone()[0]
+            completed = cur.fetchone()[0]
+            if not completed:
+                cur.execute("ROLLBACK TO SAVEPOINT diagnostic_settlement")
+            return completed
 
     def complete_embed(self, dispatch: dict[str, Any], vectors: list[list[float]]) -> bool:
         with self.transaction() as cur:
@@ -300,6 +344,9 @@ class IndexRepository:
 
     def fail(self, lease: dict[str, Any], reason: str, retry_ms: int = 0) -> bool:
         with self.transaction() as cur:
+            cur.execute("SAVEPOINT diagnostic_settlement")
+            if self._diagnosed(lease):
+                self._record_on_cursor(cur, lease, "settled", {"reason": reason})
             cur.execute(
                 "SELECT public.candidate_index_fail(%s::uuid,%s::uuid,%s,%s,%s)",
                 (
@@ -310,7 +357,10 @@ class IndexRepository:
                     retry_ms,
                 ),
             )
-            return cur.fetchone()[0]
+            settled = cur.fetchone()[0]
+            if not settled:
+                cur.execute("ROLLBACK TO SAVEPOINT diagnostic_settlement")
+            return settled
 
     def status(self, scope: str, source_id: str) -> dict[str, Any] | None:
         with self.transaction(scope) as cur:

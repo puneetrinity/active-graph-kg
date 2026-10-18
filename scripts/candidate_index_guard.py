@@ -91,6 +91,7 @@ AUTHORITIES = (
     "scripts/check_candidate_index_image.py",
     ".github/workflows/ci.yml",
     MIGRATION,
+    "db/migrations/034_resume_attempt_diagnostics.sql",
     "activekg/candidate_index/contracts.py",
     "activekg/candidate_index/repository.py",
     "activekg/common/migration_manifest.py",
@@ -369,7 +370,8 @@ def validate(root: Path = ROOT) -> None:
             'dispatch["policy_sha256"] != self.policy.digest',
             'remaining_ms = dispatch.get("remaining_ms")',
             "deadline = started + remaining_ms / 1000",
-            "before_send=lambda: self._authority(dispatch, deadline)",
+            "before_send=before_send",
+            "await self._authority(dispatch, deadline)",
             'raw["confidence"] < policy.minimum_confidence',
             "schema.ExtractionResult.model_validate(raw, strict=True)",
             "if not evidence:",
@@ -551,8 +553,28 @@ def validate(root: Path = ROOT) -> None:
     release = read(root, "scripts/init_railway_db.py")
     immutable = literal(contract, "IMMUTABLE_TABLES")
     coordination = literal(contract, "COORDINATION_TABLES")
-    runtime = literal(contract, "RUNTIME_FUNCTIONS")
-    owner = literal(contract, "OWNER_FUNCTIONS")
+    all_runtime = literal(contract, "RUNTIME_FUNCTIONS")
+    all_owner = literal(contract, "OWNER_FUNCTIONS")
+    added_runtime = ("candidate_index_record_diagnostic(uuid,uuid,bigint,text,jsonb)",)
+    added_owner = (
+        "candidate_index_read_diagnostics(text,uuid)",
+        "candidate_index_plan_recovery(text,jsonb,text)",
+        "candidate_index_apply_recovery(text,jsonb,text,integer)",
+    )
+    if all_runtime[-1:] != added_runtime or all_owner[-3:] != added_owner:
+        raise GuardError("index_diagnostic_routine_inventory")
+    runtime, owner = all_runtime[:-1], all_owner[:-3]
+    diagnostic_sql = read(root, "db/migrations/034_resume_attempt_diagnostics.sql")
+    if set(re.findall(r"CREATE TABLE public\.(\w+)", diagnostic_sql)) != set(
+        literal(contract, "DIAGNOSTIC_TABLES")
+    ):
+        raise GuardError("index_diagnostic_table_inventory")
+    for signature in added_runtime + added_owner:
+        require(
+            diagnostic_sql,
+            ("REVOKE ALL ON FUNCTION public." + signature + " FROM PUBLIC;",),
+            "index_diagnostic_acl",
+        )
     tables = re.findall(r"CREATE TABLE public\.(\w+)", sql)
     if len(tables) != 8 or set(tables) != set(immutable + coordination):
         raise GuardError("index_table_inventory")
@@ -806,15 +828,17 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-5:]
+        caller["migration_manifest"][-7:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
             "030_rc_skill_observations.sql",
             "031_rc_clock_tolerance.sql",
             "032_rc_fetch_provenance.sql",
+            "033_resume_cutoff_retry.sql",
+            "034_resume_attempt_diagnostics.sql",
         ]
-        or len(caller["migration_manifest"]) != 32
+        or len(caller["migration_manifest"]) != 34
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

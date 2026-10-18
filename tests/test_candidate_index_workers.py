@@ -834,6 +834,44 @@ def test_worker_reservation_refusal_zero_http_and_no_new_attempt():
     assert repo.events == ["reserve_commit"] and not repo.failures
 
 
+@pytest.mark.parametrize(
+    "fail_event", ["input_checked", "dispatch_attempted", "response_received", None]
+)
+def test_diagnostic_failures_do_not_add_http_attempts(fail_event):
+    from activekg.candidate_index.resume_policy import policy_fields
+
+    current = replace(POLICY, **policy_fields())
+
+    class DiagnosedRepository(Repository):
+        def record_diagnostic(self, dispatch, event, values):
+            self.events.append(event)
+            if event == fail_event:
+                raise RuntimeError("synthetic persistence failure")
+
+    repo = DiagnosedRepository()
+    repo.dispatch.update(policy=asdict(current), policy_sha256=current.digest, retry_mode="medium")
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        # Privacy remains the final operation before provider dispatch.
+        assert repo.events[-1] == "privacy_commit"
+        return response(
+            wire(
+                result={"skills_raw": ["Python"], "confidence": 0.9},
+                model=current.primary_model_id,
+            )
+        )
+
+    result = asyncio.run(
+        GenerationWorker(
+            repo, current, api_key="fake", transport=httpx.MockTransport(handler)
+        ).process({})
+    )
+    assert len(calls) == (0 if fail_event in {"input_checked", "dispatch_attempted"} else 1)
+    assert result == ("completed" if fail_event is None else "provider_unavailable")
+
+
 def test_worker_no_nested_retry_on_bad_primary_and_expiry_refuses_dispatch():
     repo = Repository()
     calls = []

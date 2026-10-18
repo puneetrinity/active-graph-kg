@@ -42,6 +42,7 @@ class WorkRefused(Exception):
             "low_confidence",
             "unsupported_format",
             "incomplete",
+            "output_truncated",
             "chunk_overflow",
             "provider_timeout",
             "provider_unavailable",
@@ -126,6 +127,10 @@ async def extract_once(
     deadline: float,
     before_send: Callable[[], Awaitable[None]],
     transport: Any = None,
+    managed_v2: bool = False,
+    diagnostics: dict[str, Any] | None = None,
+    reasoning_effort: str = "medium",
+    on_response: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """One HTTP request, including streamed-body timeout and socket cancellation.
 
@@ -139,9 +144,22 @@ async def extract_once(
 
     if not api_key:
         raise WorkRefused("provider_unavailable")
+    if reasoning_effort not in {"medium", "low"} or (
+        not managed_v2 and reasoning_effort != "medium"
+    ):
+        raise WorkRefused("policy_mismatch")
     if not isinstance(text, str) or not text.strip() or len(text) > EXTRACTION_MAX_INPUT_CHARS:
         raise WorkRefused("incomplete")
     system, prompt = build_extraction_prompt(text)
+    output_tokens = 1024
+    if managed_v2:
+        from activekg.candidate_index.resume_policy import OUTPUT_TOKENS
+        from activekg.candidate_index.resume_policy import prompt as v2_prompt
+
+        system, prompt = v2_prompt(text)
+        output_tokens = OUTPUT_TOKENS
+    if diagnostics is not None:
+        diagnostics.update(finish_reason="unavailable", completion_tokens=None)
     try:
         async with (
             asyncio.timeout(remaining(deadline)),
@@ -167,7 +185,8 @@ async def extract_once(
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 1024,
+                    "max_tokens": output_tokens,
+                    **({"reasoning_effort": reasoning_effort} if managed_v2 else {}),
                     "stop": [],
                     "stream": False,
                 },
@@ -210,6 +229,22 @@ async def extract_once(
         ):
             raise WorkRefused("incomplete")
         choice = envelope["choices"][0]
+        if diagnostics is not None:
+            finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+            diagnostics["finish_reason"] = (
+                finish
+                if finish in {"stop", "length", "content_filter", "tool_calls"}
+                else "unlisted"
+            )
+            usage = envelope.get("usage")
+            count = usage.get("completion_tokens") if isinstance(usage, dict) else None
+            diagnostics["completion_tokens"] = (
+                count if type(count) is int and 0 <= count <= output_tokens else None
+            )
+        if on_response is not None:
+            await on_response(diagnostics or {})
+        if managed_v2 and isinstance(choice, dict) and choice.get("finish_reason") == "length":
+            raise WorkRefused("output_truncated")
         if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
             raise WorkRefused("incomplete")
         message = choice.get("message")

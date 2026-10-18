@@ -52,7 +52,9 @@ MIGRATIONS: tuple[str, ...] = (
     "030_rc_skill_observations.sql",
     "031_rc_clock_tolerance.sql",
     "032_rc_fetch_provenance.sql",
+    "033_resume_cutoff_retry.sql",
+    "034_resume_attempt_diagnostics.sql",
 )
 
-if len(MIGRATIONS) != 32 or len(set(MIGRATIONS)) != len(MIGRATIONS):
-    raise RuntimeError("Memory migration manifest must contain 32 unique ordered entries")
+if len(MIGRATIONS) != 34 or len(set(MIGRATIONS)) != len(MIGRATIONS):
+    raise RuntimeError("Memory migration manifest must contain 34 unique ordered entries")

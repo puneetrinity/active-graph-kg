@@ -572,6 +572,9 @@ jobs:
             candidate_index_heads,candidate_index_scheduler TO index_readonly_test;
           SQL
           pytest tests/test_candidate_index_postgres.py -v --tb=short --timeout=240
+          # Separate invocation preserves the generation suite's fresh-table check.
+          # Uses the same disposable database and restricted runtime role; no provider calls.
+          pytest tests/test_candidate_resume_recovery_postgres.py -v --tb=short --timeout=240
 
       - name: Run private history with both owner kinds and fresh roles
         env:

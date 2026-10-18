@@ -64,9 +64,19 @@ def configuration(env: Mapping[str, str] | None = None) -> IndexConfiguration:
         raise IndexContractError("candidate_index_embedding_backend")
     revision = env.get("CANDIDATE_INDEX_EMBEDDING_ARTIFACT_REVISION", "")
     prompt_file = Path(__file__).parents[1] / "extraction" / "prompt.py"
+    adapter = env.get("CANDIDATE_INDEX_EXTRACTION_ADAPTER", "v1")
+    if adapter not in {"v1", "v2"}:
+        raise IndexContractError("candidate_index_extraction_adapter_invalid")
+    extraction_fields = {
+        "extraction_schema_sha256": sha256(canonical_json(ExtractionResult.model_json_schema())),
+        "extraction_prompt_sha256": sha256(prompt_file.read_bytes()),
+    }
+    if adapter == "v2":
+        from activekg.candidate_index.resume_policy import policy_fields
+
+        extraction_fields = policy_fields()
     policy = IndexPolicy(
-        extraction_schema_sha256=sha256(canonical_json(ExtractionResult.model_json_schema())),
-        extraction_prompt_sha256=sha256(prompt_file.read_bytes()),
+        **extraction_fields,
         primary_model_id=resolve_groq_model(
             "EXTRACTION_PRIMARY_MODEL", DEFAULT_GROQ_FAST_MODEL, env
         ),
