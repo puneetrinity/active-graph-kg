@@ -486,7 +486,8 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
         required = {
             "GenerationWorker.process": (
                 "self.repository.reserve, lease, self.policy",
-                "before_send=lambda: self._authority(dispatch, deadline)",
+                "async def before_send() -> None:",
+                "before_send=before_send,",
             ),
             "GenerationWorker._authority": (
                 'current.get("eligible") is not True',
@@ -516,6 +517,15 @@ def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
             not reference.file.startswith("activekg/candidate_index/")
             or required is None
             or any(token not in source for token in required)
+        ):
+            raise GuardError("candidate index worker authority boundary changed")
+        # The pre-send hook must itself re-check current privacy authority before
+        # every provider call (it also records the safe diagnostic event).
+        if reference.symbol == "GenerationWorker.process" and not re.search(
+            r"async def before_send\(\) -> None:(?:(?!\n {20}async def ).)*?"
+            r"await self\._authority\(dispatch, deadline\)",
+            source,
+            re.S,
         ):
             raise GuardError("candidate index worker authority boundary changed")
     if row["test_id"] == "privacy-candidate-index-search":
