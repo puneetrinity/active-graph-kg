@@ -25,6 +25,7 @@ from activekg.api import organization_candidates as intake
 from activekg.api.auth import JWTClaims
 from activekg.candidate_index.contracts import (
     COORDINATION_TABLES,
+    DIAGNOSTIC_TABLES,
     IMMUTABLE_TABLES,
     INDEX_TABLES,
     OWNER_FUNCTIONS,
@@ -372,6 +373,134 @@ def test_generation_worker_primary_quality_refusal_then_reserved_fallback_after_
         "SELECT model_id,attempt FROM candidate_index_extractions WHERE generation_id=%s",
         (captured["generation_id"],),
     ).fetchone() == (POLICY.fallback_model_id, 2)
+
+
+@pytest.mark.parametrize(
+    "first,second", [("length", "stop"), ("invalid", "stop"), ("length", "length")]
+)
+def test_v2_durable_retry_choice_survives_worker_restart(target, first, second):
+    import httpx
+
+    from activekg.candidate_index.processing import GenerationWorker
+    from activekg.candidate_index.resume_policy import policy_fields
+
+    current = replace(POLICY, **policy_fields())
+    repo, scope, captured, _ = source(policy=current)
+    calls = []
+
+    def reply(request):
+        body = json.loads(request.content)
+        calls.append((body["model"], body["reasoning_effort"], body["max_tokens"]))
+        outcome = first if len(calls) == 1 else second
+        value = {"skills_raw": ["Python"], "confidence": 0.9}
+        payload = {
+            "model": body["model"],
+            "choices": [
+                {
+                    "finish_reason": "length" if outcome == "length" else "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "{" if outcome == "invalid" else json.dumps(value),
+                    },
+                }
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=httpx.ByteStream(json.dumps(payload).encode()),
+        )
+
+    transport = httpx.MockTransport(reply)
+    assert asyncio.run(
+        GenerationWorker(repo, current, api_key="fake", transport=transport).tick("extract")
+    ) == ["output_truncated" if first == "length" else "incomplete"]
+    row = target.execute(
+        "SELECT attempts,dispatch_deadline,error_code FROM candidate_index_jobs WHERE generation_id=%s AND stage='extract'",
+        (captured["generation_id"],),
+    ).fetchone()
+    assert row[0] == 1
+    # New repository and worker, no in-memory record of the first response.
+    restarted = IndexRepository(RUNTIME)
+    assert asyncio.run(
+        GenerationWorker(restarted, current, api_key="fake", transport=transport).tick("extract")
+    ) == ["completed" if second == "stop" else "output_truncated"]
+    end = target.execute(
+        "SELECT attempts,dispatch_deadline,state FROM candidate_index_jobs WHERE generation_id=%s AND stage='extract'",
+        (captured["generation_id"],),
+    ).fetchone()
+    assert end == (2, row[1], "pending_embedding" if second == "stop" else "needs_review")
+    assert calls == [
+        (current.primary_model_id, "medium", 4096),
+        (
+            current.primary_model_id if first == "length" else current.fallback_model_id,
+            "low" if first == "length" else "medium",
+            4096,
+        ),
+    ]
+    assert (
+        asyncio.run(
+            GenerationWorker(restarted, current, api_key="fake", transport=transport).tick(
+                "extract"
+            )
+        )
+        == []
+    )
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("reason", ["output_truncated", "incomplete"])
+def test_v2_sql_rejects_wrong_second_model_and_stale_lease(target, reason):
+    from activekg.candidate_index.resume_policy import policy_fields
+
+    current = replace(POLICY, **policy_fields())
+    repo, _, _, _ = source(policy=current)
+    first = repo.reserve(repo.claim("extract")[0], current)
+    assert repo.fail(first, reason, 0)
+    second = repo.reserve(repo.claim("extract")[0], current)
+    expected = (
+        current.primary_model_id if reason == "output_truncated" else current.fallback_model_id
+    )
+    wrong = current.fallback_model_id if reason == "output_truncated" else current.primary_model_id
+    assert second["retry_mode"] == ("low" if reason == "output_truncated" else "medium")
+    assert 0 < second["remaining_ms"] <= first["remaining_ms"] <= 45000
+    result = {
+        "namespace": {"skills_raw": ["Python"]},
+        "evidence": [{"field": "skills_raw", "text": "Python"}],
+        "confidence": 0.9,
+        "chunks": chunk_manifest(TEXT, current),
+        "professional_text": TEXT,
+    }
+    assert not repo.complete_extract(first, model_id=current.primary_model_id, **result)
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        repo.complete_extract(second, model_id=wrong, **result)
+    assert repo.complete_extract(second, model_id=expected, **result)
+    assert repo.reserve(second, current) is None
+
+
+def test_legacy_policy_cannot_claim_truncation_rescue(target):
+    repo, _, _, _ = source()
+    first = repo.reserve(repo.claim("extract")[0], POLICY)
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        repo.fail(first, "output_truncated", 0)
+
+
+def test_v2_expired_shared_deadline_prevents_low_rescue(target):
+    from activekg.candidate_index.resume_policy import policy_fields
+
+    current = replace(POLICY, **policy_fields())
+    repo, _, captured, _ = source(policy=current)
+    first = repo.reserve(repo.claim("extract")[0], current)
+    assert repo.fail(first, "output_truncated", 0)
+    target.execute(
+        "UPDATE candidate_index_jobs SET dispatch_deadline=clock_timestamp()-interval '1 second' WHERE generation_id=%s",
+        (captured["generation_id"],),
+    )
+    assert IndexRepository(RUNTIME).claim("extract") == []
+    assert target.execute(
+        "SELECT attempts FROM candidate_index_jobs WHERE generation_id=%s AND stage='extract'",
+        (captured["generation_id"],),
+    ).fetchone() == (1,)
 
 
 def test_generation_worker_fallback_quality_never_publishes_or_resets_attempts(target):
@@ -834,11 +963,11 @@ def test_all_relations_forced_and_routines_fixed_search_path(target):
         "SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class WHERE relname=ANY(%s)",
         (list(INDEX_TABLES),),
     ).fetchall()
-    assert len(rows) == 8 and all(row[1:] == (True, True) for row in rows)
+    assert len(rows) == len(INDEX_TABLES) and all(row[1:] == (True, True) for row in rows)
     rows = target.execute(
         "SELECT proname,prosecdef,proconfig FROM pg_proc WHERE proname LIKE 'candidate_index_%%'"
     ).fetchall()
-    assert len(rows) == 12 and all(
+    assert len(rows) == len(RUNTIME_FUNCTIONS) + len(OWNER_FUNCTIONS) and all(
         row[1] and "search_path=pg_catalog, public" in row[2] for row in rows
     )
 
@@ -1336,7 +1465,7 @@ def test_genuine_readonly_role_is_scoped_and_cannot_execute_or_write(target):
                 "SELECT has_table_privilege(current_user,%s,'SELECT'), "
                 "has_table_privilege(current_user,%s,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')",
                 (table, table),
-            ).fetchone() == (True, False)
+            ).fetchone() == (table not in DIAGNOSTIC_TABLES, False)
         for signature in RUNTIME_FUNCTIONS + OWNER_FUNCTIONS:
             assert conn.execute(
                 "SELECT has_function_privilege(current_user,%s,'EXECUTE')", (signature,)

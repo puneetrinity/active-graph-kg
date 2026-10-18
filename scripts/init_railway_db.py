@@ -96,11 +96,13 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "034_resume_attempt_diagnostics.sql": [("candidate_index_catalog",)],
+    "033_resume_cutoff_retry.sql": [("candidate_index_catalog_retry",)],
     "032_rc_fetch_provenance.sql": [("rc_skills_catalog",)],
     "031_rc_clock_tolerance.sql": [("rc_skills_catalog_clock",)],
     "030_rc_skill_observations.sql": [("rc_skills_catalog_base",)],
     "029_organization_candidate_history.sql": [("candidate_history_catalog",)],
-    "028_candidate_generation_publication.sql": [("candidate_index_catalog",)],
+    "028_candidate_generation_publication.sql": [("candidate_index_catalog_base",)],
     "001_add_embedding_history_index.sql": [("index", "idx_embedding_history_created_at")],
     "004_add_external_id_index.sql": [
         ("index", "idx_nodes_external_id"),
@@ -1021,12 +1023,27 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence
 
         return catalog_evidence(cur)[0] == HISTORY_CATALOG_SHA256
-    if kind == "candidate_index_catalog":
+    if kind in {
+        "candidate_index_catalog",
+        "candidate_index_catalog_base",
+        "candidate_index_catalog_retry",
+    }:
         from activekg.candidate_index.repository import INDEX_CATALOG_SHA256, catalog_evidence
 
         # Migration postconditions precede runtime reconciliation. Structural
         # equality is required here; the subsequent role assertion checks ACLs.
-        return catalog_evidence(cur)[0] == INDEX_CATALOG_SHA256
+        digest = catalog_evidence(cur)[0]
+        return (
+            digest == INDEX_CATALOG_SHA256
+            or (
+                kind in {"candidate_index_catalog_base", "candidate_index_catalog_retry"}
+                and digest == "39909e5967bcf42f1efd032dc8cbf3c3085b97cd9b6c7c9fcf01144715ffba25"
+            )
+            or (
+                kind == "candidate_index_catalog_base"
+                and digest == "e8bc38e1da3ae7cdbc11d3cd083083c1761150812daab7a233f96fd158e89cf8"
+            )
+        )
     if kind == "table":
         cur.execute(
             "SELECT 1 FROM information_schema.tables "
