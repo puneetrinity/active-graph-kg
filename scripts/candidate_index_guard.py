@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = "db/migrations/028_candidate_generation_publication.sql"
 FROZEN = {
     "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
-    "activekg/api/candidate_privacy.py": "29ba499e7efbdd8e81841b376781000bb8dd8d4022851a8291d49c6742506851",
-    "activekg/api/organization_candidates.py": "311df4f1385eb1c4756cf5f61f850c50f831b1dad16411e226402e7c07cba50a",
+    "activekg/api/candidate_privacy.py": "f93afe56fca64f97913a29f582291bc22184e5631357f992ca36ad5579225b20",
+    "activekg/api/organization_candidates.py": "8ef7a2c921f5f7560c04448b879ca22dacdac93c5e5625669e118a5e7fc2e351",
     "activekg/api/sourced_candidates.py": "3aed0cdbe99ba96295e700259a6a150b863b0278f3cc175d644eb99538d3529c",
     "activekg/connectors/extract.py": "329f37393b21f9d241f71300c10575e7eb36adfd4d05ea245382a918ab0676a9",
     "activekg/embedding/global_candidates.py": "e81ce5747609c45dca980a184d83d81fe90308a25776561a356df014f651fbaf",

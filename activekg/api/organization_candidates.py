@@ -18,6 +18,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from typing_extensions import Self
@@ -386,4 +387,4 @@ async def ingest_organization_candidate(
     if not organization_candidate_intake_enabled():
         raise HTTPException(status_code=503, detail="organization_candidate_intake_disabled")
     payload = await _parse_body(request)
-    return _store(payload, claims)
+    return await run_in_threadpool(lambda: _store(payload, claims))

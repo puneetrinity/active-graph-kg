@@ -11,6 +11,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from typing_extensions import Self
@@ -272,7 +273,7 @@ async def ingest_organization_decision_event(
     expected_tenant = f"org_{payload.organization_id}"
     if claims.tenant_id != expected_tenant:
         raise HTTPException(status_code=403, detail="decision_inbox_tenant_denied")
-    status = _store(payload, claims.tenant_id)
+    status = await run_in_threadpool(lambda: _store(payload, claims.tenant_id))
     return {
         "event_id": str(payload.event_id),
         "delivery_sequence": payload.delivery_sequence,
