@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, get_args
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from typing_extensions import Self
 
@@ -260,16 +261,18 @@ async def create_directive(
     identifiers = _identifiers(payload.identifiers)
     repository = _repo()
     try:
-        request_id, record = repository.create_directive(
-            request_id=payload.request_id,
-            action=payload.action,
-            authority_type=payload.authority_type,
-            evidence_ref=payload.evidence_ref,
-            reason=payload.reason_code,
-            issuer=claims.issuer or "",
-            actor_id=claims.actor_id,
-            identifiers=identifiers,
-            canonical=_canonical(payload.canonical),
+        request_id, record = await run_in_threadpool(
+            lambda: repository.create_directive(
+                request_id=payload.request_id,
+                action=payload.action,
+                authority_type=payload.authority_type,
+                evidence_ref=payload.evidence_ref,
+                reason=payload.reason_code,
+                issuer=claims.issuer or "",
+                actor_id=claims.actor_id,
+                identifiers=identifiers,
+                canonical=_canonical(payload.canonical),
+            )
         )
     except CandidatePrivacyConflict as exc:
         raise HTTPException(status_code=409, detail="candidate_privacy_request_conflict") from exc
@@ -289,15 +292,17 @@ async def transition_directive(
         raise HTTPException(status_code=503, detail="candidate_privacy_intake_disabled")
     payload = await _parse_body(request, DirectiveTransition)
     try:
-        request_id, record = _repo().transition_directive(
-            directive_id=directive_id,
-            expected_version=payload.expected_version,
-            request_id=payload.request_id,
-            transition=payload.transition,
-            evidence_ref=payload.evidence_ref,
-            reason=payload.reason_code,
-            issuer=claims.issuer or "",
-            actor_id=claims.actor_id,
+        request_id, record = await run_in_threadpool(
+            lambda: _repo().transition_directive(
+                directive_id=directive_id,
+                expected_version=payload.expected_version,
+                request_id=payload.request_id,
+                transition=payload.transition,
+                evidence_ref=payload.evidence_ref,
+                reason=payload.reason_code,
+                issuer=claims.issuer or "",
+                actor_id=claims.actor_id,
+            )
         )
     except CandidatePrivacyConflict as exc:
         raise HTTPException(
@@ -320,7 +325,7 @@ async def eligibility_batch(
         for subject in payload.subjects
     ]
     try:
-        decisions = repository.evaluate_many(prepared)
+        decisions = await run_in_threadpool(lambda: repository.evaluate_many(prepared))
     except CandidatePrivacyUnavailable as exc:
         raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
     if len(decisions) != len(payload.subjects):

@@ -133,6 +133,7 @@ jobs:
             tests/test_organization_decision_events.py \
             tests/test_decision_history_guard.py \
             tests/test_sourced_candidates.py \
+            tests/test_api_event_loop_blocking.py \
             tests/test_sourced_candidate_ingest_guard.py \
             tests/test_organization_candidate_intake.py \
             tests/test_organization_candidate_intake_guard.py \

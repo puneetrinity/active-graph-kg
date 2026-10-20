@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN = {
-    "activekg/api/organization_candidates.py": "311df4f1385eb1c4756cf5f61f850c50f831b1dad16411e226402e7c07cba50a",
+    "activekg/api/organization_candidates.py": "8ef7a2c921f5f7560c04448b879ca22dacdac93c5e5625669e118a5e7fc2e351",
     "activekg/api/sourced_candidates.py": "3aed0cdbe99ba96295e700259a6a150b863b0278f3cc175d644eb99538d3529c",
     # Seven-fix A1: counts/timing-only instrumentation; consent filtering unchanged.
     "activekg/api/global_memory.py": "b63e518a28414952ca3de5a41d3775135babf1ba829ef8907ca71eb4fa222a5f",
