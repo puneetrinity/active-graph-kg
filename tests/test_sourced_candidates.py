@@ -223,3 +223,51 @@ def test_body_and_profile_size_caps_fail_closed() -> None:
     body["normalized_profile"] = profile
     body["provider_observed_at"] = datetime.now(timezone.utc).isoformat()
     assert SourcedCandidateIngestRequest.model_validate_json(json.dumps(body))
+
+
+def test_blocking_store_does_not_stall_the_event_loop() -> None:
+    """Regression (job 192): _store is blocking database work. Run in the request handler's event loop, ten
+    concurrent ingests serialised and starved every other route, so Discover's 5 s delivery deadline expired while
+    Memory was still completing work. It must run in the threadpool."""
+    import time as _time
+
+    app = _app(_claims())
+
+    @app.get("/probe")
+    async def probe() -> dict[str, bool]:
+        return {"ok": True}
+
+    def slow_store(payload: object, claims: object) -> dict[str, str]:
+        _time.sleep(0.5)  # stands in for connect + transaction
+        return {"status": "stored"}
+
+    async def execute() -> tuple[float, float, list[int]]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            started = _time.monotonic()
+            ingests = [
+                asyncio.create_task(
+                    client.post(
+                        "/sourced-candidates/ingest", json=_body(provider_record_id=str(1000 + i))
+                    )
+                )
+                for i in range(6)
+            ]
+            await asyncio.sleep(0.05)
+            probe_started = _time.monotonic()
+            await client.get("/probe")
+            probe_elapsed = _time.monotonic() - probe_started
+            responses = await asyncio.gather(*ingests)
+            return _time.monotonic() - started, probe_elapsed, [r.status_code for r in responses]
+
+    with (
+        patch.object(auth, "JWT_ENABLED", True),
+        patch.object(auth, "SIGNAL_JWT_ISSUER", "signal"),
+        patch.dict("os.environ", {"SOURCED_CANDIDATE_INGEST_MODE": "dual"}),
+        patch("activekg.api.sourced_candidates._store", slow_store),
+    ):
+        total, probe_elapsed, statuses = asyncio.run(execute())
+    assert statuses == [200] * 6
+    assert probe_elapsed < 0.3, f"other routes blocked for {probe_elapsed:.2f}s"
+    assert total < 1.5, f"ingests serialised: {total:.2f}s for 6 x 0.5s"

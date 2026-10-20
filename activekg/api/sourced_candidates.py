@@ -21,6 +21,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from typing_extensions import Self
@@ -1010,4 +1011,5 @@ async def ingest_sourced_candidate(
     payload = await _parse_body(request)
     if (payload.provider_namespace, payload.record_type, payload.adapter_version) not in _ADAPTER:
         raise HTTPException(status_code=422, detail="sourced_candidate_adapter_denied")
-    return _store(payload, claims)
+    # _store is blocking psycopg work; keep it off the event loop (same as candidate_consent).
+    return await run_in_threadpool(lambda: _store(payload, claims))

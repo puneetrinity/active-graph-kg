@@ -22,7 +22,7 @@ FROZEN = {
     "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
     "activekg/api/candidate_privacy.py": "29ba499e7efbdd8e81841b376781000bb8dd8d4022851a8291d49c6742506851",
     "activekg/api/organization_candidates.py": "311df4f1385eb1c4756cf5f61f850c50f831b1dad16411e226402e7c07cba50a",
-    "activekg/api/sourced_candidates.py": "2d3342ff555c29f006df4a3aec9d607202f5f093023097b5f359740e74863d2c",
+    "activekg/api/sourced_candidates.py": "3aed0cdbe99ba96295e700259a6a150b863b0278f3cc175d644eb99538d3529c",
     "activekg/connectors/extract.py": "329f37393b21f9d241f71300c10575e7eb36adfd4d05ea245382a918ab0676a9",
     "activekg/embedding/global_candidates.py": "e81ce5747609c45dca980a184d83d81fe90308a25776561a356df014f651fbaf",
     "activekg/embedding/queue.py": "936836ad21fcb6597014f7f2903a380ca2ffae259f1f870427c680c1c1301401",
@@ -73,7 +73,7 @@ FROZEN = {
     "tests/test_global_candidate_embedding_text.py": "25e3252a6225fbb8587b2ea53c51ec4ac95747506384970547749a6d60f75fc4",
     "tests/test_public_profile_boundary.py": "667491349da55a899507fa4df43f083a5f28a4822775975f9232be83e1c96751",
     "tests/test_signal_global_observation_order.py": "0e5526e3b31faaf83c2d1f49472e05fe6632f6faeb86f39702ba70a1a02e8f9c",
-    "tests/test_sourced_candidates.py": "d1bae94cc426ce2acd530e02e45feadc91a89bb891ada2726f8420a3276d67a4",
+    "tests/test_sourced_candidates.py": "c73fa7f23056d544900e863e7b7f0beb0d9310c40f6c3c815bc0d3a47d069b00",
 }
 MIXED = {
     "activekg/privacy/repository.py": (
