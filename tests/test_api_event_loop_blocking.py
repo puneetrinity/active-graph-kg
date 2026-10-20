@@ -37,12 +37,47 @@ def _offenders() -> list[str]:
                 continue
             if (path.name, node.name) in ALLOWED:
                 continue
+            offloaded_lines = {
+                line
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id == "run_in_threadpool"
+                    or isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "to_thread"
+                )
+                for argument in call.args
+                if isinstance(argument, ast.Lambda)
+                for line in range(argument.lineno, (argument.end_lineno or argument.lineno) + 1)
+            }
+            # Passing a function reference (to_thread(repo.read, command)) is
+            # also deferred. A call expression in its arguments is not.
+            offloaded_lines.update(
+                line
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id == "run_in_threadpool"
+                    or isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "to_thread"
+                )
+                and not any(
+                    isinstance(part, ast.Call)
+                    for argument in [*call.args, *(kw.value for kw in call.keywords)]
+                    for part in ast.walk(argument)
+                )
+                for line in range(call.lineno, (call.end_lineno or call.lineno) + 1)
+            )
             body = (ast.get_source_segment(source, node) or "").splitlines()[1:]
-            for line in body:
-                text = line.strip()
-                if text.startswith("#") or "run_in_threadpool" in text or "to_thread" in text:
+            for lineno, line in enumerate(body, start=node.lineno + 1):
+                if lineno in offloaded_lines:
                     continue
-                if text.startswith("lambda:") or text.startswith("repository = _repo()"):
+                text = line.strip()
+                if text.startswith("#"):
+                    continue
+                if text.startswith("repository = _repo()"):
                     continue
                 if BLOCKING.search(text):
                     found.append(f"{path.name}:{node.name}: {text[:80]}")
@@ -58,3 +93,19 @@ def test_detector_catches_a_direct_blocking_call(tmp_path: Path) -> None:
     node = next(n for n in ast.walk(ast.parse(sample)) if isinstance(n, ast.AsyncFunctionDef))
     assert _is_route(node)
     assert BLOCKING.search("return _store(payload, claims)")
+
+
+def test_detector_distinguishes_deferred_work_from_eager_arguments(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__(__name__, fromlist=["API"]), "API", tmp_path)
+    path = tmp_path / "route.py"
+    path.write_text(
+        '@router.post("/x")\nasync def x():\n'
+        '    return await run_in_threadpool(lambda: timed_work("x", 0,\n'
+        "        lambda: _store(payload, claims)))\n"
+    )
+    assert _offenders() == []
+    path.write_text(
+        '@router.post("/x")\nasync def x():\n'
+        "    return await run_in_threadpool(_store(payload, claims))\n"
+    )
+    assert len(_offenders()) == 1

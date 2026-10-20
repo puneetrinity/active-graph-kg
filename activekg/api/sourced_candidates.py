@@ -28,6 +28,7 @@ from typing_extensions import Self
 
 from activekg.api import auth
 from activekg.api.auth import JWTClaims, get_jwt_claims
+from activekg.api.work_timing import TimingRoute, timed_work
 from activekg.common.logger import get_enhanced_logger
 from activekg.graph.candidate_identifiers import IdentifierNormalizationError, normalize_identifier
 from activekg.privacy.config import load_candidate_privacy_config
@@ -35,7 +36,7 @@ from activekg.privacy.identity import identity_token, normalize_privacy_identifi
 from activekg.privacy.models import CandidatePrivacyDecision, decision_for
 from activekg.privacy.repository import CandidatePrivacyRestricted, require_allowed
 
-router = APIRouter(tags=["sourced-candidates"])
+router = APIRouter(tags=["sourced-candidates"], route_class=TimingRoute)
 sourced_candidates_router = router
 logger = get_enhanced_logger(__name__)
 
@@ -1012,4 +1013,7 @@ async def ingest_sourced_candidate(
     if (payload.provider_namespace, payload.record_type, payload.adapter_version) not in _ADAPTER:
         raise HTTPException(status_code=422, detail="sourced_candidate_adapter_denied")
     # _store is blocking psycopg work; keep it off the event loop (same as candidate_consent).
-    return await run_in_threadpool(lambda: _store(payload, claims))
+    queued_at = time.perf_counter()
+    return await run_in_threadpool(
+        lambda: timed_work("sourced_candidate_ingest", queued_at, lambda: _store(payload, claims))
+    )
