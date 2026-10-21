@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from time import perf_counter
 from typing import Annotated, Any, Literal, get_args
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from typing_extensions import Self
 
 from activekg.api import auth
 from activekg.api.auth import JWTClaims, get_jwt_claims
+from activekg.api.work_timing import TimingRoute, timed_work
 from activekg.privacy.config import (
     CandidatePrivacyConfig,
     CandidatePrivacyConfigurationError,
@@ -38,7 +40,7 @@ from activekg.privacy.repository import (
     CandidatePrivacyUnavailable,
 )
 
-router = APIRouter(tags=["candidate-privacy"])
+router = APIRouter(tags=["candidate-privacy"], route_class=TimingRoute)
 _repository: CandidatePrivacyRepository | None = None
 _MAX_BODY_BYTES = 64 * 1024
 
@@ -325,7 +327,12 @@ async def eligibility_batch(
         for subject in payload.subjects
     ]
     try:
-        decisions = await run_in_threadpool(lambda: repository.evaluate_many(prepared))
+        queued_at = perf_counter()
+        decisions = await run_in_threadpool(
+            lambda: timed_work(
+                "privacy_eligibility_batch", queued_at, lambda: repository.evaluate_many(prepared)
+            )
+        )
     except CandidatePrivacyUnavailable as exc:
         raise HTTPException(status_code=503, detail="candidate_privacy_unavailable") from exc
     if len(decisions) != len(payload.subjects):

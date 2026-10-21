@@ -166,7 +166,8 @@ def validate(root: Path = ROOT) -> None:
         (
             'if sourced_candidate_ingest_mode() == "off"',
             "payload = await _parse_body(request)",
-            "return await run_in_threadpool(lambda: _store(payload, claims))",
+            "return await run_in_threadpool(",
+            'lambda: timed_work("sourced_candidate_ingest", queued_at, lambda: _store(payload, claims))',
         ),
         "new route lost its mode/body/store boundary",
     )
