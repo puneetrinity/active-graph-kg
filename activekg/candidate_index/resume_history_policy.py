@@ -17,6 +17,11 @@ from activekg.candidate_index.providers import WorkRefused
 
 OUTPUT_TOKENS = skills.OUTPUT_TOKENS
 MAX_EMPLOYMENT = 20
+# Search text is chunked for a 256-token embedding model that refuses (never truncates) longer
+# chunks. v2/v3 allow up to 100 skills, so 1,200-character chunks reached 395 tokens in production
+# (23 Oct, 14 of 19). Densest observed text was ~2.8 characters/token; 600 keeps the worst case
+# near 215 tokens. Smaller chunks only split the same text further; nothing is clipped.
+CHUNK_CHARACTERS = 600
 MONTHS = (
     "january february march april may june july august september october november december"
 ).split()
@@ -75,7 +80,7 @@ def prompt(text: str) -> tuple[str, str]:
     ), user
 
 
-def policy_fields() -> dict[str, str]:
+def policy_fields() -> dict[str, str | int]:
     descriptor = {
         "parent": skills.policy_fields(),
         "source": sha256(Path(__file__).read_bytes()),
@@ -87,6 +92,7 @@ def policy_fields() -> dict[str, str]:
         + sha256(canonical_json(descriptor)),
         "extraction_schema_sha256": sha256(canonical_json(descriptor)),
         "extraction_prompt_sha256": sha256(canonical_json(prompt(""))),
+        "chunk_characters": CHUNK_CHARACTERS,
     }
 
 
