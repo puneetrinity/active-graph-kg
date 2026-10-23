@@ -71,27 +71,76 @@ def test_year_precision_and_explicit_current_work_are_preserved():
     ]
 
 
+UNKNOWN_START = {"start": None, "start_quote": None}
+UNKNOWN_END = {"end": None, "end_quote": None}
+
+
 @pytest.mark.parametrize(
-    "changes",
+    "changes,published",
     [
-        {"start": "2019-13"},
-        {"start": "2019-02-30"},
-        {"start_quote": "2019-04"},
-        {"start": "2020-03"},
-        {"start": "2019-01", "start_quote": "2019"},
-        {"title": "Invented title"},
-        {"ongoing": True},
-        {"ongoing": "true"},
-        {"extra": "unbounded"},
-        {"start": None},
-        {"start": "2019-04"},
-        {"end": "2024-05"},
-        {"end": None, "ongoing": True, "end_quote": "2024"},
+        ({"start": "2019-13"}, UNKNOWN_START),
+        ({"start": "2019-02-30"}, UNKNOWN_START),
+        # Quote not in the text, but the value is the resume's own wording: kept from the value.
+        ({"start_quote": "2019-04"}, {}),
+        # Value contradicts its verbatim quote: unknown, never pick one.
+        ({"start": "2020-03"}, UNKNOWN_START),
+        # Value adds precision the quote does not have: unknown, never guess a month.
+        ({"start": "2019-01", "start_quote": "2019"}, UNKNOWN_START),
+        ({"title": "Invented title"}, {"title": None}),
+        # "Current" claimed without present/current wording: not current; the dated end stays.
+        ({"ongoing": True}, {"ongoing": False}),
+        ({"ongoing": "true"}, {"ongoing": False}),
+        # Unknown keys are dropped, never published.
+        ({"extra": "unbounded"}, {}),
+        # Value missing but the verbatim quote reads unambiguously: kept from the quote.
+        ({"start": None}, {}),
+        ({"start": "2019-04"}, UNKNOWN_START),
+        ({"end": "2024-05"}, UNKNOWN_END),
+        ({"end": None, "ongoing": True, "end_quote": "2024"}, {"end": "2024", "end_quote": "2024"}),
     ],
 )
-def test_invalid_or_unsupported_history_is_not_published(changes):
+def test_unsupported_history_is_unknown_for_that_job_only(changes, published):
+    other = role(title="Intern", start="2018", start_quote="2018", end="2019", end_quote="2019")
+    result = history.validate(raw([role(**changes), other]), TEXT, {})
+    assert result["employment_history"] == [{**role(), **published}, other]
+    assert result["skills_raw"] == ["Python"]
+
+
+def test_model_date_wording_is_read_only_from_verbatim_text():
+    text = "Backend Engineer. Mar 2019 - Jun 2024. Python."
+    written = role(start="Mar 2019", start_quote="Mar 2019", end="2024-06", end_quote="Jun 2024")
+    assert history.validate(raw([written]), text, {})["employment_history"] == [
+        role(start="2019-03", start_quote="Mar 2019", end="2024-06", end_quote="Jun 2024")
+    ]
+
+
+def test_impossible_order_makes_both_dates_unknown():
+    backwards = role(start="2024-06", start_quote="2024-06", end="2019-03", end_quote="2019-03")
+    assert history.validate(raw([backwards]), TEXT, {})["employment_history"] == [
+        role(**UNKNOWN_START, **UNKNOWN_END)
+    ]
+
+
+def test_jobs_with_no_supported_evidence_are_not_published():
+    empty = role(title="Invented", start="1999", start_quote="1999", end=None, end_quote=None)
+    malformed = "Backend Engineer 2019"
+    assert history.validate(raw([empty, malformed, role()]), TEXT, {})["employment_history"] == [
+        role()
+    ]
+
+
+def test_history_is_part_of_the_required_json_schema():
+    system, _ = history.prompt("resume")
+    schema = system.split("EXTRACTION RULES")[0]
+    assert '"employment_history"' in schema and schema.index('"employment_history"') < schema.index(
+        '"confidence"'
+    )
+    assert "employment_history is REQUIRED" in system
+
+
+def test_missing_history_key_is_still_refused():
     with pytest.raises(WorkRefused):
-        history.validate(raw([role(**changes)]), TEXT, {})
+        history.validate({k: v for k, v in raw().items() if k != "employment_history"}, TEXT, {})
 
 
 def test_list_overflow_is_recorded_and_never_truncated():
@@ -118,6 +167,8 @@ def test_v3_cannot_be_run_under_v2_policy():
         ("2019", "2019"),
         ("04/03/2019", None),
         ("2019-03", "2019-03"),
+        ("Q1 2019", None),
+        ("Mar '19", None),
     ],
 )
 def test_quote_precision_is_not_guessed(quote, expected):
