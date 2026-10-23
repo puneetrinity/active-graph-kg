@@ -9,8 +9,9 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from activekg.candidate_index.contracts import IndexTunables, canonical_json
+from activekg.candidate_index.contracts import IndexTunables, canonical_json, chunk_manifest
 from activekg.candidate_index.recovery import ResumeRecovery
+from activekg.candidate_index.repository import IndexRepository
 from activekg.candidate_index.resume_policy import policy_fields
 from activekg.privacy.models import CandidatePrivacyAction
 from tests import test_candidate_index_postgres as base
@@ -337,3 +338,121 @@ def test_embedding_recovery_refuses_published_and_in_flight_generations(target):
     repo2.reserve(repo2.claim("embed")[0], POLICY)  # embedding leased, still running
     with pytest.raises(psycopg.errors.InvalidParameterValue):
         v3_plan(target, scope2, accepted2)
+
+
+# 23 Oct rollout: a worker on a new policy must settle, not endlessly re-lease, old-policy work.
+
+
+def _new_policy():
+    from activekg.candidate_index import resume_history_policy as history
+
+    return replace(POLICY, **history.policy_fields())
+
+
+def _job(target, generation_id, stage):
+    return target.execute(
+        "SELECT state,error_code,attempts,dispatch_reserved_generation,lease_token IS NULL"
+        " FROM candidate_index_jobs WHERE generation_id=%s AND stage=%s",
+        (generation_id, stage),
+    ).fetchone()
+
+
+def test_new_policy_worker_settles_old_policy_embed_job_once(target):
+    repo, scope, accepted, _ = source()
+    base.extract(repo)  # extracted under the old policy during the deploy window
+    lease = repo.claim("embed")[0]
+    before = _job(target, accepted["generation_id"], "embed")
+    assert repo.reserve(lease, _new_policy()) is None  # new worker, mismatched policy
+    state, error, attempts, reserved, released = _job(target, accepted["generation_id"], "embed")
+    assert (state, error, released) == ("needs_review", "policy_mismatch", True)
+    assert (attempts, reserved) == before[2:4]  # no attempt, no reservation consumed
+    assert repo.claim("embed") == []  # never re-leased
+    assert repo.status(scope, accepted["source_id"])["state"] != "ready"  # not marked indexed
+
+
+def test_policy_settlement_requires_the_current_lease_holder(target):
+    repo, _, accepted, _ = source()
+    base.extract(repo)
+    lease = repo.claim("embed")[0]
+    stale = {**lease, "lease_token": str(uuid4())}
+    assert repo.reserve(stale, _new_policy()) is None
+    assert _job(target, accepted["generation_id"], "embed")[:2] == ("embedding", None)  # untouched
+    target.execute(
+        "UPDATE candidate_index_jobs SET lease_expires_at=clock_timestamp()-interval '1 second'"
+        " WHERE generation_id=%s AND stage='embed'",
+        (accepted["generation_id"],),
+    )
+    assert repo.reserve(lease, _new_policy()) is None  # expired holder cannot settle either
+    assert _job(target, accepted["generation_id"], "embed")[0] == "embedding"
+
+
+def test_restart_reclaims_expired_old_policy_lease_then_settles(target):
+    repo, _, accepted, _ = source()
+    base.extract(repo)
+    repo.claim("embed")  # old worker leased it, then restarted without settling
+    target.execute(
+        "UPDATE candidate_index_jobs SET lease_expires_at=clock_timestamp()-interval '1 second'"
+        " WHERE generation_id=%s AND stage='embed'",
+        (accepted["generation_id"],),
+    )
+    fresh = IndexRepository(RUNTIME)  # restarted new-policy worker
+    lease = fresh.claim("embed")[0]
+    assert lease["generation_id"] == accepted["generation_id"]
+    assert fresh.reserve(lease, _new_policy()) is None
+    assert _job(target, accepted["generation_id"], "embed")[:2] == (
+        "needs_review",
+        "policy_mismatch",
+    )
+
+
+def test_same_organisation_resume_progresses_after_old_policy_job_settles(target):
+    repo, scope, old, _ = source()
+    base.extract(repo)  # old-policy embed job queued first
+    new = _new_policy()
+    _, _, current, _ = source(scope, policy=new)
+    lease = repo.claim("extract")[0]
+    assert lease["generation_id"] == current["generation_id"]
+    d = repo.reserve(lease, new)
+    assert repo.complete_extract(
+        d,
+        namespace={
+            "current_title": "Backend engineer",
+            "skills_normalized": ["python"],
+            "employment_history": [],
+        },
+        evidence=[{"field": "current_title", "text": "Backend engineer"}],
+        confidence=0.9,
+        model_id=new.primary_model_id,
+        chunks=chunk_manifest(base.TEXT, new),
+        professional_text=base.TEXT,
+    )
+    first = repo.claim("embed")[0]  # one embed slot per organisation: the old job comes first
+    assert first["generation_id"] == old["generation_id"]
+    assert repo.reserve(first, new) is None  # settles and frees the slot
+    second = repo.claim("embed")[0]
+    assert second["generation_id"] == current["generation_id"]
+    e = repo.reserve(second, new)
+    assert repo.complete_embed(e, [base.VECTOR for _ in e["extraction"]["chunks"]])
+    assert repo.status(scope, current["source_id"])["state"] == "ready"
+
+
+def test_settled_policy_mismatch_is_recovered_under_new_policy(target):
+    repo, scope, accepted, _ = source()
+    base.extract(repo)
+    assert repo.reserve(repo.claim("embed")[0], _new_policy()) is None
+    with target.transaction():
+        target.execute("SET TRANSACTION READ ONLY")
+        value, _ = v3_plan(target, scope, accepted)
+    assert value["new_generations"] == 1 and value["max_calls"] == 2
+    assert not apply(target, scope, value)["replayed"]
+    assert _job(target, accepted["generation_id"], "extract")[0] == "superseded"
+
+
+def test_new_policy_worker_settles_old_policy_extract_job(target):
+    repo, scope, accepted, _ = source()  # captured under the old policy, not yet extracted
+    lease = repo.claim("extract")[0]
+    assert repo.reserve(lease, _new_policy()) is None
+    state, error, attempts, _, released = _job(target, accepted["generation_id"], "extract")
+    assert (state, error, attempts, released) == ("needs_review", "policy_mismatch", 0, True)
+    value, _ = v3_plan(target, scope, accepted)
+    assert value["new_generations"] == 1
