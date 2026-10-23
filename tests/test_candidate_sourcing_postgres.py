@@ -55,6 +55,60 @@ def test_public_applicant_membership_does_not_require_published_resume(target):
             lookup(scope, ids)
 
 
+def test_v3_unsupported_job_evidence_is_unknown_and_still_saves(target, monkeypatch):
+    """One unsupported date/title no longer rejects the resume; the database accepts the result."""
+    from activekg.candidate_index import resume_history_policy
+    from activekg.candidate_index.processing import resume_extraction
+
+    text = "Python. Backend engineer, March 2019 to June 2024. Intern, 2017 to 2018."
+    monkeypatch.setattr(base, "TEXT", text)
+    policy = replace(base.POLICY, **resume_history_policy.policy_fields())
+    repo, scope, _, _ = base.source(policy=policy)
+    lease = repo.reserve(repo.claim("extract")[0], policy)
+    raw = {
+        "skills_raw": ["Python"],
+        "skills_normalized": [],
+        "confidence": 0.9,
+        "employment_history": [
+            {
+                "title": "Backend engineer",
+                "employment_type": None,
+                "start": "2019-01",  # contradicts its verbatim quote: unknown
+                "end": "Jun 2024",  # resume wording instead of YYYY-MM: read from the quote
+                "ongoing": False,
+                "start_quote": "March 2019",
+                "end_quote": "June 2024",
+            },
+            {
+                "title": "Invented title",  # not in the resume: unknown
+                "employment_type": None,
+                "start": "2017",
+                "end": "2018",
+                "ongoing": False,
+                "start_quote": "2017",
+                "end_quote": "2018",
+            },
+        ],
+    }
+    result = resume_extraction(raw, text, policy, policy.primary_model_id, {})
+    assert repo.complete_extract(
+        lease,
+        namespace=result.namespace,
+        evidence=result.evidence,
+        confidence=result.confidence,
+        model_id=policy.primary_model_id,
+        chunks=result.chunks,
+        professional_text=result.professional_text,
+    )
+    embed = repo.reserve(repo.claim("embed")[0], policy)
+    assert repo.complete_embed(embed, [base.VECTOR for _ in embed["extraction"]["chunks"]])
+    rows = read(repo, scope)
+    assert rows[0]["evidence"]["employment"] == [
+        {"title": "Backend engineer", "end": "2024-06", "ongoing": False},
+        {"start": "2017", "end": "2018", "ongoing": False},
+    ]
+
+
 def test_v3_history_roundtrip_and_no_quotes_in_search(target, monkeypatch):
     from activekg.candidate_index import resume_history_policy
     from activekg.candidate_index.processing import resume_extraction

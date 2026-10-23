@@ -46,17 +46,30 @@ def quoted_date(quote: str) -> str | None:
     return None
 
 
+SCHEMA_ANCHOR = '  "confidence": 0.XX\n}'
+HISTORY_SCHEMA = (
+    '  "employment_history": [\n'
+    '    {"title": "string|null", "employment_type": "string|null", "start": "YYYY|YYYY-MM|YYYY-MM-DD|null",\n'
+    '     "end": "YYYY|YYYY-MM|YYYY-MM-DD|null", "ongoing": true|false,\n'
+    '     "start_quote": "string|null", "end_quote": "string|null"}, ...\n'
+    "  ],\n"
+)
+
+
 def prompt(text: str) -> tuple[str, str]:
     system, user = skills.prompt(text)
+    if system.count(SCHEMA_ANCHOR) != 1:
+        raise WorkRefused("policy_mismatch")
+    system = system.replace(SCHEMA_ANCHOR, HISTORY_SCHEMA + SCHEMA_ANCHOR)
     return system + (
-        "\nAlso return employment_history (at most 20 jobs, never pad): "
-        "each item has title, employment_type, start, end, ongoing, start_quote, end_quote. "
-        "Use only employment actually stated in the resume, not projects or education. "
+        "\nemployment_history is REQUIRED in the JSON object (use [] only when the resume states no job). "
+        "List every job actually stated in the resume (at most 20, never pad), not projects or education. "
         "Dates are YYYY, YYYY-MM or YYYY-MM-DD, preserving the precision written. "
-        "Copy each date expression exactly into its quote field. Never invent a month or day. "
+        "Copy each date expression exactly as written in the resume into its quote field (for example "
+        '"Mar 2019" or "03/2019"); start/end are that same date in YYYY-MM form. Never invent a month or day. '
         "Use null for missing dates and their quotes; ongoing is true only for explicitly current employment "
         "(quote the present/current wording in end_quote, and use end=null). "
-        "Keep internship labels. title/employment_type may be null when absent. "
+        "Copy title and employment_type exactly as written; keep internship labels; use null when absent. "
         "Do not infer dates from years of experience, skills, age or other jobs. "
         "List every stated job even when its dates are missing; do not hide incomplete history."
     ), user
@@ -77,25 +90,63 @@ def policy_fields() -> dict[str, str]:
     }
 
 
-def _date(value: object, quote: object, text: str) -> str | None:
-    if value is None:
-        if quote is not None:
-            raise WorkRefused("incomplete")
+ISO_DATE = r"(?:19|20|21)\d{2}(?:-\d{2}(?:-\d{2})?)?"
+ROLE_KEYS = ("title", "employment_type", "start", "end", "ongoing", "start_quote", "end_quote")
+CURRENT = r"(?i)(?:present|current|currently|ongoing|till date|to date|now)"
+
+
+def _calendar(value: str | None) -> str | None:
+    if value is None or not re.fullmatch(ISO_DATE, value):
         return None
-    if not isinstance(value, str) or not re.fullmatch(
-        r"(?:19|20|21)\d{2}(?:-\d{2}(?:-\d{2})?)?", value
-    ):
-        raise WorkRefused("incomplete")
     parts = [int(part) for part in value.split("-")]
     try:
         date(parts[0], parts[1] if len(parts) > 1 else 1, parts[2] if len(parts) > 2 else 1)
     except ValueError:
-        raise WorkRefused("incomplete") from None
-    if not isinstance(quote, str) or not quote.strip() or len(quote) > 120 or quote not in text:
-        raise WorkRefused("incomplete")
-    if quoted_date(quote) != value:
-        raise WorkRefused("incomplete")
+        return None
     return value
+
+
+def _verbatim(value: object, text: str) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 120 and value in text
+
+
+def _date(value: object, quote: object, text: str) -> tuple[str | None, str | None]:
+    """A date is kept only when resume text supports it; otherwise it is unknown (None).
+
+    Grounding is never weakened: the kept date is the deterministic reading of a verbatim
+    excerpt (the quote, or the value itself when the model copied the resume's own wording).
+    A value that contradicts its quote, or adds precision the quote lacks, becomes unknown.
+    """
+    claimed = None
+    if isinstance(value, str):
+        claimed = (
+            _calendar(value) if re.fullmatch(ISO_DATE, value) else _calendar(quoted_date(value))
+        )
+        if claimed is None:
+            return None, None
+    elif value is not None:
+        return None, None
+    if _verbatim(quote, text):
+        read = _calendar(quoted_date(quote))
+        if read is not None and (claimed is None or claimed == read):
+            return read, quote
+        if read is not None:
+            return None, None  # value and quote disagree: unknown, never pick one
+    if claimed is not None and _verbatim(value, text) and _calendar(quoted_date(value)) == claimed:
+        return claimed, value
+    return None, None
+
+
+def _text_field(value: object, text: str, limit: int) -> str | None:
+    if (
+        isinstance(value, str)
+        and value.strip()
+        and len(value) <= limit
+        and value in text
+        and not re.search(r"[\x00-\x1f\x7f@]|https?://", value)
+    ):
+        return value
+    return None
 
 
 def validate(raw: dict, text: str, diagnostics: dict) -> dict:
@@ -107,40 +158,38 @@ def validate(raw: dict, text: str, diagnostics: dict) -> dict:
     parsed = skills.validate(
         {key: value for key, value in raw.items() if key != "employment_history"}, text, diagnostics
     )
+    # Unsupported employment evidence is marked unknown for that job only; the rest of the
+    # resume is kept. Nothing unsupported by the resume text is ever published.
     result = []
-    for role in history:
-        keys = {"title", "employment_type", "start", "end", "ongoing", "start_quote", "end_quote"}
-        if not isinstance(role, dict) or set(role) != keys or type(role["ongoing"]) is not bool:
-            raise WorkRefused("incomplete")
-        for field in ("title", "employment_type"):
-            value = role[field]
-            if value is not None and (
-                not isinstance(value, str)
-                or not value.strip()
-                or len(value) > (200 if field == "title" else 100)
-                or value not in text
-                or re.search(r"[\x00-\x1f\x7f@]|https?://", value)
-            ):
-                raise WorkRefused("incomplete")
-        start = _date(role["start"], role["start_quote"], text)
-        if role["ongoing"]:
-            quote = role["end_quote"]
-            if (
-                role["end"] is not None
-                or not isinstance(quote, str)
-                or quote not in text
-                or not re.fullmatch(
-                    r"(?i)(?:present|current|currently|ongoing|till date|to date|now)",
-                    quote.strip(),
-                )
-            ):
-                raise WorkRefused("incomplete")
-            end = None
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        title = _text_field(item.get("title"), text, 200)
+        employment_type = _text_field(item.get("employment_type"), text, 100)
+        start, start_quote = _date(item.get("start"), item.get("start_quote"), text)
+        ongoing = (
+            item.get("ongoing") is True
+            and item.get("end") is None
+            and _verbatim(item.get("end_quote"), text)
+            and re.fullmatch(CURRENT, item["end_quote"].strip()) is not None
+        )
+        if ongoing:
+            end, end_quote = None, item["end_quote"]
         else:
-            end = _date(role["end"], role["end_quote"], text)
+            end, end_quote = _date(item.get("end"), item.get("end_quote"), text)
         if start and end and start[: min(len(start), len(end))] > end[: min(len(start), len(end))]:
-            raise WorkRefused("incomplete")
-        result.append({**role, "start": start, "end": end})
+            start = start_quote = end = end_quote = None  # impossible order: both unknown
+        if title is None and start is None and end is None and not ongoing:
+            continue  # nothing in this job is supported by the resume
+        result.append(
+            dict(
+                zip(
+                    ROLE_KEYS,
+                    (title, employment_type, start, end, ongoing, start_quote, end_quote),
+                    strict=True,
+                )
+            )
+        )
     parsed["employment_history"] = result
     if len(json.dumps(parsed, ensure_ascii=False).encode()) > 65536:
         skills.refuse(diagnostics, "namespace_bytes")
