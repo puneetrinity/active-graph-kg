@@ -96,6 +96,7 @@ AUTHORITIES = (
     "db/migrations/036_resume_history_policy.sql",
     "db/migrations/037_sourcing_public_applicant_check.sql",
     "db/migrations/038_resume_recovery_embed_refusals.sql",
+    "db/migrations/039_index_policy_mismatch_settle.sql",
     "activekg/candidate_index/resume_history_policy.py",
     "activekg/api/candidate_sourcing.py",
     "activekg/candidate_index/sourcing.py",
@@ -920,7 +921,7 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-11:]
+        caller["migration_manifest"][-12:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
@@ -933,8 +934,9 @@ def validate(root: Path = ROOT) -> None:
             "036_resume_history_policy.sql",
             "037_sourcing_public_applicant_check.sql",
             "038_resume_recovery_embed_refusals.sql",
+            "039_index_policy_mismatch_settle.sql",
         ]
-        or len(caller["migration_manifest"]) != 38
+        or len(caller["migration_manifest"]) != 39
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

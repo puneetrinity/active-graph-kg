@@ -30,7 +30,7 @@ from activekg.candidate_index.diagnostics import diagnostic_payload
 
 # Derived from PostgreSQL 16, independent of installation role/OIDs. Exact
 # structure and effective ACLs are separate gates; source hashing is not readiness.
-INDEX_CATALOG_SHA256 = "d63ce2793c1031bf9399abb014ddaa31fc0a2fb3e22838b8a5b555e35c9801db"
+INDEX_CATALOG_SHA256 = "a005ad7ec30c818309007e18da53594cf024c7987e21e633967035d12cbb6f42"
 
 INDEX_CATALOG_SQL = """
 WITH chosen AS (SELECT coalesce(%s,current_user) AS runtime_role),
