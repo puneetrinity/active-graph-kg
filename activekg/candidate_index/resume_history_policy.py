@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 from activekg.candidate_index import resume_policy as skills
@@ -17,11 +19,11 @@ from activekg.candidate_index.providers import WorkRefused
 
 OUTPUT_TOKENS = skills.OUTPUT_TOKENS
 MAX_EMPLOYMENT = 20
-# Search text is chunked for a 256-token embedding model that refuses (never truncates) longer
-# chunks. v2/v3 allow up to 100 skills, so 1,200-character chunks reached 395 tokens in production
-# (23 Oct, 14 of 19). Densest observed text was ~2.8 characters/token; 600 keeps the worst case
-# near 215 tokens. Smaller chunks only split the same text further; nothing is clipped.
-CHUNK_CHARACTERS = 600
+# Search text is embedded by a model that refuses (never truncates) chunks over its token limit
+# (all-MiniLM-L6-v2: 256 incl. special tokens). v2/v3 allow up to 100 skills, so character-based chunks
+# overflowed in production (23 Oct: 1,200 chars -> 395 tokens; 600 chars can still reach 425). v3
+# chunks are bounded by the pinned tokenizer itself, the same call the embedding step checks.
+CHUNKING = "tokens<=pinned sentence_bert_config.max_seq_length; chars<=policy.chunk_characters"
 MONTHS = (
     "january february march april may june july august september october november december"
 ).split()
@@ -80,19 +82,19 @@ def prompt(text: str) -> tuple[str, str]:
     ), user
 
 
-def policy_fields() -> dict[str, str | int]:
+def policy_fields() -> dict[str, str]:
     descriptor = {
         "parent": skills.policy_fields(),
         "source": sha256(Path(__file__).read_bytes()),
         "output_tokens": OUTPUT_TOKENS,
         "max_employment": MAX_EMPLOYMENT,
+        "chunking": CHUNKING,
     }
     return {
         "extraction_adapter_version": "candidate-index-extraction:v3:"
         + sha256(canonical_json(descriptor)),
         "extraction_schema_sha256": sha256(canonical_json(descriptor)),
         "extraction_prompt_sha256": sha256(canonical_json(prompt(""))),
-        "chunk_characters": CHUNK_CHARACTERS,
     }
 
 
@@ -200,3 +202,32 @@ def validate(raw: dict, text: str, diagnostics: dict) -> dict:
     if len(json.dumps(parsed, ensure_ascii=False).encode()) > 65536:
         skills.refuse(diagnostics, "namespace_bytes")
     return parsed
+
+
+@lru_cache(maxsize=2)
+def _token_fits(model: str, revision: str) -> Callable[[str], bool]:
+    """Exact embedding-stage token check, loaded only from the pinned local snapshot."""
+    from transformers import AutoTokenizer
+
+    from activekg.candidate_index.providers import cached_embedding_path
+
+    path = cached_embedding_path(model, revision)
+    try:
+        limit = json.loads((path / "sentence_bert_config.json").read_text())["max_seq_length"]
+        tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
+    except (OSError, ValueError, KeyError):
+        raise WorkRefused("provider_unavailable") from None
+    if type(limit) is not int or limit <= 0:
+        raise WorkRefused("provider_unavailable")
+    # Counting candidate prefixes longer than the model's own length is expected here; only the
+    # count is used (truncation=False), so silence the "sequence length is longer" warning.
+    tokenizer.model_max_length = 10**9
+
+    def fits(text: str) -> bool:
+        return len(tokenizer.encode(text, truncation=False, add_special_tokens=True)) <= limit
+
+    return fits
+
+
+def token_fits(policy) -> Callable[[str], bool]:  # noqa: ANN001 - IndexPolicy (import cycle)
+    return _token_fits(policy.embedding_model_id, policy.embedding_artifact_revision)

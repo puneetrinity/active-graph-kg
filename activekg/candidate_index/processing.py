@@ -93,6 +93,15 @@ def _bounded_value(value: Any, depth: int = 0) -> None:
     raise WorkRefused("incomplete")
 
 
+def policy_chunks(text: str, policy: IndexPolicy) -> list[dict[str, Any]]:
+    """The one chunking rule per policy, shared by extraction and the embed-stage re-check."""
+    if policy.extraction_adapter_version.startswith("candidate-index-extraction:v3:"):
+        from activekg.candidate_index.resume_history_policy import token_fits
+
+        return chunk_manifest(text, policy, token_fits(policy))
+    return chunk_manifest(text, policy)
+
+
 def _assemble(
     namespace: dict[str, Any],
     fields: tuple[str, ...],
@@ -117,7 +126,7 @@ def _assemble(
     # LinkedIn URL or applicant locator is copied into search chunks.
     professional = "\n".join(lines)
     try:
-        chunks = chunk_manifest(professional, policy)
+        chunks = policy_chunks(professional, policy)
     except IndexContractError as exc:
         raise WorkRefused(
             "chunk_overflow" if str(exc) == "candidate_index_chunk_overflow" else "incomplete"
@@ -484,7 +493,7 @@ class GenerationWorker:
                 chunks = dispatch["extraction"]["chunks"]
                 texts = [c["text"] for c in chunks]
                 # Validate the full ordered manifest again before the model.
-                if chunk_manifest("".join(texts), self.policy) != chunks:
+                if policy_chunks("".join(texts), self.policy) != chunks:
                     raise WorkRefused("incomplete")
                 vectors = await embed_once(
                     texts,

@@ -57,6 +57,41 @@ async def smoke() -> dict:
     # attempted connections and the kernel's hard/soft processing limit at zero.
     # The frozen legacy provider must remain importable/configurable; no global
     # offline env, model-name rewrite or monkeypatch enters the product image.
+    # v3 search chunks are bounded by the pinned tokenizer: dense and long accepted profiles must embed.
+    from activekg.candidate_index import resume_history_policy as history
+    from activekg.candidate_index.contracts import IndexPolicy
+    from activekg.candidate_index.processing import resume_extraction
+
+    v3 = IndexPolicy(
+        **history.policy_fields(),
+        primary_model_id="openai/gpt-oss-20b",
+        fallback_model_id="openai/gpt-oss-120b",
+        embedding_model_id="all-MiniLM-L6-v2",
+        embedding_artifact_revision=model["revision"],
+    )
+    v3_chunks = 0
+    for skills in (
+        [f"C++/C#/.NET v{i}" for i in range(100)],
+        [
+            f"Enterprise distributed systems architecture and reliability practices level {i}"
+            for i in range(100)
+        ],
+    ):
+        raw = {
+            "skills_raw": skills,
+            "skills_normalized": [],
+            "confidence": 0.9,
+            "employment_history": [],
+        }
+        result = resume_extraction(raw, "; ".join(skills), v3, "primary", {})
+        embedded = await embed_once(
+            [c["text"] for c in result.chunks],
+            model["repo"],
+            model["revision"],
+            deadline=time.monotonic() + 180,
+        )
+        assert len(embedded) == len(result.chunks)
+        v3_chunks += len(embedded)
     legacy = EmbeddingProvider(backend="sentence-transformers", model_name="all-MiniLM-L6-v2")
     assert legacy is not None and attempted == 0
     return {
@@ -67,6 +102,7 @@ async def smoke() -> dict:
         "processing_file_limit": [0, 0],
         "import_scratch_removed": True,
         "legacy_configuration_preserved": True,
+        "v3_token_bounded_chunks_embedded": v3_chunks,
     }
 
 

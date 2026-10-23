@@ -10,6 +10,13 @@ from activekg.candidate_index.processing import resume_extraction
 from activekg.candidate_index.providers import WorkRefused
 from tests.test_candidate_index import POLICY
 
+
+@pytest.fixture(autouse=True)
+def deterministic_token_check(monkeypatch):
+    """Logic tests use a stand-in for the pinned tokenizer (real one: test_candidate_chunk_tokens.py)."""
+    monkeypatch.setattr(history, "token_fits", lambda policy: lambda text: len(text) <= 1200)
+
+
 TEXT = "Python. Backend Engineer, 2019-03 to 2024-06. Intern, 2018 to 2019. Current role: 2024 to Present."
 
 
@@ -175,26 +182,7 @@ def test_quote_precision_is_not_guessed(quote, expected):
     assert history.quoted_date(quote) == expected
 
 
-def test_v3_chunks_fit_the_embedding_token_limit():
-    """1,200-character chunks of dense skill lists reached 395 tokens on the 256-token encoder (23 Oct)."""
-    policy = replace(POLICY, **history.policy_fields())
-    assert history.CHUNK_CHARACTERS == policy.chunk_characters == 600
-    skills = [f"Skill{n} Framework" for n in range(99)]
-    text = "Python. " + " ".join(skills) + ". Backend Engineer, 2019-03 to 2024-06."
-    result = resume_extraction(
-        {**raw(), "skills_raw": ["Python", *skills]}, text, policy, "primary", {}
-    )
-    assert len(result.chunks) > 1
-    assert all(len(chunk["text"]) <= 600 for chunk in result.chunks)
-    assert "".join(chunk["text"] for chunk in result.chunks) == result.professional_text
-
-
-def test_v3_refuses_a_policy_with_the_old_chunk_size():
-    with pytest.raises(WorkRefused):
-        resume_extraction(
-            raw(),
-            TEXT,
-            replace(POLICY, **{**history.policy_fields(), "chunk_characters": 1200}),
-            "primary",
-            {},
-        )
+def test_v3_policy_names_token_bounded_chunking():
+    fields = history.policy_fields()
+    assert "chunk_characters" not in fields  # character cap stays the policy default (1,200)
+    assert history.CHUNKING.startswith("tokens<=pinned")

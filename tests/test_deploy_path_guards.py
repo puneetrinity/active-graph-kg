@@ -141,7 +141,7 @@ def _restore_runtime_posture() -> None:
 
 
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-037; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-038; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -159,6 +159,8 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         "035_private_resume_sourcing.sql",
         "036_resume_history_policy.sql",
         "037_sourcing_public_applicant_check.sql",
+        # 038 only redefines two 028-closure recovery routines, dropped with that closure.
+        "038_resume_recovery_embed_refusals.sql",
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -251,6 +253,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         resume_sourcing_was_baselined,
         resume_history_was_baselined,
         public_applicants_was_baselined,
+        recovery_embed_was_baselined,
     ) = baselines
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
@@ -314,6 +317,7 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         ("035_private_resume_sourcing.sql", resume_sourcing_was_baselined),
         ("036_resume_history_policy.sql", resume_history_was_baselined),
         ("037_sourcing_public_applicant_check.sql", public_applicants_was_baselined),
+        ("038_resume_recovery_embed_refusals.sql", recovery_embed_was_baselined),
     ):
         _sql("UPDATE schema_migrations SET baselined=%s WHERE filename=%s", (baselined, filename))
 
