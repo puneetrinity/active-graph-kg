@@ -98,7 +98,8 @@ DUPLICATE_OBJECT_SQLSTATES = {
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
     "035_private_resume_sourcing.sql": [("candidate_index_catalog_sourcing",)],
     "036_resume_history_policy.sql": [("candidate_index_catalog_history",)],
-    "037_sourcing_public_applicant_check.sql": [("candidate_index_catalog",)],
+    "037_sourcing_public_applicant_check.sql": [("candidate_index_catalog_applicants",)],
+    "038_resume_recovery_embed_refusals.sql": [("candidate_index_catalog",)],
     "034_resume_attempt_diagnostics.sql": [("candidate_index_catalog_diagnostics",)],
     "033_resume_cutoff_retry.sql": [("candidate_index_catalog_retry",)],
     "032_rc_fetch_provenance.sql": [("rc_skills_catalog",)],
@@ -1033,6 +1034,7 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         "candidate_index_catalog_diagnostics",
         "candidate_index_catalog_sourcing",
         "candidate_index_catalog_history",
+        "candidate_index_catalog_applicants",
     }:
         from activekg.candidate_index.repository import INDEX_CATALOG_SHA256, catalog_evidence
 
@@ -1041,6 +1043,18 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
         digest = catalog_evidence(cur)[0]
         return (
             digest == INDEX_CATALOG_SHA256
+            or (
+                kind
+                in {
+                    "candidate_index_catalog_base",
+                    "candidate_index_catalog_retry",
+                    "candidate_index_catalog_diagnostics",
+                    "candidate_index_catalog_sourcing",
+                    "candidate_index_catalog_history",
+                    "candidate_index_catalog_applicants",
+                }
+                and digest == "5b1a66c28886d9cd6eaf234f5e363f7525d88d20d40534ad5a3f16ae95f7287d"
+            )
             or (
                 kind
                 in {

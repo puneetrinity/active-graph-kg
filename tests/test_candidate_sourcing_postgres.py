@@ -62,6 +62,9 @@ def test_v3_unsupported_job_evidence_is_unknown_and_still_saves(target, monkeypa
 
     text = "Python. Backend engineer, March 2019 to June 2024. Intern, 2017 to 2018."
     monkeypatch.setattr(base, "TEXT", text)
+    monkeypatch.setattr(
+        resume_history_policy, "token_fits", lambda policy: lambda t: len(t) <= 1200
+    )
     policy = replace(base.POLICY, **resume_history_policy.policy_fields())
     repo, scope, _, _ = base.source(policy=policy)
     lease = repo.reserve(repo.claim("extract")[0], policy)
@@ -115,6 +118,9 @@ def test_v3_history_roundtrip_and_no_quotes_in_search(target, monkeypatch):
 
     text = "Python. Backend engineer, March 2019 to June 2024."
     monkeypatch.setattr(base, "TEXT", text)
+    monkeypatch.setattr(
+        resume_history_policy, "token_fits", lambda policy: lambda t: len(t) <= 1200
+    )
     policy = replace(base.POLICY, **resume_history_policy.policy_fields())
     repo, scope, _, _ = base.source(policy=policy)
     lease = repo.reserve(repo.claim("extract")[0], policy)

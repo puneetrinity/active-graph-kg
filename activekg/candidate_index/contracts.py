@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -370,11 +371,17 @@ class IndexTunables:
             raise IndexContractError("candidate_index_tunable_bounds")
 
 
-def chunk_manifest(text: str, policy: IndexPolicy) -> list[dict[str, Any]]:
+def chunk_manifest(
+    text: str, policy: IndexPolicy, fits: Callable[[str], bool] | None = None
+) -> list[dict[str, Any]]:
     """Lossless deterministic boundaries, no clipping and no empty publication.
 
     Prefer the last sentence or whitespace boundary within the limit. Preserve
     every character so the concatenated chunks remain byte-identical to input.
+    ``fits`` optionally adds a second bound (e.g. the embedding model's token
+    limit): each chunk is then the longest boundary-ended prefix that also fits,
+    falling back to the longest fitting character prefix. Without ``fits`` the
+    result is unchanged from the character-only behaviour.
     """
     if not isinstance(text, str) or not text.strip():
         raise IndexContractError("candidate_index_text_invalid")
@@ -386,18 +393,46 @@ def chunk_manifest(text: str, policy: IndexPolicy) -> list[dict[str, Any]]:
     while start < len(text):
         if len(result) >= policy.max_chunks:
             raise IndexContractError("candidate_index_chunk_overflow")
-        stop = min(start + policy.chunk_characters, len(text))
-        if stop < len(text):
-            section = text[start:stop]
-            boundaries = list(re.finditer(r"[.!?](?:\s+)|\n+", section))
-            if not boundaries:
-                boundaries = list(re.finditer(r"\s+", section))
-            if boundaries:
-                stop = start + boundaries[-1].end()
+        limit = min(start + policy.chunk_characters, len(text))
+        if fits is None:
+            stop = limit
+            if stop < len(text):
+                section = text[start:stop]
+                boundaries = list(re.finditer(r"[.!?](?:\s+)|\n+", section))
+                if not boundaries:
+                    boundaries = list(re.finditer(r"\s+", section))
+                if boundaries:
+                    stop = start + boundaries[-1].end()
+        else:
+            stop = _fitting_stop(text, start, limit, fits)
         value = text[start:stop]
         result.append({"ordinal": len(result), "text": value, "sha256": sha256(value)})
         start = stop
     return result
+
+
+def _fitting_stop(text: str, start: int, limit: int, fits: Callable[[str], bool]) -> int:
+    """Longest prefix of text[start:limit] that fits, preferring a natural boundary."""
+    if limit == len(text) and fits(text[start:limit]):
+        return limit
+    section = text[start:limit]
+    # Longest fitting prefix ending at a sentence, newline or whitespace boundary (capacity first:
+    # the chunk cap bounds total text). Every returned prefix is checked by ``fits`` itself.
+    ends = {m.end() for m in re.finditer(r"[.!?](?:\s+)|\n+|\s+", section)}
+    for end in sorted(ends, reverse=True):
+        if end > 0 and fits(section[:end]):
+            return start + end
+    # No boundary fits (one very long token run): longest fitting character prefix.
+    low, high = 0, len(section)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(section[:middle]):
+            low = middle
+        else:
+            high = middle - 1
+    if low == 0:
+        raise IndexContractError("candidate_index_chunk_overflow")
+    return start + low
 
 
 def validate_vectors(vectors: Any, expected_chunks: int) -> list[list[float]]:

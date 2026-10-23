@@ -10,6 +10,13 @@ from activekg.candidate_index.processing import resume_extraction
 from activekg.candidate_index.providers import WorkRefused
 from tests.test_candidate_index import POLICY
 
+
+@pytest.fixture(autouse=True)
+def deterministic_token_check(monkeypatch):
+    """Logic tests use a stand-in for the pinned tokenizer (real one: test_candidate_chunk_tokens.py)."""
+    monkeypatch.setattr(history, "token_fits", lambda policy: lambda text: len(text) <= 1200)
+
+
 TEXT = "Python. Backend Engineer, 2019-03 to 2024-06. Intern, 2018 to 2019. Current role: 2024 to Present."
 
 
@@ -173,3 +180,9 @@ def test_v3_cannot_be_run_under_v2_policy():
 )
 def test_quote_precision_is_not_guessed(quote, expected):
     assert history.quoted_date(quote) == expected
+
+
+def test_v3_policy_names_token_bounded_chunking():
+    fields = history.policy_fields()
+    assert "chunk_characters" not in fields  # character cap stays the policy default (1,200)
+    assert history.CHUNKING.startswith("tokens<=pinned")

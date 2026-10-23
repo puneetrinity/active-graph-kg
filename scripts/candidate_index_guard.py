@@ -95,6 +95,7 @@ AUTHORITIES = (
     "db/migrations/035_private_resume_sourcing.sql",
     "db/migrations/036_resume_history_policy.sql",
     "db/migrations/037_sourcing_public_applicant_check.sql",
+    "db/migrations/038_resume_recovery_embed_refusals.sql",
     "activekg/candidate_index/resume_history_policy.py",
     "activekg/api/candidate_sourcing.py",
     "activekg/candidate_index/sourcing.py",
@@ -382,7 +383,9 @@ def validate(root: Path = ROOT) -> None:
             'raw["confidence"] < policy.minimum_confidence',
             "schema.ExtractionResult.model_validate(raw, strict=True)",
             "if not evidence:",
-            "chunk_manifest(professional, policy)",
+            "chunks = policy_chunks(professional, policy)",
+            "return chunk_manifest(text, policy, token_fits(policy))",
+            'if policy_chunks("".join(texts), self.policy) != chunks:',
             "self.repository.complete_extract",
             "self.repository.complete_embed",
             "validate_vectors(vectors, len(chunks))",
@@ -917,7 +920,7 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-10:]
+        caller["migration_manifest"][-11:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
@@ -929,8 +932,9 @@ def validate(root: Path = ROOT) -> None:
             "035_private_resume_sourcing.sql",
             "036_resume_history_policy.sql",
             "037_sourcing_public_applicant_check.sql",
+            "038_resume_recovery_embed_refusals.sql",
         ]
-        or len(caller["migration_manifest"]) != 37
+        or len(caller["migration_manifest"]) != 38
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

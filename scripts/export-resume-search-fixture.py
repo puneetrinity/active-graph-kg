@@ -44,6 +44,8 @@ try:
     )
     text = "Python. Backend engineer, March 2019 to June 2024."
     patch.setattr(base, "TEXT", text)
+    # Synthetic fixture policy has no pinned model snapshot; use a deterministic stand-in token check.
+    patch.setattr(resume_history_policy, "token_fits", lambda policy: lambda t: len(t) <= 1200)
     original_body = base._body
     patch.setattr(base, "_body", lambda **kw: original_body(job_id=95202, **kw))
     policy = replace(base.POLICY, **resume_history_policy.policy_fields())

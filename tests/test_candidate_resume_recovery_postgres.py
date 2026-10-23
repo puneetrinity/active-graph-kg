@@ -238,3 +238,102 @@ def test_one_erased_member_refuses_entire_batch(target):
     assert target.execute(
         "SELECT count(*) FROM candidate_index_recovery_receipts WHERE scope_key=%s", (scope,)
     ).fetchone() == (0,)
+
+
+def v3_plan(target, scope, accepted):
+    from activekg.candidate_index import resume_history_policy as history
+
+    policy = replace(POLICY, **history.policy_fields())
+    pairs = [{"source_id": accepted["source_id"], "generation_id": accepted["generation_id"]}]
+    value = target.execute(
+        "SELECT candidate_index_plan_recovery(%s,%s,%s)",
+        (scope, Jsonb(pairs), canonical_json(asdict(policy))),
+    ).fetchone()[0]
+    return value, policy
+
+
+def job_states(target, generation_id):
+    return dict(
+        target.execute(
+            "SELECT stage,state FROM candidate_index_jobs WHERE generation_id=%s", (generation_id,)
+        ).fetchall()
+    )
+
+
+def test_embedding_refusal_is_recovered_reextracted_and_published(target):
+    """23 Oct: extraction succeeded, embedding refused (chunk_overflow) -> migration 038 recovery."""
+    repo, scope, accepted, _ = source()
+    base.extract(repo)
+    embed = repo.reserve(repo.claim("embed")[0], POLICY)
+    assert repo.fail(embed, "chunk_overflow")
+    before = job_states(target, accepted["generation_id"])
+    assert before["extract"] == "pending_embedding" and before["embed"] in {
+        "failed",
+        "needs_review",
+    }
+    attempts = target.execute(
+        "SELECT stage,attempts FROM candidate_index_jobs WHERE generation_id=%s ORDER BY stage",
+        (accepted["generation_id"],),
+    ).fetchall()
+
+    with target.transaction():
+        target.execute("SET TRANSACTION READ ONLY")
+        value, v3 = v3_plan(target, scope, accepted)
+    assert value["items"][0]["state"] == "pending_embedding"
+    assert (
+        value["new_generations"] == 1 and value["max_calls"] == 2
+    )  # re-extraction, not embed-only
+    result = apply(target, scope, value)
+    assert not result["replayed"] and apply(target, scope, value)["replayed"]
+
+    # The superseded generation is retired, not reset; its history and counters stay.
+    after = job_states(target, accepted["generation_id"])
+    assert after == {"extract": "superseded", "embed": before["embed"]}
+    assert (
+        target.execute(
+            "SELECT stage,attempts FROM candidate_index_jobs WHERE generation_id=%s ORDER BY stage",
+            (accepted["generation_id"],),
+        ).fetchall()
+        == attempts
+    )
+
+    # The new generation extracts and embeds under the target policy, and is searchable.
+    from activekg.candidate_index.contracts import chunk_manifest
+
+    lease = repo.reserve(repo.claim("extract")[0], v3)
+    assert lease and lease["generation_id"] == result["members"][0]["generation_id"]
+    assert repo.complete_extract(
+        lease,
+        namespace={
+            "current_title": "Backend engineer",
+            "skills_normalized": ["python"],
+            "employment_history": [],
+        },
+        evidence=[{"field": "current_title", "text": "Backend engineer"}],
+        confidence=0.9,
+        model_id=v3.primary_model_id,
+        chunks=chunk_manifest(base.TEXT, v3),
+        professional_text=base.TEXT,
+    )
+    embed = repo.reserve(repo.claim("embed")[0], v3)
+    assert repo.complete_embed(embed, [base.VECTOR for _ in embed["extraction"]["chunks"]])
+    assert repo.status(scope, accepted["source_id"])["state"] == "ready"
+    with repo.transaction(scope) as cur:
+        cur.execute(
+            "SELECT candidate_index_read_private(%s::vector,%s,%s,100)",
+            (str(base.VECTOR), v3.embedding_model_id, v3.embedding_artifact_revision),
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0]["state"] == "ready"
+
+
+def test_embedding_recovery_refuses_published_and_in_flight_generations(target):
+    repo, scope, accepted, _ = source()
+    base.publish(repo)  # fully indexed: nothing to recover
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        v3_plan(target, scope, accepted)
+    repo2, scope2, accepted2, _ = source()
+    base.extract(repo2)
+    repo2.reserve(repo2.claim("embed")[0], POLICY)  # embedding leased, still running
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        v3_plan(target, scope2, accepted2)
