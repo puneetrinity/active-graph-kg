@@ -68,6 +68,7 @@ jobs:
           python scripts/candidate_index_guard.py
           python scripts/organization_candidate_history_guard.py
           python scripts/rc_skills_guard.py
+          python scripts/candidate_profile_guard.py
 
       - name: Run type checking
         run: |
@@ -121,6 +122,9 @@ jobs:
             tests/test_public_profile_boundary.py \
             tests/test_signal_global_observation_order.py \
             tests/test_jwt_scopes.py \
+            tests/test_candidate_profiles_contracts.py \
+            tests/test_candidate_profiles_authority.py \
+            tests/test_candidate_profiles_cross_system.py \
             tests/test_contact_suppression_authority.py \
             tests/test_public_observability_boundary.py \
             tests/test_schema_control.py \
@@ -870,6 +874,17 @@ jobs:
           ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
         run: |
           pytest tests/test_deploy_path_guards.py -v --tb=short --timeout=180
+
+      - name: Candidate foundation restricted-role and full-release rehearsal
+        run: |
+          set -euo pipefail
+          foundation_dir=$(mktemp -d /tmp/candidate-s1-ci-XXXXXX)
+          foundation_bin=$(pg_config --bindir)
+          "$foundation_bin/initdb" -D "$foundation_dir/data" -U ews -A trust --encoding=UTF8 --no-locale
+          "$foundation_bin/pg_ctl" -D "$foundation_dir/data" -l "$foundation_dir/postgres.log" -o "-k $foundation_dir -p 55495 -c listen_addresses='' -c shared_buffers=32MB -c max_connections=12" start
+          trap '"$foundation_bin/pg_ctl" -D "$foundation_dir/data" -m fast stop' EXIT
+          export CANDIDATE_FOUNDATION_TEST_ADMIN_DSN="host=$foundation_dir port=55495 user=ews dbname=postgres"
+          pytest tests/test_candidate_profiles_postgres.py -v --tb=short --timeout=180
 
       # Repository/endpoint logic tests run as the owner role: they exercise
       # merge/resolve logic, not isolation — isolation is proven above by the

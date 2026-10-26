@@ -155,6 +155,7 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         .replace('    "037_sourcing_public_applicant_check.sql",\n', "")
         .replace('    "038_resume_recovery_embed_refusals.sql",\n', "")
         .replace('    "039_index_policy_mismatch_settle.sql",\n', "")
+        .replace('    "040_candidate_owned_foundation.sql",\n', "")
         .replace(f"len(MIGRATIONS) != {len(MIGRATIONS)}", "len(MIGRATIONS) != 24")
         .replace(
             f"contain {len(MIGRATIONS)} unique ordered entries", "contain 24 unique ordered entries"

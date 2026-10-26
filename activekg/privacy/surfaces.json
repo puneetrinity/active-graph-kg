@@ -2,7 +2,7 @@
   "version": 1,
   "source_commit": "d3ed778e6b705100f0671169375848f71c992f5c",
   "generated_contract": {
-    "discovered_rows": 184,
+    "discovered_rows": 187,
     "rule": "Every AST-discovered SQL/call/route surface must match one classified row exactly."
   },
   "explicit_exclusions": [
@@ -37,6 +37,9 @@
     }
   ],
   "references": [
+    {"file":"activekg/api/candidate_profiles.py","symbol":"ensure","tables":[],"calls":[],"routes":["POST /candidate-profiles/foundation/commands"],"classification":"fenced","direction":"empty_subject_setup","candidate_scope":"candidate_self","actions":["withdraw_global_matching","request_erasure"],"enforcement":"Dark exact Flow JWT subject/scopes/TTL, immutable bounded wire and off-loop routine-only storage; no effective consent.","test_id":"privacy-candidate-foundation","reason":"Empty subject foundation only."},
+    {"file":"activekg/api/candidate_profiles.py","symbol":"status","tables":[],"calls":[],"routes":["GET /candidate-profiles/foundation"],"classification":"fenced","direction":"empty_subject_read","candidate_scope":"candidate_self","actions":["withdraw_global_matching","request_erasure"],"enforcement":"Exact Flow JWT subject/read scope and immutable binding; no profile facts or contacts.","test_id":"privacy-candidate-foundation","reason":"Empty subject status only."},
+    {"file":"activekg/candidate_profiles/repository.py","symbol":"_privacy","tables":["candidate_consent_state"],"calls":[],"routes":[],"classification":"fenced","direction":"privacy_check","candidate_scope":"candidate_self","actions":["withdraw_global_matching","request_erasure"],"enforcement":"Current consent withdrawal and linked global privacy denial block setup/read before SQL routines; Flow checks the current candidate account separately.","test_id":"privacy-candidate-foundation","reason":"No matching or publication permission is inferred."},
     {
       "file": "activekg/api/candidate_sourcing.py",
       "symbol": "verify_sourcing_authority",

@@ -1911,6 +1911,14 @@ def bounded_readiness_check(
                     _check_budget(started_at)
                     if not history_catalog_ready(cur):
                         reasons.append("candidate_history_authority_unsafe")
+                if "040_candidate_owned_foundation.sql" in MIGRATIONS:
+                    from activekg.candidate_profiles.repository import (
+                        catalog_ready as foundation_ready,
+                    )
+
+                    _check_budget(started_at)
+                    if not foundation_ready(cur):
+                        reasons.append("candidate_foundation_authority_unsafe")
         _check_budget(started_at)
     except TimeoutError:
         reasons.append("readiness_timeout")
