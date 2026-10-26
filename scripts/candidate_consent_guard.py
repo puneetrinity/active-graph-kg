@@ -16,7 +16,7 @@ FROZEN = {
     "activekg/api/sourced_candidates.py": "a92e74593fec522eab6800b4854327eaf27db6b9b88b096a1d565f80807bdd0d",
     # Seven-fix A1: counts/timing-only instrumentation; consent filtering unchanged.
     "activekg/api/global_memory.py": "b63e518a28414952ca3de5a41d3775135babf1ba829ef8907ca71eb4fa222a5f",
-    "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
+    "activekg/api/auth.py": "30b25e3b1f33a49b2f0a2d55c4e4b58cee0d2cb7503aebf5207c3b7898b52910",
     "activekg/privacy/config.py": "97c6bc67fafcf4953c85e7b86579fae4b537f0c264550f378cad4ea159fa9546",
     "activekg/privacy/identity.py": "3c5bc791e51d0e8b5bd01964ab0f7ddd52a53420b44e0684f7a52c2ac16fa65c",
     "activekg/privacy/models.py": "078caf25e85a7e07aa32dad47c7ed86fe7bd9b75f3aeb3852527efad4e99522f",

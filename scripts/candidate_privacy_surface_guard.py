@@ -314,6 +314,29 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
 
 def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
     source = _reference_source(reference)
+    if row["test_id"] == "privacy-candidate-foundation":
+        required = {
+            "activekg/api/candidate_profiles.py::ensure": (
+                "require_authority(",
+                "parse_command(",
+                "run_in_threadpool(execute,",
+            ),
+            "activekg/api/candidate_profiles.py::status": (
+                "require_authority(",
+                "UUID.fullmatch(",
+                "run_in_threadpool(execute,",
+            ),
+            "activekg/candidate_profiles/repository.py::_privacy": (
+                "candidate_consent_state",
+                "candidate_privacy_global_decision(",
+                'HTTPException(451, "privacy_restricted")',
+            ),
+        }.get(reference.key)
+        if required is None or any(
+            "".join(token.split()) not in "".join(source.split()) for token in required
+        ):
+            raise GuardError("foundation privacy authority changed")
+        return
     if row["test_id"] == "privacy-rc-cache":
         spec = importlib.util.spec_from_file_location(
             "rc_guard", ROOT / "scripts/rc_skills_guard.py"

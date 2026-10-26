@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = "db/migrations/028_candidate_generation_publication.sql"
 FROZEN = {
-    "activekg/api/auth.py": "f4005bf2df5818d27fcae77cd3659d860170bdb0f4b75b8643b76876ee323071",
+    "activekg/api/auth.py": "30b25e3b1f33a49b2f0a2d55c4e4b58cee0d2cb7503aebf5207c3b7898b52910",
     "activekg/api/candidate_privacy.py": "12597a3fae72a4109b698ed7e23a4637c6999a4c298c3893d1f5b8c21fdab7a6",
     "activekg/api/organization_candidates.py": "8ef7a2c921f5f7560c04448b879ca22dacdac93c5e5625669e118a5e7fc2e351",
     "activekg/api/sourced_candidates.py": "a92e74593fec522eab6800b4854327eaf27db6b9b88b096a1d565f80807bdd0d",
@@ -921,7 +921,7 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-12:]
+        caller["migration_manifest"][-13:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
@@ -935,8 +935,9 @@ def validate(root: Path = ROOT) -> None:
             "037_sourcing_public_applicant_check.sql",
             "038_resume_recovery_embed_refusals.sql",
             "039_index_policy_mismatch_settle.sql",
+            "040_candidate_owned_foundation.sql",
         ]
-        or len(caller["migration_manifest"]) != 39
+        or len(caller["migration_manifest"]) != 40
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

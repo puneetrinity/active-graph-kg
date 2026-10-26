@@ -96,6 +96,7 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "040_candidate_owned_foundation.sql": [("candidate_foundation_catalog",)],
     "035_private_resume_sourcing.sql": [("candidate_index_catalog_sourcing",)],
     "036_resume_history_policy.sql": [("candidate_index_catalog_history",)],
     "037_sourcing_public_applicant_check.sql": [("candidate_index_catalog_applicants",)],
@@ -1024,6 +1025,10 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
                 and digest == "ab135c9dd47ac87d96533e29ff8d59858f36d067de9a9025017cf92006b7d34a"
             )
         )
+    if kind == "candidate_foundation_catalog":
+        from activekg.candidate_profiles.repository import CATALOG_MD5, catalog_evidence
+
+        return catalog_evidence(cur)[0] == CATALOG_MD5
     if kind == "candidate_history_catalog":
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence
 
@@ -1652,6 +1657,7 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
     # No-op before 029; within the same transaction as the blanket grants.
     _harden_candidate_history_runtime_privileges(cur, role)
     _harden_rc_skills_runtime_privileges(cur, role)
+    _harden_candidate_foundation_runtime_privileges(cur, role)
     print(f"✓ Runtime role {role} granted table access (no ownership; ledger/receipts hardened)")
 
 
@@ -1917,6 +1923,50 @@ def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str)
     )
     if cur.fetchone() != (False,):
         raise SchemaControlError("approved-provider append-only function privilege is invalid")
+
+
+def _harden_candidate_foundation_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.contracts import RUNTIME_FUNCTIONS, TABLES
+
+    cur.execute("SELECT to_regclass('public.candidate_owned_subjects')")
+    if cur.fetchone()[0] is None:
+        return
+    for table in TABLES:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON TABLE public.{} FROM {},PUBLIC").format(
+                sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped ORDER BY attnum",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({}),INSERT({}),UPDATE({}),REFERENCES({}) ON TABLE public.{} FROM {},PUBLIC"
+            ).format(
+                columns, columns, columns, columns, sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+    for signature in RUNTIME_FUNCTIONS:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION public.{} FROM {},PUBLIC").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+
+
+def _assert_candidate_foundation_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.repository import catalog_ready
+
+    if not catalog_ready(cur, role):
+        raise RuntimeError("Candidate foundation authority is unsafe")
 
 
 def _harden_candidate_history_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
@@ -2300,6 +2350,8 @@ def main():
                 _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _harden_organization_candidate_runtime_privileges(cur, runtime_role)
                 _harden_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "040_candidate_owned_foundation.sql" in migrations:
+                    _harden_candidate_foundation_runtime_privileges(cur, runtime_role)
                 if "028_candidate_generation_publication.sql" in migrations:
                     _harden_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:
@@ -2314,6 +2366,8 @@ def main():
                 _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _assert_organization_candidate_runtime_privileges(cur, runtime_role)
                 _assert_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "040_candidate_owned_foundation.sql" in migrations:
+                    _assert_candidate_foundation_runtime_privileges(cur, runtime_role)
                 if "028_candidate_generation_publication.sql" in migrations:
                     _assert_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:

@@ -61,6 +61,7 @@ from activekg.api.candidate_privacy import (
 from activekg.api.candidate_privacy import (
     set_repository as set_candidate_privacy_repository,
 )
+from activekg.api.candidate_profiles import router as candidate_profiles_router
 from activekg.api.candidate_sourcing import router as candidate_sourcing_router
 from activekg.api.global_memory import (
     LEGACY_GLOBAL_SEARCH_ENABLED,
@@ -411,6 +412,7 @@ app.include_router(candidate_privacy_router)
 app.include_router(organization_decision_events_router)
 app.include_router(organization_candidates_router)
 app.include_router(candidate_consent_router)
+app.include_router(candidate_profiles_router)
 app.include_router(candidate_index_router)
 app.include_router(candidate_sourcing_router)
 

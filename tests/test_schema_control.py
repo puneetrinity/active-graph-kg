@@ -68,6 +68,8 @@ def test_a2_existing_runtime_attribute_reconciliation(monkeypatch, attributes) -
                 return (None,)  # Existing-role contract before the optional 029 tail.
             if self.last == "SELECT to_regclass('public.rc_skill_observations')":
                 return (None,)  # Existing-role contract before the optional 030 tail.
+            if self.last == "SELECT to_regclass('public.candidate_owned_subjects')":
+                return (None,)  # Existing-role contract before the optional 040 tail.
             raise AssertionError("unexpected query")
 
     cur = Cursor()
@@ -86,7 +88,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
     assert list(MIGRATIONS) == manifest["migration_manifest"]
     assert CHECKSUM_TRANSITIONS == manifest["checksum_transitions"]
     assert len(MIGRATIONS) == len(manifest["migration_manifest"]) == len(set(MIGRATIONS))
-    assert MIGRATIONS[-11:] == (
+    assert MIGRATIONS[-12:] == (
         "029_organization_candidate_history.sql",
         "030_rc_skill_observations.sql",
         "031_rc_clock_tolerance.sql",
@@ -98,6 +100,7 @@ def test_migration_files_and_historical_transition_are_frozen() -> None:
         "037_sourcing_public_applicant_check.sql",
         "038_resume_recovery_embed_refusals.sql",
         "039_index_policy_mismatch_settle.sql",
+        "040_candidate_owned_foundation.sql",
     )
     assert {path.name for path in (ROOT / "db/migrations").glob("*.sql")} == set(
         manifest["migration_files"]
