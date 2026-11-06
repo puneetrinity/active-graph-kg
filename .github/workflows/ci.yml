@@ -948,7 +948,7 @@ jobs:
         run: |
           set -euo pipefail
           foundation_dir=$(mktemp -d /tmp/candidate-s1-ci-XXXXXX)
-          foundation_bin=$(pg_config --bindir)
+          foundation_bin=/usr/lib/postgresql/16/bin
           "$foundation_bin/initdb" -D "$foundation_dir/data" -U ews -A trust --encoding=UTF8 --no-locale
           "$foundation_bin/pg_ctl" -D "$foundation_dir/data" -l "$foundation_dir/postgres.log" -o "-k $foundation_dir -p 55495 -c listen_addresses='' -c shared_buffers=32MB -c max_connections=12" start
           trap '"$foundation_bin/pg_ctl" -D "$foundation_dir/data" -m fast stop' EXIT
@@ -959,7 +959,7 @@ jobs:
         run: |
           set -euo pipefail
           spark_dir=$(mktemp -d /tmp/candidate-s2-ci-XXXXXX)
-          spark_bin=$(pg_config --bindir)
+          spark_bin=/usr/lib/postgresql/16/bin
           "$spark_bin/initdb" -D "$spark_dir/data" -U ews -A trust --encoding=UTF8 --no-locale
           "$spark_bin/pg_ctl" -D "$spark_dir/data" -l "$spark_dir/postgres.log" -o "-k $spark_dir -p 55496 -h 127.0.0.1 -c shared_buffers=32MB -c max_connections=12" start
           trap '"$spark_bin/pg_ctl" -D "$spark_dir/data" -m fast stop' EXIT
