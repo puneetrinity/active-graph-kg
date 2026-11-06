@@ -351,7 +351,7 @@ def test_router_registers_exactly_five_internal_routes() -> None:
     }
 
 
-def test_full_application_registers_exactly_88_routes() -> None:
+def test_full_application_registers_exactly_104_routes() -> None:
     script = """
 from fastapi.routing import APIRoute
 from activekg.api.main import app
@@ -375,7 +375,7 @@ print(repr(privacy))
         check=True,
     )
     lines = result.stdout.strip().splitlines()
-    assert lines[-2] == "88"
+    assert lines[-2] == "104"  # 90 + 14 Spark candidate profile, source, network and consent routes
     assert lines[-1] == repr(
         sorted(
             {

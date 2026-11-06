@@ -16,6 +16,7 @@ from psycopg_pool import ConnectionPool
 from activekg.api import candidate_consent as receiver
 from activekg.api.auth import JWTClaims
 from activekg.api.operational import ReadinessResult, bounded_readiness_check
+from activekg.common.migration_manifest import MIGRATIONS
 from activekg.common.schema_control import SchemaControlError
 from scripts import init_railway_db as release
 from tests.test_candidate_consent import vector
@@ -821,7 +822,12 @@ def test_consent_readiness_and_disabled_flag(consent_readiness):
 @pytest.mark.parametrize("variant", ["missing", "renamed", "widened"])
 def test_consent_readiness_pins_named_constraint_definition(consent_readiness, variant):
     conn, _, check = consent_readiness
-    name = "candidate_consent_receipts_outcome_check"
+    # 041 replaces the outcome check with consent_receipt_v2_outcome (readiness pins the same swap).
+    name = (
+        "consent_receipt_v2_outcome"
+        if "041_candidate_profile_drafts.sql" in MIGRATIONS
+        else "candidate_consent_receipts_outcome_check"
+    )
     definition = conn.execute(
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='candidate_consent_receipts'::regclass AND conname=%s",
         (name,),

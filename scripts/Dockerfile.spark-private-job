@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+# Isolated operator image, never used by normal Railway runtime/release builds.
+# Named contexts MUST be reviewed artifacts: memory-runtime=image@sha256, flow=clean source archive.
+FROM node:20.19.0-bookworm-slim AS flow-tools
+WORKDIR /flow
+COPY --from=flow package.json package-lock.json ./
+RUN npm ci --include=dev --ignore-scripts
+COPY --from=flow tsconfig.json ./
+COPY --from=flow server ./server
+COPY --from=flow shared ./shared
+COPY --from=flow scripts ./scripts
+
+FROM memory-runtime AS private-job
+COPY --from=flow-tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=flow-tools /flow /flow
+WORKDIR /app
+ENTRYPOINT ["python", "/app/scripts/spark_private_job.py"]
+CMD ["readback"]

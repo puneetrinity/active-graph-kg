@@ -96,6 +96,12 @@ DUPLICATE_OBJECT_SQLSTATES = {
 #        | ("rls", table)
 #        | ("security_definer_function", regprocedure-signature)
 BASELINE_VERIFIERS: dict[str, list[tuple[str, ...]]] = {
+    "045_candidate_network_recovery.sql": [("candidate_network_catalog",)],
+    "044_candidate_network_result_dedup.sql": [("candidate_network_catalog_044",)],
+    "043_candidate_network_owner_status.sql": [("candidate_network_catalog_043",)],
+    "042_candidate_network_publication.sql": [("candidate_network_catalog_042",)],
+    "041_candidate_profile_drafts.sql": [("candidate_profile_catalog",)],
+    "040_candidate_owned_foundation.sql": [("candidate_foundation_catalog",)],
     "035_private_resume_sourcing.sql": [("candidate_index_catalog_sourcing",)],
     "036_resume_history_policy.sql": [("candidate_index_catalog_history",)],
     "037_sourcing_public_applicant_check.sql": [("candidate_index_catalog_applicants",)],
@@ -1024,6 +1030,46 @@ def _object_exists(cur: psycopg.Cursor, check: tuple[str, ...]) -> bool:
                 and digest == "ab135c9dd47ac87d96533e29ff8d59858f36d067de9a9025017cf92006b7d34a"
             )
         )
+    if kind in {
+        "candidate_network_catalog",
+        "candidate_network_catalog_042",
+        "candidate_network_catalog_043",
+        "candidate_network_catalog_044",
+    }:
+        from activekg.candidate_profiles.publication import (
+            NETWORK_CATALOG_MD5,
+            network_catalog_evidence,
+        )
+
+        digest = network_catalog_evidence(cur)[0]
+        return (
+            digest == NETWORK_CATALOG_MD5
+            or (
+                kind == "candidate_network_catalog_042"
+                and digest
+                in {"dbadb680cd72a891a03c6d56ae8a04e8", "fe635d2947b2b288338d2169fd8a065c"}
+            )
+            or (
+                kind == "candidate_network_catalog_043"
+                and digest == "fe635d2947b2b288338d2169fd8a065c"
+            )
+            # Historical 044 state; 045 (B5 recovery gate) completes the current catalogue.
+            or (
+                kind == "candidate_network_catalog_044"
+                and digest == "803035e8ee2d428a1f04f03ea4c1db0a"
+            )
+        )
+    if kind == "candidate_profile_catalog":
+        from activekg.candidate_profiles.profile_repository import (
+            PROFILE_CATALOG_MD5,
+            profile_catalog_evidence,
+        )
+
+        return profile_catalog_evidence(cur)[0] == PROFILE_CATALOG_MD5
+    if kind == "candidate_foundation_catalog":
+        from activekg.candidate_profiles.repository import CATALOG_MD5, catalog_evidence
+
+        return catalog_evidence(cur)[0] == CATALOG_MD5
     if kind == "candidate_history_catalog":
         from activekg.candidate_history.repository import HISTORY_CATALOG_SHA256, catalog_evidence
 
@@ -1652,6 +1698,8 @@ def _provision_runtime_role(cur: psycopg.Cursor) -> None:
     # No-op before 029; within the same transaction as the blanket grants.
     _harden_candidate_history_runtime_privileges(cur, role)
     _harden_rc_skills_runtime_privileges(cur, role)
+    _harden_candidate_foundation_runtime_privileges(cur, role)
+    _harden_candidate_profile_runtime_privileges(cur, role)
     print(f"✓ Runtime role {role} granted table access (no ownership; ledger/receipts hardened)")
 
 
@@ -1917,6 +1965,192 @@ def _assert_sourced_candidate_runtime_privileges(cur: psycopg.Cursor, role: str)
     )
     if cur.fetchone() != (False,):
         raise SchemaControlError("approved-provider append-only function privilege is invalid")
+
+
+def _harden_candidate_profile_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    _harden_candidate_network_runtime_privileges(cur, role)
+    from activekg.candidate_profiles.profile_repository import (
+        PROFILE_OWNER_FUNCTIONS,
+        PROFILE_RUNTIME_FUNCTIONS,
+        PROFILE_TABLES,
+    )
+
+    cur.execute("SELECT to_regclass('public.candidate_profile_heads')")
+    if cur.fetchone()[0] is None:
+        return
+    for table in PROFILE_TABLES:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON TABLE public.{} FROM {},PUBLIC").format(
+                sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({0}),INSERT({0}),UPDATE({0}),REFERENCES({0}) ON TABLE public.{1} FROM {2},PUBLIC"
+            ).format(columns, sql.Identifier(table), sql.Identifier(role))
+        )
+    for signature in PROFILE_RUNTIME_FUNCTIONS + PROFILE_OWNER_FUNCTIONS:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION public.{} FROM {},PUBLIC").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+    for signature in PROFILE_RUNTIME_FUNCTIONS:
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+
+
+def _harden_candidate_network_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.publication import NETWORK_RUNTIME_FUNCTIONS, NETWORK_TABLES
+
+    cur.execute("SELECT to_regclass('public.candidate_network_subjects')")
+    if cur.fetchone()[0] is None:
+        return
+    for table in NETWORK_TABLES:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON TABLE public.{} FROM {},PUBLIC").format(
+                sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({0}),INSERT({0}),UPDATE({0}),REFERENCES({0}) ON TABLE public.{1} FROM {2},PUBLIC"
+            ).format(columns, sql.Identifier(table), sql.Identifier(role))
+        )
+    cur.execute(
+        "SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'candidate_network_')"
+    )
+    for (signature,) in cur.fetchall():
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION {} FROM {},PUBLIC").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+    for signature in NETWORK_RUNTIME_FUNCTIONS:
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+    _provision_candidate_network_worker(cur)
+
+
+def _provision_candidate_network_worker(cur: psycopg.Cursor) -> None:
+    """Optional separate credential: never grant publication writes to the app."""
+    password = os.getenv("ACTIVEKG_NETWORK_WORKER_PASSWORD")
+    if not password:
+        return
+    from activekg.candidate_profiles.publication import (
+        NETWORK_WORKER_FUNCTIONS,
+        NETWORK_WORKER_ROLE,
+    )
+
+    role = NETWORK_WORKER_ROLE
+    cur.execute("SELECT oid FROM pg_roles WHERE rolname=%s", (role,))
+    if cur.fetchone() is None:
+        cur.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+    cur.execute(
+        "SELECT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=%s))",
+        (role,),
+    )
+    if cur.fetchone()[0]:
+        raise RuntimeError("candidate_network_worker_membership_refused")
+    cur.execute(
+        sql.SQL("ALTER ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+            sql.Identifier(role), sql.Literal(password)
+        )
+    )
+    # A non-superuser migration owner cannot set SUPERUSER/BYPASSRLS attributes,
+    # even to false. Refuse an unsafe existing role rather than trying to demote it.
+    cur.execute(
+        "SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,rolreplication,rolinherit,rolcanlogin "
+        "FROM pg_roles WHERE rolname=%s",
+        (role,),
+    )
+    if cur.fetchone() != (False, False, False, False, False, False, True):
+        raise RuntimeError("candidate_network_worker_role_unsafe")
+    cur.execute(
+        sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(sql.Identifier(role))
+    )
+    cur.execute(
+        sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(sql.Identifier(role))
+    )
+    cur.execute(
+        sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM {}").format(sql.Identifier(role))
+    )
+    cur.execute(sql.SQL("REVOKE ALL ON SCHEMA public FROM {}").format(sql.Identifier(role)))
+    cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(role)))
+    for signature in NETWORK_WORKER_FUNCTIONS:
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+
+
+def _assert_candidate_profile_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.profile_repository import profile_catalog_ready
+
+    cur.execute("SELECT to_regclass('public.candidate_profile_heads')")
+    if cur.fetchone()[0] is not None and not profile_catalog_ready(cur, role):
+        raise RuntimeError("candidate_profile_authority_unsafe")
+
+
+def _harden_candidate_foundation_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.contracts import RUNTIME_FUNCTIONS, TABLES
+
+    cur.execute("SELECT to_regclass('public.candidate_owned_subjects')")
+    if cur.fetchone()[0] is None:
+        return
+    for table in TABLES:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON TABLE public.{} FROM {},PUBLIC").format(
+                sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped ORDER BY attnum",
+            (f"public.{table}",),
+        )
+        columns = sql.SQL(",").join(sql.Identifier(row[0]) for row in cur.fetchall())
+        cur.execute(
+            sql.SQL(
+                "REVOKE SELECT({}),INSERT({}),UPDATE({}),REFERENCES({}) ON TABLE public.{} FROM {},PUBLIC"
+            ).format(
+                columns, columns, columns, columns, sql.Identifier(table), sql.Identifier(role)
+            )
+        )
+    for signature in RUNTIME_FUNCTIONS:
+        cur.execute(
+            sql.SQL("REVOKE ALL ON FUNCTION public.{} FROM {},PUBLIC").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+        cur.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION public.{} TO {}").format(
+                sql.SQL(signature), sql.Identifier(role)
+            )
+        )
+
+
+def _assert_candidate_foundation_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
+    from activekg.candidate_profiles.repository import catalog_ready
+
+    if not catalog_ready(cur, role):
+        raise RuntimeError("Candidate foundation authority is unsafe")
 
 
 def _harden_candidate_history_runtime_privileges(cur: psycopg.Cursor, role: str) -> None:
@@ -2300,6 +2534,9 @@ def main():
                 _harden_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _harden_organization_candidate_runtime_privileges(cur, runtime_role)
                 _harden_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "040_candidate_owned_foundation.sql" in migrations:
+                    _harden_candidate_foundation_runtime_privileges(cur, runtime_role)
+                _harden_candidate_profile_runtime_privileges(cur, runtime_role)
                 if "028_candidate_generation_publication.sql" in migrations:
                     _harden_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:
@@ -2314,6 +2551,9 @@ def main():
                 _assert_sourced_candidate_runtime_privileges(cur, runtime_role)
                 _assert_organization_candidate_runtime_privileges(cur, runtime_role)
                 _assert_candidate_consent_runtime_privileges(cur, runtime_role)
+                if "040_candidate_owned_foundation.sql" in migrations:
+                    _assert_candidate_foundation_runtime_privileges(cur, runtime_role)
+                _assert_candidate_profile_runtime_privileges(cur, runtime_role)
                 if "028_candidate_generation_publication.sql" in migrations:
                     _assert_candidate_index_runtime_privileges(cur, runtime_role)
                 if "029_organization_candidate_history.sql" in migrations:

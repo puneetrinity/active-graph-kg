@@ -718,6 +718,13 @@ def test_privacy_filtered_ann_underfill_rescans_exactly() -> None:
                     sql.Identifier(runtime_role), sql.Identifier(database)
                 )
             )
+            # Pin the ANN path: a freshly created cluster's default costs can prefer a bitmap scan on
+            # idx_nodes_tenant, which would not exercise the IVFFlat underfill this test is about.
+            cur.execute(
+                sql.SQL("ALTER ROLE {} IN DATABASE {} SET enable_bitmapscan TO off").format(
+                    sql.Identifier(runtime_role), sql.Identifier(database)
+                )
+            )
             rows: list[tuple[list[str], str, str, str]] = []
             for index in range(240):
                 vector = np.zeros(384, dtype=np.float32)

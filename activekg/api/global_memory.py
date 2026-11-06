@@ -16,7 +16,8 @@ from typing import Any, Literal
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from activekg.api.auth import (
@@ -25,6 +26,8 @@ from activekg.api.auth import (
     get_jwt_claims,
     require_scope,
 )
+from activekg.candidate_profiles.config import network_publication_enabled
+from activekg.candidate_profiles.publication import network_recovery_open
 from activekg.common.logger import _log_context, get_enhanced_logger
 from activekg.embedding.global_candidates import (  # noqa: F401 — shared with the embedding producer
     PUBLIC_EMBED_VERSION,
@@ -2814,7 +2817,7 @@ def set_embedder(embedder: Any) -> None:
 class GlobalCandidateSearchRequest(BaseModel):
     query_text: str
     limit: int = 50
-    surface: Literal["legacy_v0", "public_v1"] = "legacy_v0"
+    surface: Literal["legacy_v0", "public_v1", "public_v2"] = "legacy_v0"
     location_city: str | None = None
     # Alias expansion from the caller (e.g. ['bengaluru', 'bangalore']) — the
     # caller owns city-alias knowledge; any one matching passes the filter.
@@ -2842,6 +2845,17 @@ def search_global_candidates(
     reconciliation.
     """
     _require_enabled()
+    network_surface = body.surface == "public_v2"
+    if network_surface:
+        if not network_publication_enabled():
+            raise HTTPException(503, "candidate_network_unavailable")
+        if not claims or not getattr(claims, "tenant_id", None):
+            raise HTTPException(403, "tenant_required")
+        if len(body.query_text) > 20000 or any(
+            len(values) > 64 or any(len(v) > 200 for v in values)
+            for values in [body.location_cities or [], body.skills_any or []]
+        ):
+            raise HTTPException(422, "invalid_request")
     if _embedder is None:
         raise HTTPException(status_code=503, detail="Embedder not initialized")
 
@@ -2858,7 +2872,7 @@ def search_global_candidates(
     vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec.tolist()) + "]"
     embed_ms = (time.perf_counter() - embed_started) * 1000
 
-    public_surface = body.surface == "public_v1"
+    public_surface = body.surface in ("public_v1", "public_v2")
     if public_surface:
         _require_public_enabled()
     elif not LEGACY_GLOBAL_SEARCH_ENABLED:
@@ -2991,6 +3005,42 @@ def search_global_candidates(
             query_ms = (time.perf_counter() - query_started) * 1000
             projection_started = time.perf_counter()
             rows = [_row_to_dict(cur, r) for r in raw_rows]
+            if network_surface and not network_recovery_open(cur):
+                # B5 recovery closed: provider results only, no native rows.
+                rows = [{"kind": "provider", "profile": row} for row in rows][:limit]
+            elif network_surface:
+                cur.execute(
+                    "SELECT public.candidate_network_search(%s::vector,%s,%s)",
+                    (
+                        vec_literal,
+                        limit,
+                        Jsonb({"cities": cities, "skills": body.skills_any or []}),
+                    ),
+                )
+                network = cur.fetchone()[0]
+                if not isinstance(network, list):
+                    raise HTTPException(503, "candidate_network_unavailable")
+                # A single returned pool and limit, not an additional 500 rows.
+                # No legacy provider record is overwritten with native facts.
+                rows = [{"kind": "provider", "profile": row} for row in rows] + network
+                rows.sort(
+                    key=lambda row: (
+                        -(
+                            row["profile"]["similarity"]
+                            if row["kind"] == "provider"
+                            else row["similarity"]
+                        ),
+                        "provider:" + str(row["profile"]["id"])
+                        if row["kind"] == "provider"
+                        else row["identity"],
+                    )
+                )
+                rows = rows[:limit]
+                if (
+                    len(json.dumps(rows, default=str, ensure_ascii=False).encode())
+                    > 32 * 1024 * 1024
+                ):
+                    raise HTTPException(503, "candidate_network_response_too_large")
             projection_ms = (time.perf_counter() - projection_started) * 1000
         conn.commit()
         _log_search_phases(
@@ -3003,7 +3053,11 @@ def search_global_candidates(
             projection_ms,
         )
         return {
-            "surface": "public_v1" if public_surface else "legacy_v0",
+            "surface": "public_v2"
+            if network_surface
+            else "public_v1"
+            if public_surface
+            else "legacy_v0",
             "results": rows,
             "count": len(rows),
             "applied_limit": limit,
@@ -3015,6 +3069,88 @@ def search_global_candidates(
 # ---------------------------------------------------------------------------
 # Resume refs for sourced candidates (#Stage-5B — resume-to-recruiter)
 # ---------------------------------------------------------------------------
+
+
+class NetworkValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    publicationIds: list[str] = Field(max_length=500)
+    includeResultKeys: bool = False
+
+
+@router.post(
+    "/global-candidates/network/validate", dependencies=[Depends(require_scope("kg:read"))]
+)
+def validate_network_publications(
+    body: NetworkValidationRequest, response: Response, claims=Depends(get_jwt_claims)
+):
+    response.headers["Cache-Control"] = "no-store"
+    _require_enabled()
+    if not network_publication_enabled():
+        raise HTTPException(503, "candidate_network_unavailable")
+    tenant = getattr(claims, "tenant_id", None)
+    if not tenant:
+        raise HTTPException(403, "tenant_required")
+    # Comparison keys carry the candidate's confirmed LinkedIn URL. Only the
+    # Signal/Discover issuer, which deduplicates search results, may receive them.
+    if body.includeResultKeys:
+        from activekg.api import auth as auth_module
+
+        signal_issuer = auth_module.SIGNAL_JWT_ISSUER
+        if not signal_issuer or getattr(claims, "issuer", None) != signal_issuer:
+            raise HTTPException(403, "result_keys_forbidden")
+    try:
+        ids = [str(UUID(value)) for value in body.publicationIds]
+    except (ValueError, TypeError):
+        raise HTTPException(422, "invalid_request") from None
+    if ids != body.publicationIds or len(set(ids)) != len(ids):
+        raise HTTPException(422, "invalid_request")
+    with _get_tenant_conn(tenant) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout='3s'")
+        if not network_recovery_open(cur):
+            # B5 recovery closed: no native publication is currently valid.
+            closed: dict = {"schemaVersion": 1, "publications": []}
+            if body.includeResultKeys:
+                closed["resultKeys"] = []
+            return closed
+        cur.execute("SELECT public.candidate_network_validate(%s::uuid[])", (ids,))
+        publications = cur.fetchone()[0]
+        if not body.includeResultKeys:
+            return {"schemaVersion": 1, "publications": publications}
+        cur.execute("SELECT public.candidate_network_result_keys(%s::uuid[])", (ids,))
+        return {"schemaVersion": 1, "publications": publications, "resultKeys": cur.fetchone()[0]}
+
+
+@router.get(
+    "/global-candidates/network/status",
+    dependencies=[Depends(require_scope("candidate-profile:owner-read"))],
+)
+def network_owner_status(binding: UUID, response: Response, claims=Depends(get_jwt_claims)):
+    from activekg.candidate_profiles.profile_authority import require_owner
+
+    response.headers["Cache-Control"] = "no-store"
+    subject = require_owner(claims)
+    if not network_publication_enabled():
+        return {
+            "schemaVersion": 1,
+            "publicationActive": False,
+            "blockedReason": "feature_unavailable",
+        }
+    with _get_tenant_conn("candidate_" + subject) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout='3s'")
+        if not network_recovery_open(cur):
+            return {
+                "schemaVersion": 1,
+                "publicationActive": False,
+                "blockedReason": "publication_unavailable",
+            }
+        try:
+            cur.execute(
+                "SELECT public.candidate_network_owner_status_detail(%s,%s)",
+                (subject, str(binding)),
+            )
+        except psycopg.errors.NoDataFound:
+            raise HTTPException(404, "not_found") from None
+        return cur.fetchone()[0]
 
 
 class ResumeRefsRequest(BaseModel):

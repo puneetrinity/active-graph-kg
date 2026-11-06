@@ -26,6 +26,7 @@ from typing import Any
 
 import psycopg
 
+from activekg.candidate_profiles.publication import sweep_publications
 from activekg.common.logger import get_enhanced_logger
 
 logger = get_enhanced_logger(__name__)
@@ -190,7 +191,14 @@ class GlobalCandidateEmbedder:
             # Drain the public projection first. It is feature-gated at the
             # API boundary until this has caught up, and is the only vector
             # cross-tenant search is permitted to use.
-            return self._sweep_public_once() + self._sweep_once()
+            completed = self._sweep_public_once() + self._sweep_once()
+            # Native Spark publications have their own consent-fenced leases.
+            # A failure here must not undo or prevent the legacy sweeps above.
+            try:
+                completed += sweep_publications(self.dsn, self.embedder)
+            except Exception:
+                logger.error("candidate_network publication sweep failed")
+            return completed
         except Exception as e:  # never take down the node-embedding loop
             logger.error("global_candidates embedding sweep failed", extra={"error": str(e)})
             return 0

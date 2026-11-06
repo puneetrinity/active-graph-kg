@@ -13,10 +13,12 @@ Gated on ``ACTIVEKG_RLS_TEST_OWNER_DSN`` (also used as the migrate DSN).
 """
 
 import os
+import re
 import subprocess
 import sys
 import uuid
 from hashlib import sha256
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -140,8 +142,57 @@ def _restore_runtime_posture() -> None:
         )
 
 
+# Spark migrations after 040. Their objects depend on 027/040 tables, so the rewind removes them
+# first: every table they create (one statement, internal FKs included), the two triggers 042
+# adds to older tables, then every function name they introduce (never an earlier routine).
+_SPARK_TAIL = (
+    "041_candidate_profile_drafts.sql",
+    "042_candidate_network_publication.sql",
+    "043_candidate_network_owner_status.sql",
+    "044_candidate_network_result_dedup.sql",
+    "045_candidate_network_recovery.sql",
+)
+
+
+def _spark_tail_objects() -> tuple[list[str], list[str]]:
+    root = Path(__file__).resolve().parents[1] / "db" / "migrations"
+    created = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?(\w+)\s*\(", re.I)
+    tables = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?public\.(\w+)", re.I)
+    earlier = {
+        name
+        for path in sorted(root.glob("*.sql"))
+        if path.name < _SPARK_TAIL[0]
+        for name in created.findall(path.read_text())
+    }
+    new_tables: list[str] = []
+    new_functions: list[str] = []
+    for name in _SPARK_TAIL:
+        text = (root / name).read_text()
+        new_tables += [t for t in tables.findall(text) if t not in new_tables]
+        new_functions += [
+            f for f in created.findall(text) if f not in earlier and f not in new_functions
+        ]
+    return new_tables, new_functions
+
+
+def _drop_spark_tail(conn: psycopg.Connection) -> None:
+    new_tables, new_functions = _spark_tail_objects()
+    conn.execute(
+        sql.SQL("DROP TABLE ")
+        + sql.SQL(",").join(sql.Identifier("public", table) for table in new_tables)
+    )
+    conn.execute("DROP TRIGGER candidate_network_anchor_created ON public.candidate_owned_subjects")
+    conn.execute("DROP TRIGGER candidate_network_consent_changed ON public.candidate_consent_state")
+    for (signature,) in conn.execute(
+        "SELECT p.oid::regprocedure::text FROM pg_proc p "
+        "WHERE p.pronamespace='public'::regnamespace AND p.proname=ANY(%s)",
+        (new_functions,),
+    ).fetchall():
+        conn.execute(sql.SQL("DROP FUNCTION " + signature))
+
+
 def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ...]:
-    """Disposable-only atomic removal of 022-039; no partial constraint or ledger state."""
+    """Disposable-only atomic removal of 022-045; no partial constraint or ledger state."""
     files = (
         "023_candidate_privacy_directives.sql",
         "024_organization_decision_event_inbox.sql",
@@ -163,6 +214,8 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
         "038_resume_recovery_embed_refusals.sql",
         # 039 only redefines the 028-closure claim routine, dropped with that closure.
         "039_index_policy_mismatch_settle.sql",
+        "040_candidate_owned_foundation.sql",
+        *_SPARK_TAIL,
     )
     with psycopg.connect(OWNER_DSN) as conn:
         rows = dict(
@@ -172,6 +225,11 @@ def _rewind_021_tail(*, fail_after_consent_drop: bool = False) -> tuple[bool, ..
             ).fetchall()
         )
         baselines = tuple(rows[name] for name in files)
+        _drop_spark_tail(conn)
+        conn.execute("DROP FUNCTION public.candidate_owned_ensure(uuid,uuid,uuid,bigint,text)")
+        conn.execute("DROP FUNCTION public.candidate_owned_status(uuid,uuid)")
+        conn.execute("DROP TABLE public.candidate_owned_command_receipts")
+        conn.execute("DROP TABLE public.candidate_owned_subjects")
         # 030 retains a RESTRICT FK and the existing privacy append-only trigger.
         # Drop its exact disposable dependency closure before rewinding privacy.
         conn.execute("DROP TABLE public.rc_skill_observations")
@@ -257,7 +315,8 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         public_applicants_was_baselined,
         recovery_embed_was_baselined,
         policy_settle_was_baselined,
-    ) = baselines
+        foundation_was_baselined,
+    ) = baselines[:18]
     if not _sql(
         "SELECT 1 FROM schema_migrations WHERE filename='023_candidate_privacy_directives.sql'"
     ):
@@ -322,6 +381,8 @@ def _restore_026_ledger_posture(baselines: tuple[bool, ...]) -> None:
         ("037_sourcing_public_applicant_check.sql", public_applicants_was_baselined),
         ("038_resume_recovery_embed_refusals.sql", recovery_embed_was_baselined),
         ("039_index_policy_mismatch_settle.sql", policy_settle_was_baselined),
+        ("040_candidate_owned_foundation.sql", foundation_was_baselined),
+        *zip(_SPARK_TAIL, baselines[18:], strict=True),
     ):
         _sql("UPDATE schema_migrations SET baselined=%s WHERE filename=%s", (baselined, filename))
 

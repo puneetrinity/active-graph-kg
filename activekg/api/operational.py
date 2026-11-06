@@ -852,6 +852,28 @@ SELECT (
 ) AS ready
 """
 
+# Preserve the historical check for rehearsals with a pre-041 manifest. The
+# three replacements remain exact; 041's full catalogue separately pins all
+# new columns and constraints. No ACL or RLS condition is relaxed.
+if "041_candidate_profile_drafts.sql" in MIGRATIONS:
+    for old, new in (
+        (
+            "'candidate_consent_receipts_check1','c','41414f887f2a18003b0e51a848f29201'",
+            "'consent_receipt_v2_shape','c','587f95488777cb5d2be99e13df7d6505'",
+        ),
+        (
+            "'candidate_consent_receipts_outcome_check','c','b2c25fa2f05af59824ea668079aa8f6f'",
+            "'consent_receipt_v2_outcome','c','10b48034ddb6a23918e55551671fc7ff'",
+        ),
+        (
+            "'candidate_consent_state_check3','c','4c311dad7447ea221a3a6ce3f7b81425'",
+            "'consent_effective_authority_shape','c','b52d07a8c591ffa4acd15edb8796577e'",
+        ),
+    ):
+        if CANDIDATE_CONSENT_CATALOG_SQL.count(old) != 1:
+            raise RuntimeError("candidate consent catalogue replacement mismatch")
+        CANDIDATE_CONSENT_CATALOG_SQL = CANDIDATE_CONSENT_CATALOG_SQL.replace(old, new)
+
 
 def bounded_readiness_check(
     candidate_repository: Any,
@@ -868,7 +890,7 @@ def bounded_readiness_check(
     candidate_history_healthy: bool | None = None,
     sourced_candidate_ingest_mode: str | None = None,
 ) -> ReadinessResult:
-    """Run a fixed, read-only readiness census with at most ten SQL statements."""
+    """Run the fixed read-only census within the shared time budget (13 core queries)."""
 
     reasons: list[str] = []
     if unsafe_search_configuration:
@@ -1036,6 +1058,7 @@ def bounded_readiness_check(
                             + _DECISION_INBOX_TABLES
                             + _SOURCED_CANDIDATE_TABLES
                             + _ORGANIZATION_CANDIDATE_TABLES
+                            + ("candidate_profile_heads",)
                         ),
                     ),
                 )
@@ -1911,6 +1934,26 @@ def bounded_readiness_check(
                     _check_budget(started_at)
                     if not history_catalog_ready(cur):
                         reasons.append("candidate_history_authority_unsafe")
+                if "040_candidate_owned_foundation.sql" in MIGRATIONS:
+                    from activekg.candidate_profiles.repository import (
+                        catalog_ready as foundation_ready,
+                    )
+
+                    _check_budget(started_at)
+                    if not foundation_ready(cur):
+                        reasons.append("candidate_foundation_authority_unsafe")
+                from activekg.candidate_profiles.config import profile_enabled
+                from activekg.candidate_profiles.profile_repository import profile_catalog_ready
+
+                profile_present = "candidate_profile_heads" in relation_map
+                if (
+                    "041_candidate_profile_drafts.sql" in MIGRATIONS
+                    or profile_present
+                    or profile_enabled()
+                ):
+                    _check_budget(started_at)
+                    if not profile_catalog_ready(cur):
+                        reasons.append("candidate_profile_authority_unsafe")
         _check_budget(started_at)
     except TimeoutError:
         reasons.append("readiness_timeout")

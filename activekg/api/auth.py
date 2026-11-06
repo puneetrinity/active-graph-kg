@@ -67,12 +67,14 @@ class JWTClaims:
         scopes: list[str] | None = None,
         exp: int | None = None,
         issuer: str | None = None,
+        iat: int | None = None,
     ):
         self.tenant_id = tenant_id
         self.actor_id = actor_id
         self.actor_type = actor_type
         self.scopes = scopes or []
         self.exp = exp
+        self.iat = iat
         # The VERIFIED issuer this token was validated against, not the peeked
         # value. Endpoints that grant authority beyond a tenant's own data must
         # be able to require a specific trusted service issuer.
@@ -185,6 +187,7 @@ def verify_jwt(token: str) -> JWTClaims:
             scopes=scopes,
             exp=exp,
             issuer=expected_issuer,
+            iat=payload.get("iat"),
         )
 
     except jwt.ExpiredSignatureError:

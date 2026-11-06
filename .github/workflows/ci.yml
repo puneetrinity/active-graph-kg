@@ -12,6 +12,42 @@ env:
   POSTGRES_VERSION: "16"
 
 jobs:
+  spark-source-parity:
+    name: Spark source Flow/Memory parity (pinned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require independently reviewed Flow commit
+        env:
+          FLOW_REF: ${{ vars.SPARK_SOURCE_FLOW_REF }}
+        run: |
+          [[ "$FLOW_REF" =~ ^[0-9a-f]{40}$ ]] || { echo 'Set SPARK_SOURCE_FLOW_REF to the reviewed committed S2 Flow SHA before CI/release; never silently skip parity.'; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          repository: puneetrinity/improved-tribble
+          ref: ${{ vars.SPARK_SOURCE_FLOW_REF }}
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
+          path: spark-flow-proof
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install test dependencies
+        run: |
+          npm ci --ignore-scripts --prefix spark-flow-proof/VantaHireWebsite
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+      - name: Require real TypeScript and Python source parity
+        env:
+          SPARK_SOURCE_FLOW_ROOT: ${{ github.workspace }}/spark-flow-proof/VantaHireWebsite
+          SPARK_SOURCE_PARITY_REQUIRED: '1'
+        run: pytest tests/test_spark_sources.py -v --tb=short --timeout=60
   candidate-index-image:
     name: Pinned candidate index image (offline)
     runs-on: ubuntu-latest
@@ -68,6 +104,8 @@ jobs:
           python scripts/candidate_index_guard.py
           python scripts/organization_candidate_history_guard.py
           python scripts/rc_skills_guard.py
+          python scripts/candidate_profile_guard.py
+          python scripts/candidate_network_guard.py
 
       - name: Run type checking
         run: |
@@ -121,6 +159,13 @@ jobs:
             tests/test_public_profile_boundary.py \
             tests/test_signal_global_observation_order.py \
             tests/test_jwt_scopes.py \
+            tests/test_candidate_profiles_contracts.py \
+            tests/test_candidate_profiles_authority.py \
+            tests/test_candidate_profiles_cross_system.py \
+            tests/test_candidate_profile_drafts.py \
+            tests/test_candidate_network_publication.py \
+            tests/test_spark_sources.py \
+            tests/test_candidate_profile_drafts_cross_system.py \
             tests/test_contact_suppression_authority.py \
             tests/test_public_observability_boundary.py \
             tests/test_schema_control.py \
@@ -150,6 +195,7 @@ jobs:
             tests/test_rc_skills.py \
             tests/test_rc_skills_api.py \
             tests/test_rc_skills_guard.py \
+            tests/test_spark_private_job.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -395,7 +441,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
@@ -871,6 +945,50 @@ jobs:
         run: |
           pytest tests/test_deploy_path_guards.py -v --tb=short --timeout=180
 
+      - name: Candidate foundation restricted-role and full-release rehearsal
+        run: |
+          set -euo pipefail
+          foundation_dir=$(mktemp -d /tmp/candidate-s1-ci-XXXXXX)
+          foundation_bin=/usr/lib/postgresql/16/bin
+          "$foundation_bin/initdb" -D "$foundation_dir/data" -U ews -A trust --encoding=UTF8 --no-locale
+          "$foundation_bin/pg_ctl" -D "$foundation_dir/data" -l "$foundation_dir/postgres.log" -o "-k $foundation_dir -p 55495 -c listen_addresses='' -c shared_buffers=32MB -c max_connections=12" start
+          trap '"$foundation_bin/pg_ctl" -D "$foundation_dir/data" -m fast stop' EXIT
+          export CANDIDATE_FOUNDATION_TEST_ADMIN_DSN="host=$foundation_dir port=55495 user=ews dbname=postgres"
+          pytest tests/test_candidate_profiles_postgres.py -v --tb=short --timeout=180
+
+      - name: Candidate Spark migration 041 storage and erasure regression
+        run: |
+          set -euo pipefail
+          spark_dir=$(mktemp -d /tmp/candidate-s2-ci-XXXXXX)
+          spark_bin=/usr/lib/postgresql/16/bin
+          "$spark_bin/initdb" -D "$spark_dir/data" -U ews -A trust --encoding=UTF8 --no-locale
+          "$spark_bin/pg_ctl" -D "$spark_dir/data" -l "$spark_dir/postgres.log" -o "-k $spark_dir -p 55496 -h 127.0.0.1 -c shared_buffers=32MB -c max_connections=12" start
+          trap '"$spark_bin/pg_ctl" -D "$spark_dir/data" -m fast stop' EXIT
+          export S2_PROFILE_TEST_ADMIN_URL='postgresql://ews@127.0.0.1:55496/postgres'
+          export S2_PROTOTYPE_DISPOSABLE=1
+          export SPARK_TEST_ADMIN_URL="$S2_PROFILE_TEST_ADMIN_URL"
+          export SPARK_DISPOSABLE=1
+          pytest tests/test_candidate_profile_drafts_postgres.py tests/test_candidate_profile_retention_postgres.py tests/test_spark_postgres.py tests/test_spark_sources_postgres.py tests/test_spark_contracts.py -v --tb=short --timeout=180
+
+      - name: Spark network publication full-schema and withdrawal fences
+        env:
+          SPARK_DISPOSABLE: '1'
+          SPARK_NETWORK_TEST_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+        run: pytest tests/test_candidate_network_publication_postgres.py -v --tb=short --timeout=180
+
+      - name: Spark private owner job against the released schema
+        env:
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
+          ACTIVEKG_NETWORK_WORKER_PASSWORD: network-worker-ci-only
+        run: |
+          # Provision the restricted network-worker login exactly as the release does, then probe it.
+          python scripts/init_railway_db.py
+          SPARK_PRIVATE_JOB_TEST_DSN=postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test \
+            pytest tests/test_spark_private_job_postgres.py -v --tb=short --timeout=120
+
       # Repository/endpoint logic tests run as the owner role: they exercise
       # merge/resolve logic, not isolation — isolation is proven above by the
       # dedicated enforcement suite running as the restricted role.
@@ -937,7 +1055,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
@@ -1111,7 +1257,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2

@@ -55,6 +55,15 @@ GOVERNED_TABLES = (
     "organization_candidate_history_scan_state",
 )
 GOVERNED_SQL_FUNCTIONS = (
+    "candidate_exclusion_preview",
+    "candidate_profile_interpretation_receive",
+    "candidate_profile_interpretation_read",
+    "candidate_profile_interpretation_apply",
+    "candidate_profile_apply",
+    "candidate_profile_source_receive",
+    "candidate_profile_source_read",
+    "candidate_profile_source_apply",
+    "candidate_profile_read",
     "candidate_index_read_sourcing",
     "candidate_index_revalidate_sourcing",
     "candidate_index_public_applicants",
@@ -313,7 +322,225 @@ _FENCE_ANCHORS: dict[str, tuple[str, ...]] = {
 
 
 def _validate_fence_anchor(reference: Reference, row: dict[str, Any]) -> None:
+    if reference.key in {
+        "activekg/api/global_memory.py::validate_network_publications",
+        "activekg/api/global_memory.py::network_owner_status",
+    }:
+        source = _reference_source(reference)
+        anchors = (
+            (
+                "network_publication_enabled()",
+                "tenant_required",
+                "public.candidate_network_validate(%s::uuid[])",
+            )
+            if reference.key.endswith("::validate_network_publications")
+            else (
+                "require_owner(claims)",
+                "network_publication_enabled()",
+                "public.candidate_network_owner_status_detail(%s,%s)",
+            )
+        )
+        if any(anchor not in source for anchor in anchors):
+            raise GuardError(f"candidate network enforcement anchor missing: {reference.key}")
+        return
     source = _reference_source(reference)
+    if row["test_id"] == "privacy-candidate-consent-v2":
+        anchors = (
+            'require_authority(claims, "candidate-consent:write")',
+            'request.headers.getlist("x-command-sha256") != [parsed["hash"]]',
+            'subject != parsed["value"]["subjectId"]',
+            "run_in_threadpool(project, parsed)",
+        )
+        compact = "".join(source.split())
+        if reference.key != "activekg/candidate_profiles/consent_v2.py::receive" or any(
+            "".join(anchor.split()) not in compact for anchor in anchors
+        ):
+            raise GuardError("candidate consent v2 authority fence missing")
+        if max(compact.index("".join(a.split())) for a in anchors[:3]) > compact.index(
+            "".join(anchors[3].split())
+        ):
+            raise GuardError("candidate consent v2 authority fence moved after persistence")
+        return
+    if row["test_id"] == "privacy-candidate-profile-owner":
+        required = {
+            "activekg/api/candidate_profiles.py::preview_exclusions": (
+                "require_owner(claims, write=True)",
+                "UUID.fullmatch(binding[0])",
+                'request.headers.getlist("x-command-sha256")',
+                "hashlib.sha256(body).hexdigest()",
+                "run_in_threadpool(",
+                "preview_interpretation_exclusions,",
+            ),
+            "activekg/candidate_profiles/source_repository.py::preview_interpretation_exclusions": (
+                "candidate_owned_status(",
+                "candidate_exclusion_preview(",
+                'parse_exclusion_api(raw, "exclusion_preview_request")',
+            ),
+            "activekg/api/candidate_profiles.py::receive_interpretation": (
+                "require_owner(claims, write=True)",
+                "parse_interpretation_transfer(bytes(body))",
+                'parsed["hash"] != headers["x-command-sha256"]',
+                "run_in_threadpool(",
+                "interpretation_storage,",
+            ),
+            "activekg/api/candidate_profiles.py::read_interpretation": (
+                "require_owner(claims)",
+                "UUID.fullmatch(params[0][1])",
+                "run_in_threadpool(",
+                "interpretation_storage,",
+            ),
+            "activekg/candidate_profiles/source_repository.py::interpretation_storage": (
+                "candidate_owned_status(",
+                "candidate_profile_interpretation_receive(",
+                "candidate_profile_interpretation_read(",
+                "validate_interpretation_receipt(",
+            ),
+            "activekg/api/candidate_profiles.py::erase_profile": (
+                'require_authority(claims, "candidate-profile:erase")',
+                'value["subjectId"] != subject',
+                "canonical(value).encode() != bytes(body)",
+                'run_in_threadpool(erase_owned_profile, subject, value["bindingId"], value["requestId"])',
+            ),
+            "activekg/api/candidate_profiles.py::read_source_proposal": (
+                "require_owner(claims)",
+                "UUID.fullmatch(params[0][1])",
+                "run_in_threadpool(read_source,",
+            ),
+            "activekg/candidate_profiles/source_repository.py::read_source": (
+                "candidate_owned_status(",
+                "candidate_profile_source_read(",
+                'proposal(row["result"])',
+            ),
+            "activekg/api/candidate_profiles.py::receive_resume_source": (
+                'return await _receive_source(request, claims, "resume")',
+            ),
+            "activekg/api/candidate_profiles.py::receive_lookup_source": (
+                'return await _receive_source(request, claims, "professional_lookup")',
+            ),
+            "activekg/candidate_profiles/source_repository.py::receive_source": (
+                "candidate_owned_status(",
+                "candidate_profile_source_receive(",
+                'validate_source_receipt(value, row["result"], kind)',
+            ),
+            "activekg/api/candidate_profiles.py::expire_spark": (
+                "require_owner(claims, write=True)",
+                "parse_expiry(bytes(body))",
+                "run_in_threadpool(execute_spark,",
+                "expiry=True",
+            ),
+            "activekg/api/candidate_profiles.py::save_spark": (
+                "require_owner(claims, write=True)",
+                "parse_spark_command(bytes(body))",
+                "run_in_threadpool(execute_spark,",
+            ),
+            "activekg/api/candidate_profiles.py::read_spark": (
+                "require_owner(claims)",
+                "UUID.fullmatch(params[0][1])",
+                "run_in_threadpool(execute_spark,",
+            ),
+            "activekg/api/candidate_profiles.py::save_profile": (
+                "require_owner(claims, write=True)",
+                "parse_profile_command(bytes(body))",
+                "run_in_threadpool(execute_profile,",
+            ),
+            "activekg/api/candidate_profiles.py::read_profile": (
+                "require_owner(claims)",
+                "UUID.fullmatch(params[0][1])",
+                "run_in_threadpool(execute_profile,",
+            ),
+            "activekg/candidate_profiles/profile_authority.py::check_owner_privacy": (
+                "candidate_consent_state",
+                "candidate_privacy_global_decision(",
+                'decision == "block_all"',
+                'decision not in ("allow", "block_global")',
+            ),
+            "activekg/candidate_profiles/profile_repository.py::execute_profile": (
+                "candidate_owned_status(",
+                "candidate_profile_apply(",
+                "candidate_profile_read(",
+                "checked_receipt(result, subject, binding, command_id, digest)",
+            ),
+        }.get(reference.key)
+        # Formatting may wrap an awaited call immediately after its opening
+        # parenthesis. Compare these exact anchors without layout whitespace;
+        # neither a missing call nor a changed argument becomes acceptable.
+        compact_source = "".join(source.split())
+        if required is None or any(
+            "".join(token.split()) not in compact_source for token in required
+        ):
+            raise GuardError("candidate profile owner authority changed")
+        if reference.symbol in ("receive_resume_source", "receive_lookup_source"):
+            module = (ROOT / reference.file).read_text()
+            helper = next(
+                n
+                for n in ast.parse(module).body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "_receive_source"
+            )
+            compact_helper = "".join(ast.get_source_segment(module, helper).split())
+            for anchor in (
+                "require_owner(claims, write=True)",
+                "parse_resume_transfer(bytes(body), kind)",
+                '"x-command-sha256"',
+                "run_in_threadpool(receive_source,",
+                'headers["x-candidate-binding-id"]',
+                'headers["x-candidate-command-id"]',
+            ):
+                if "".join(anchor.split()) not in compact_helper:
+                    raise GuardError("candidate source receiver authority changed")
+        if reference.symbol in (
+            "receive_source",
+            "read_source",
+            "interpretation_storage",
+            "preview_interpretation_exclusions",
+        ):
+            fence = "check_owner_privacy(cur, subject)"
+            call = (
+                "SELECT candidate_profile_source_receive("
+                if reference.symbol == "receive_source"
+                else "SELECT candidate_profile_interpretation_read("
+                if reference.symbol == "interpretation_storage"
+                else "SELECT candidate_exclusion_preview("
+                if reference.symbol == "preview_interpretation_exclusions"
+                else "SELECT candidate_profile_source_read("
+            )
+            if (
+                source.count(fence) != 2
+                or source.index(fence) > source.index(call)
+                or source.rindex(fence) < source.index(call)
+            ):
+                raise GuardError("candidate source privacy must fence dispatch and response")
+        if reference.symbol == "execute_profile":
+            fence = "check_owner_privacy(cur, subject)"
+            if (
+                source.count(fence) != 2
+                or source.index(fence) > source.index("SELECT candidate_profile_read(")
+                or source.rindex(fence) < source.index("SELECT candidate_profile_apply(")
+            ):
+                raise GuardError("candidate profile privacy must fence both dispatch and response")
+        return
+    if row["test_id"] == "privacy-candidate-foundation":
+        required = {
+            "activekg/api/candidate_profiles.py::ensure": (
+                "require_authority(",
+                "parse_command(",
+                "run_in_threadpool(execute,",
+            ),
+            "activekg/api/candidate_profiles.py::status": (
+                "require_authority(",
+                "UUID.fullmatch(",
+                "run_in_threadpool(execute,",
+            ),
+            "activekg/candidate_profiles/repository.py::_privacy": (
+                "candidate_consent_state",
+                "candidate_privacy_global_decision(",
+                'HTTPException(451, "privacy_restricted")',
+            ),
+        }.get(reference.key)
+        if required is None or any(
+            "".join(token.split()) not in "".join(source.split()) for token in required
+        ):
+            raise GuardError("foundation privacy authority changed")
+        return
     if row["test_id"] == "privacy-rc-cache":
         spec = importlib.util.spec_from_file_location(
             "rc_guard", ROOT / "scripts/rc_skills_guard.py"

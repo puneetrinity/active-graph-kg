@@ -156,7 +156,25 @@ def check(root: Path) -> list[str]:
         "railway.schema-release.json",
         "scripts/README.md",
         "scripts/candidate_index_guard.py",  # Static source inspection only; not a release caller.
+        "scripts/candidate_network_guard.py",  # Static source inspection only; not a release caller.
+        "scripts/rehearse_spark_browser.py",  # Explicit local disposable rehearsal only.
+        "scripts/rehearse_spark_restore.py",  # B5 restore rehearsal: same local-only boundary.
     }
+    for rehearsal_path in (
+        "scripts/rehearse_spark_browser.py",
+        "scripts/rehearse_spark_restore.py",
+    ):
+        rehearsal = (root / rehearsal_path).read_text(encoding="utf-8")
+        for anchor in (
+            'os.environ.get("S2_BROWSER_DISPOSABLE") != "1"',
+            'parsed.hostname != "127.0.0.1"',
+            'parsed.path.startswith("/s2_memory_")',
+            'parsed.path.endswith("_test")',
+            '"spark_browser_" + suffix + "_test"',
+            '"rehearsal_external_network_refused"',
+        ):
+            if anchor not in rehearsal:
+                findings.append(f"{rehearsal_path} lost disposable/local-only boundary: " + anchor)
     for path in root.rglob("*"):
         if not path.is_file() or any(
             part in {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache"} for part in path.parts
