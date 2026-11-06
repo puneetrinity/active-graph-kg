@@ -79,7 +79,8 @@ def launch_input(env):
     require(re.fullmatch(UUID, run_id))
     require(env.get("SPARK_FIRST_LAUNCH_CONFIRM") == "never_activated_no_restore")
     require(env.get("SPARK_RECOVERY_RESTORED", "none") == "none")
-    require(re.fullmatch(UUID, env.get("FLOW_SCHEMA_TARGET_ID", "")))
+    # Flow owns an opaque text identity, not a UUID. Never normalize it before comparison.
+    require(re.fullmatch(r"[\x21-\x7e]{1,256}", env.get("FLOW_SCHEMA_TARGET_ID", "")))
     return epoch, run_id
 
 

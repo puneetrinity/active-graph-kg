@@ -10,7 +10,7 @@ def env():
     return {
         "CANDIDATE_NETWORK_RECOVERY_EPOCH": "first_launch_test_20261106",
         "SPARK_RECOVERY_RUN_ID": "12345678-1234-1234-1234-123456789abc",
-        "FLOW_SCHEMA_TARGET_ID": "22345678-1234-1234-1234-123456789abc",
+        "FLOW_SCHEMA_TARGET_ID": "a1" * 24,
         "SPARK_FIRST_LAUNCH_CONFIRM": "never_activated_no_restore",
     }
 
@@ -23,6 +23,9 @@ def test_requires_explicit_first_launch_not_restore():
         ("SPARK_RECOVERY_RUN_ID", "bad"),
         ("CANDIDATE_NETWORK_RECOVERY_EPOCH", "short"),
         ("FLOW_SCHEMA_TARGET_ID", ""),
+        ("FLOW_SCHEMA_TARGET_ID", " a1"),
+        ("FLOW_SCHEMA_TARGET_ID", "a1\n"),
+        ("FLOW_SCHEMA_TARGET_ID", "a" * 257),
     ):
         with pytest.raises(ValueError):
             launch.launch_input({**env(), key: value})
