@@ -196,6 +196,7 @@ jobs:
             tests/test_rc_skills_api.py \
             tests/test_rc_skills_guard.py \
             tests/test_spark_private_job.py \
+            tests/test_spark_first_launch.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 

@@ -24,7 +24,7 @@ from activekg.common.schema_control import (  # noqa: E402
 COPY_HASH = "bb133dc6ab8120ad2e866bacec8253eb163415a7d215a80d6fc447c1ea23ac5e"
 PROJECT = "5042caf8-8879-40ab-bb52-aa9f8af8e508"
 ENVIRONMENT = "c3b75445-d0de-49fa-a533-b4b9a20b5f5d"
-MODES = {"readback", "consent-register", "recovery"}
+MODES = {"readback", "consent-register", "recovery", "first-launch"}
 UUID = r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
 
 
@@ -175,7 +175,14 @@ def main():
         mode = sys.argv[1]
         settings = preflight(mode, os.environ)
         config = resolve_control_environment()
-        if mode == "recovery":
+        if mode == "first-launch":
+            from scripts.spark_first_launch import first_launch, flow_connection, launch_input
+
+            launch_input(os.environ)
+            with flow_connection(os.environ) as flow, psycopg.connect(**settings) as memory:
+                first_launch(memory, flow, config, os.environ)
+            print("SPARK_PRIVATE_FIRST_LAUNCH PASS flow=0 memory=0")
+        elif mode == "recovery":
             # Helper image alone contains the pinned Flow source; no download/exec from the network.
             result = subprocess.run(
                 ["node", "--import", "tsx", "scripts/spark-private-recovery.ts"],
