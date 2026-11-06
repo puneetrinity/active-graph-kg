@@ -34,7 +34,7 @@ def estate():
                 )
             )
     dsns = [{**fields, "dbname": name} for name in names]
-    target = str(uuid.uuid4())
+    target = uuid.uuid4().hex + uuid.uuid4().hex[:16]  # Production Flow uses 48 hex chars.
     for index, (dsn, tables) in enumerate(
         zip(dsns, [launch.MEMORY_TABLES, launch.FLOW_TABLES], strict=True)
     ):
