@@ -29,7 +29,7 @@ jobs:
         with:
           repository: puneetrinity/improved-tribble
           ref: ${{ vars.SPARK_SOURCE_FLOW_REF }}
-          token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+          token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
           path: spark-flow-proof
           persist-credentials: false
       - uses: actions/setup-node@v4
