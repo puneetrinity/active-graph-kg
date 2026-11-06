@@ -39,13 +39,33 @@ SELECT md5(jsonb_build_object(
 
 
 def catalog_evidence(cur, role=None):
-    cur.execute(CATALOG_SQL, (role,))
+    # The additive native-identity trigger is pinned independently by 042's
+    # catalogue. Preserve the exact historical foundation fingerprint.
+    cur.execute(
+        CATALOG_SQL.replace(
+            "WHERE NOT t.tgisinternal AND",
+            "WHERE NOT t.tgisinternal AND t.tgname<>'candidate_network_anchor_created' AND",
+        ),
+        (role,),
+    )
     return tuple(cur.fetchone())
 
 
 def catalog_ready(cur, role=None):
     digest, permissions = catalog_evidence(cur, role)
-    return digest == CATALOG_MD5 and permissions is True
+    if digest != CATALOG_MD5 or permissions is not True:
+        return False
+    # Tuple cursors are used by the startup/provisioning catalogue checks.
+    cur.execute(
+        "SELECT EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass('public.candidate_network_subjects'))"
+    )
+    row = cur.fetchone()
+    present = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+    if present:
+        from activekg.candidate_profiles.publication import network_catalog_ready
+
+        return network_catalog_ready(cur, role)
+    return True
 
 
 def _connect() -> psycopg.Connection:

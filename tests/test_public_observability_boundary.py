@@ -49,7 +49,7 @@ def test_control_plane_verifier_fails_closed_and_compares_exact_bearer() -> None
 def test_route_registration_count_and_public_retirement_contract() -> None:
     routes = [route for route in main.app.routes if isinstance(route, APIRoute)]
     registrations = {(method, route.path) for route in routes for method in route.methods}
-    assert len(routes) == 90
+    assert len(routes) == 104
     assert {
         ("GET", "/openapi.json"),
         ("GET", "/docs"),
@@ -166,7 +166,7 @@ def test_authenticated_no_cache_directive_forces_a_fresh_readiness_snapshot() ->
     assert coordinator.force_refresh is True
 
 
-def test_readiness_is_single_flight_and_uses_at_most_twelve_catalog_statements() -> None:
+def test_readiness_is_single_flight_and_uses_at_most_seventeen_catalog_statements() -> None:
     from activekg.candidate_history import repository as history_repository
     from activekg.candidate_history.contracts import OWNER_FUNCTIONS as HISTORY_OWNER
     from activekg.candidate_history.contracts import RUNTIME_FUNCTIONS as HISTORY_RUNTIME
@@ -204,6 +204,21 @@ def test_readiness_is_single_flight_and_uses_at_most_twelve_catalog_statements()
             self.statements.append(self.last)
 
         def fetchone(self):
+            if (
+                self.last.startswith("WITH chosen AS")
+                and "starts_with(c.relname,'candidate_network_')" in self.last
+            ):
+                from activekg.candidate_profiles.publication import NETWORK_CATALOG_MD5
+
+                return NETWORK_CATALOG_MD5, True
+            if self.last == "SELECT to_regclass('public.candidate_network_subjects')":
+                return ("candidate_network_subjects",)
+            if self.last.startswith("SELECT EXISTS") and "candidate_network_subjects" in self.last:
+                return (True,)
+            if self.last.startswith("WITH chosen AS") and "candidate_profile_heads" in self.last:
+                from activekg.candidate_profiles.profile_repository import PROFILE_CATALOG_MD5
+
+                return PROFILE_CATALOG_MD5, True
             if self.last.startswith("WITH chosen AS") and "candidate_owned_subjects" in self.last:
                 from activekg.candidate_profiles.repository import CATALOG_MD5
 
@@ -569,8 +584,8 @@ def test_readiness_is_single_flight_and_uses_at_most_twelve_catalog_statements()
         )
     assert result == ReadinessResult(True)
     assert FakeRepository.pool.timeout == 0.25
-    assert len(cursor.statements) == 12
-    assert sum(statement.startswith("WITH chosen AS") for statement in cursor.statements) == 3
+    assert len(cursor.statements) == 17
+    assert sum(statement.startswith("WITH chosen AS") for statement in cursor.statements) == 6
     assert cursor.statements.count("SELECT public.candidate_index_key_versions()") == 1
     assert not any("from candidates" in statement.lower() for statement in cursor.statements)
 

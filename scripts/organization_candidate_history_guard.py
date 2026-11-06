@@ -29,6 +29,7 @@ class GuardError(RuntimeError):
 def validate_sources(sources: dict[str, str]) -> None:
     workflow = sources[".github/workflows/ci.yml"]
     caps = {
+        "spark-source-parity": 15,
         "fast-unit-tests": 20,
         "unit-tests": 40,
         "deploy-path-db": 60,
@@ -45,7 +46,7 @@ def validate_sources(sources: dict[str, str]) -> None:
             raise GuardError("history_ci_job_timeout")
     migration = sources[MIGRATION]
     manifest = json.loads(sources["scripts/schema_control_callers.json"])
-    if manifest["migration_manifest"][-12:] != [
+    if manifest["migration_manifest"][-17:] != [
         Path(MIGRATION).name,
         "030_rc_skill_observations.sql",
         "031_rc_clock_tolerance.sql",
@@ -58,6 +59,11 @@ def validate_sources(sources: dict[str, str]) -> None:
         "038_resume_recovery_embed_refusals.sql",
         "039_index_policy_mismatch_settle.sql",
         "040_candidate_owned_foundation.sql",
+        "041_candidate_profile_drafts.sql",
+        "042_candidate_network_publication.sql",
+        "043_candidate_network_owner_status.sql",
+        "044_candidate_network_result_dedup.sql",
+        "045_candidate_network_recovery.sql",
     ]:
         raise GuardError("history_ledger_tail")
     if (

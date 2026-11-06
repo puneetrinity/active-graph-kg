@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -156,6 +157,11 @@ def _copy_shipped_024(tmp_path: Path, name: str = "shipped-024") -> Path:
         .replace('    "038_resume_recovery_embed_refusals.sql",\n', "")
         .replace('    "039_index_policy_mismatch_settle.sql",\n', "")
         .replace('    "040_candidate_owned_foundation.sql",\n', "")
+        .replace('    "041_candidate_profile_drafts.sql",\n', "")
+        .replace('    "042_candidate_network_publication.sql",\n', "")
+        .replace('    "043_candidate_network_owner_status.sql",\n', "")
+        .replace('    "044_candidate_network_result_dedup.sql",\n', "")
+        .replace('    "045_candidate_network_recovery.sql",\n', "")
         .replace(f"len(MIGRATIONS) != {len(MIGRATIONS)}", "len(MIGRATIONS) != 24")
         .replace(
             f"contain {len(MIGRATIONS)} unique ordered entries", "contain 24 unique ordered entries"
@@ -203,6 +209,84 @@ def test_disposable_identity_is_genuinely_local_and_allowlisted() -> None:
             cur.execute("UPDATE activekg_schema_control.target_identity SET environment='staging'")
         with pytest.raises(psycopg.Error):
             cur.execute("DELETE FROM activekg_schema_control.release_attempts")
+
+
+@pytest.mark.parametrize("upgrade", [False, True], ids=["fresh-041", "040-to-041"])
+def test_spark_full_release_and_runtime_authority(tmp_path: Path, upgrade: bool) -> None:
+    from activekg.candidate_profiles.profile_repository import profile_catalog_ready
+
+    name = "spark_release_" + uuid4().hex[:10] + "_test"
+    with _maintenance() as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
+    dsn = _dsn(name)
+    before = []
+    if upgrade:
+        # Real historical SQL bytes, with only 041 absent from the release list.
+        copied = tmp_path / "pre-041"
+        shutil.copytree(
+            ROOT,
+            copied,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
+        )
+        manifest = copied / "activekg/common/migration_manifest.py"
+        manifest.write_text(
+            manifest.read_text()
+            .replace('    "041_candidate_profile_drafts.sql",\n', "")
+            .replace('    "042_candidate_network_publication.sql",\n', "")
+            .replace('    "043_candidate_network_owner_status.sql",\n', "")
+            .replace('    "044_candidate_network_result_dedup.sql",\n', "")
+            .replace('    "045_candidate_network_recovery.sql",\n', "")
+            .replace("!= 45", "!= 40")
+            .replace("contain 45", "contain 40")
+        )
+        first = _run(
+            copied / "scripts/init_railway_db.py",
+            dsn,
+            ACTIVEKG_MIGRATION_APPLY="1",
+            ACTIVEKG_SCHEMA_FRESH_INIT="1",
+            ACTIVEKG_RUNTIME_PASSWORD=_runtime_password(),
+        )
+        assert first.returncode == 0, first.stdout + first.stderr
+        with psycopg.connect(dsn) as conn:
+            before = conn.execute(
+                "SELECT filename,checksum FROM schema_migrations ORDER BY filename"
+            ).fetchall()
+            assert len(before) == 40
+        options = {}
+    else:
+        options = {
+            "ACTIVEKG_SCHEMA_FRESH_INIT": "1",
+            "ACTIVEKG_RUNTIME_PASSWORD": _runtime_password(),
+        }
+    result = _run(ROOT / "scripts/init_railway_db.py", dsn, ACTIVEKG_MIGRATION_APPLY="1", **options)
+    assert result.returncode == 0, result.stdout + result.stderr
+    replay = _run(ROOT / "scripts/init_railway_db.py", dsn, ACTIVEKG_MIGRATION_APPLY="1")
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT filename,checksum FROM schema_migrations ORDER BY filename")
+        after = cur.fetchall()
+        assert len(after) == 45 and set(before).issubset(set(after))
+        assert profile_catalog_ready(cur, "activekg_app")
+    with psycopg.connect(_runtime_dsn(name), autocommit=True) as runtime:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            runtime.execute("SELECT * FROM candidate_profile_heads")
+        with pytest.raises(psycopg.errors.NoDataFound):
+            runtime.execute("SELECT candidate_profile_v3_storage_read(%s,%s)", (uuid4(), uuid4()))
+        for table in (
+            "candidate_profile_sources",
+            "candidate_profile_proposals",
+            "candidate_profile_source_receipts",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                runtime.execute(sql.SQL("SELECT * FROM {}").format(sql.Identifier(table)))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            runtime.execute("SELECT candidate_profile_source_fact_valid('{}'::jsonb)")
+        assert runtime.execute(
+            "SELECT has_function_privilege(current_user,'candidate_profile_source_receive(uuid,uuid,uuid,text,text)','EXECUTE')"
+        ).fetchone()[0]
+        with pytest.raises(psycopg.errors.NoDataFound):
+            runtime.execute("SELECT candidate_profile_read(%s,%s)", (uuid4(), uuid4()))
+    print("Retained full-schema rehearsal database:", name)
 
 
 def test_existing_target_adoption_is_control_only_and_second_run_refuses() -> None:

@@ -24,7 +24,7 @@ FROZEN = {
     "activekg/api/organization_candidates.py": "8ef7a2c921f5f7560c04448b879ca22dacdac93c5e5625669e118a5e7fc2e351",
     "activekg/api/sourced_candidates.py": "a92e74593fec522eab6800b4854327eaf27db6b9b88b096a1d565f80807bdd0d",
     "activekg/connectors/extract.py": "329f37393b21f9d241f71300c10575e7eb36adfd4d05ea245382a918ab0676a9",
-    "activekg/embedding/global_candidates.py": "e81ce5747609c45dca980a184d83d81fe90308a25776561a356df014f651fbaf",
+    "activekg/embedding/global_candidates.py": "edcccd1079db4852126c2b7a124f1a4cfeeb70eb6a7069c5f3a6ab6962a6c6e1",
     "activekg/embedding/queue.py": "936836ad21fcb6597014f7f2903a380ca2ffae259f1f870427c680c1c1301401",
     "activekg/engine/embedding_provider.py": "cd8f6320aed622585b9084d18e07e3ef71e751b09b9fecddc7e79171b65bdfc5",
     "activekg/engine/llm_provider.py": "81ca5704eb535b170c9d57288fe1649820f79d944f977cbf9d3e846914c8a4c7",
@@ -82,7 +82,7 @@ MIXED = {
     ),
     "activekg/api/global_memory.py": (
         "sync_applicant_to_global_memory",
-        "d6642af19283af7617fa1097a4b26fba80e47ced6c16f94502130df88246fcff",
+        "b13e7fa8f39d77cb755ce36cc7cf7c37c056f9ea395ad45ad37596c51582c423",
     ),
 }
 AUTHORITIES = (
@@ -921,7 +921,7 @@ def validate(root: Path = ROOT) -> None:
             raise GuardError("index_engine_network_or_output")
     caller = json.loads(read(root, "scripts/schema_control_callers.json"))
     if (
-        caller["migration_manifest"][-13:]
+        caller["migration_manifest"][-18:]
         != [
             Path(MIGRATION).name,
             "029_organization_candidate_history.sql",
@@ -936,8 +936,13 @@ def validate(root: Path = ROOT) -> None:
             "038_resume_recovery_embed_refusals.sql",
             "039_index_policy_mismatch_settle.sql",
             "040_candidate_owned_foundation.sql",
+            "041_candidate_profile_drafts.sql",
+            "042_candidate_network_publication.sql",
+            "043_candidate_network_owner_status.sql",
+            "044_candidate_network_result_dedup.sql",
+            "045_candidate_network_recovery.sql",
         ]
-        or len(caller["migration_manifest"]) != 40
+        or len(caller["migration_manifest"]) != 45
         or hashlib.sha256(
             json.dumps(caller["migration_manifest"][:28], separators=(",", ":")).encode()
         ).hexdigest()

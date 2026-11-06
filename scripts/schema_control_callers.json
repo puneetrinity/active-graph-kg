@@ -45,7 +45,12 @@
     "037_sourcing_public_applicant_check.sql",
     "038_resume_recovery_embed_refusals.sql",
     "039_index_policy_mismatch_settle.sql",
-    "040_candidate_owned_foundation.sql"
+    "040_candidate_owned_foundation.sql",
+    "041_candidate_profile_drafts.sql",
+    "042_candidate_network_publication.sql",
+    "043_candidate_network_owner_status.sql",
+    "044_candidate_network_result_dedup.sql",
+    "045_candidate_network_recovery.sql"
   ],
   "migration_files": {
     "001_add_embedding_history_index.sql": "f109a2eb8da22cbcd1efdbadb5d9fa3a166784740bfe48f7e5c85805fc1556fa",
@@ -87,8 +92,13 @@
     "038_resume_recovery_embed_refusals.sql": "78a2402974d8a9b654e4352c89395afe9b591f0d8bcbba8e1ff885b4bece73fa",
     "039_index_policy_mismatch_settle.sql": "1259d48819cf2a75a4a81b5128abe881699280d77a68376c0aa9d6a87b51af98",
     "040_candidate_owned_foundation.sql": "1f7a0e153823e2ab1bd713d8e42fd342364c4860b40fa5317892eb04f82496ed",
+    "041_candidate_profile_drafts.sql": "decc1bfdd83f4eefed5b65f82e8cec87e6d0a07457a2fbf0f54f0e4fa10f4e59",
+    "042_candidate_network_publication.sql": "de48ca7c9bc4e4cbd65b97d4c4e7737f1347fbdc95c19db54ad326cc64b37991",
+    "043_candidate_network_owner_status.sql": "4edbc87e94ec711ca5b3dca5c34337dca2303ae327693596816816152e830230",
+    "044_candidate_network_result_dedup.sql": "1004fc64070be2b47aadc822122b26e7586e2ae9957a714d6b4a403ca5f0a891",
     "add_text_search.sql": "52570186696d15cbbd6a12bf7ef6bc01fe9fe3a64c8b474d6ce7bdf1caabdac4",
-    "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad"
+    "rollback_text_search.sql": "86719635b6823b0da12c5e3c05e75295522e54f6bd0791c75d8f05b76a4c9bad",
+    "045_candidate_network_recovery.sql": "0318259ff84b63773752704797f0b5789813f60b3c7ea6b79dc708f67b30eda9"
   },
   "checksum_transitions": {
     "016_candidate_rls.sql": {
@@ -96,11 +106,26 @@
     }
   },
   "runtime_callers": {
-    "api": ["Dockerfile", "Procfile", "railway.json", "scripts/start_railway.sh"],
-    "embedding_worker": ["activekg/embedding/worker.py", "railway.worker.json"],
-    "extraction_worker": ["activekg/extraction/worker.py"],
-    "release": ["railway.schema-release.json", "scripts/init_railway_db.py"],
-    "adoption": ["scripts/adopt_schema_control.py"]
+    "api": [
+      "Dockerfile",
+      "Procfile",
+      "railway.json",
+      "scripts/start_railway.sh"
+    ],
+    "embedding_worker": [
+      "activekg/embedding/worker.py",
+      "railway.worker.json"
+    ],
+    "extraction_worker": [
+      "activekg/extraction/worker.py"
+    ],
+    "release": [
+      "railway.schema-release.json",
+      "scripts/init_railway_db.py"
+    ],
+    "adoption": [
+      "scripts/adopt_schema_control.py"
+    ]
   },
   "external_callers": {
     "extraction_worker_dashboard_start_command": "python -m activekg.extraction.worker"
