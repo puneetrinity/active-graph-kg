@@ -440,7 +440,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
@@ -1013,7 +1041,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
@@ -1187,7 +1243,35 @@ jobs:
 
       - name: Start runner-local PostgreSQL 16 with pgvector
         run: |
-          sudo systemctl start postgresql
+          # Runner images now ship a newer local PostgreSQL. Install and start exactly 16 on 5432
+          # (isolated Ubuntu/PGDG apt sources, as in Memory CI); the version check below still fails closed.
+          sudo systemctl stop postgresql || true
+          if [ ! -x /usr/lib/postgresql/16/bin/postgres ] || [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
+            pg_apt_sources="$(mktemp -d)"; chmod 755 "$pg_apt_sources"
+            cp /etc/apt/sources.list.d/ubuntu.sources "$pg_apt_sources/ubuntu.sources"
+            for pg_source in /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.sources; do
+              if [ -f "$pg_source" ]; then cp "$pg_source" "$pg_apt_sources/"; fi
+            done
+            pg_apt_options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$pg_apt_sources"
+              -o "Acquire::Retries=3" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30" -o "APT::Update::Error-Mode=any")
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-common
+            if [ ! -f "$pg_apt_sources/pgdg.list" ] && [ ! -f "$pg_apt_sources/pgdg.sources" ]; then
+              . /etc/os-release
+              pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+              [ -r "$pg_keyring" ] || pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              test -r "$pg_keyring"
+              printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+                "$pg_keyring" "${VERSION_CODENAME:?}" > "$pg_apt_sources/pgdg.list"
+            fi
+            sudo apt-get "${pg_apt_options[@]}" update
+            sudo apt-get "${pg_apt_options[@]}" install -y postgresql-16 postgresql-16-pgvector
+          fi
+          while read -r version cluster _; do sudo pg_ctlcluster "$version" "$cluster" stop || true; done < <(pg_lsclusters --no-header)
+          if pg_lsclusters --no-header | awk '$1 == "16" && $2 == "main" { found=1 } END { exit !found }'; then
+            sudo pg_dropcluster --stop 16 main
+          fi
+          sudo pg_createcluster -p 5432 16 main --start
           server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
           if [[ "$server_version_num" != 16* ]]; then
             echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2

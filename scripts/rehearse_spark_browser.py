@@ -41,8 +41,16 @@ def main():
     owner, runtime = "s2_owner_" + suffix + "_test", "s2_runtime_" + suffix + "_test"
     name = "spark_browser_" + suffix + "_test"
     with psycopg.connect(make_conninfo(template, dbname="postgres"), autocommit=True) as conn:
-        conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE").format(sql.Identifier(owner)))
-        conn.execute(sql.SQL("GRANT activekg_network_worker TO {} WITH ADMIN OPTION").format(sql.Identifier(owner)))
+        conn.execute(
+            sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE").format(
+                sql.Identifier(owner)
+            )
+        )
+        conn.execute(
+            sql.SQL("GRANT activekg_network_worker TO {} WITH ADMIN OPTION").format(
+                sql.Identifier(owner)
+            )
+        )
         conn.execute(
             sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE template0 ENCODING 'UTF8'").format(
                 sql.Identifier(name), sql.Identifier(owner)
@@ -51,13 +59,25 @@ def main():
     with psycopg.connect(make_conninfo(template, dbname=name), autocommit=True) as conn:
         conn.execute("CREATE EXTENSION vector")
         conn.execute("CREATE EXTENSION pgcrypto")
-    migration_env = {**os.environ, "ACTIVEKG_MIGRATE_DSN": make_conninfo(template, user=owner, dbname=name),
-        "ACTIVEKG_MIGRATION_APPLY": "1", "ACTIVEKG_SCHEMA_TARGET_ID": str(uuid4()),
-        "ACTIVEKG_SCHEMA_ENVIRONMENT": "development", "ACTIVEKG_SCHEMA_SOURCE_COMMIT": "0" * 40,
-        "ACTIVEKG_SCHEMA_FRESH_INIT": "1", "ACTIVEKG_RUNTIME_ROLE": runtime,
-        "ACTIVEKG_RUNTIME_PASSWORD": "synthetic-local-only", "ACTIVEKG_NETWORK_WORKER_PASSWORD": "synthetic-worker-only"}
-    release = subprocess.run([sys.executable, "scripts/init_railway_db.py"], env=migration_env,
-        capture_output=True, text=True, timeout=120)
+    migration_env = {
+        **os.environ,
+        "ACTIVEKG_MIGRATE_DSN": make_conninfo(template, user=owner, dbname=name),
+        "ACTIVEKG_MIGRATION_APPLY": "1",
+        "ACTIVEKG_SCHEMA_TARGET_ID": str(uuid4()),
+        "ACTIVEKG_SCHEMA_ENVIRONMENT": "development",
+        "ACTIVEKG_SCHEMA_SOURCE_COMMIT": "0" * 40,
+        "ACTIVEKG_SCHEMA_FRESH_INIT": "1",
+        "ACTIVEKG_RUNTIME_ROLE": runtime,
+        "ACTIVEKG_RUNTIME_PASSWORD": "synthetic-local-only",
+        "ACTIVEKG_NETWORK_WORKER_PASSWORD": "synthetic-worker-only",
+    }
+    release = subprocess.run(
+        [sys.executable, "scripts/init_railway_db.py"],
+        env=migration_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     if release.returncode:
         raise RuntimeError("local_release_failed: " + release.stdout + release.stderr)
     with psycopg.connect(make_conninfo(template, dbname=name)) as conn:
