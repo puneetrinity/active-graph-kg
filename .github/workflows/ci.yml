@@ -195,6 +195,7 @@ jobs:
             tests/test_rc_skills.py \
             tests/test_rc_skills_api.py \
             tests/test_rc_skills_guard.py \
+            tests/test_spark_private_job.py \
             -v --tb=short --timeout=30
         continue-on-error: false
 
@@ -974,6 +975,19 @@ jobs:
           SPARK_DISPOSABLE: '1'
           SPARK_NETWORK_TEST_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
         run: pytest tests/test_candidate_network_publication_postgres.py -v --tb=short --timeout=180
+
+      - name: Spark private owner job against the released schema
+        env:
+          ACTIVEKG_MIGRATE_DSN: postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test
+          ACTIVEKG_MIGRATION_APPLY: "1"
+          ACTIVEKG_RUNTIME_ROLE: activekg_app
+          ACTIVEKG_RUNTIME_PASSWORD: activekg_app_ci
+          ACTIVEKG_NETWORK_WORKER_PASSWORD: network-worker-ci-only
+        run: |
+          # Provision the restricted network-worker login exactly as the release does, then probe it.
+          python scripts/init_railway_db.py
+          SPARK_PRIVATE_JOB_TEST_DSN=postgresql://activekg_schema_control_test:owner-test-only@127.0.0.1:5432/memory_schema_control_test \
+            pytest tests/test_spark_private_job_postgres.py -v --tb=short --timeout=120
 
       # Repository/endpoint logic tests run as the owner role: they exercise
       # merge/resolve logic, not isolation — isolation is proven above by the
