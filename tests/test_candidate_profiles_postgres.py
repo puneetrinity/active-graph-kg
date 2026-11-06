@@ -221,11 +221,21 @@ def test_full_release_path_and_foundation_receiver(tmp_path, upgrade):
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
         manifest = previous / "activekg/common/migration_manifest.py"
+        # Upgrade from production's current ledger (039): the S1 foundation and Spark tail are new.
+        text = manifest.read_text()
+        for tail in (
+            "040_candidate_owned_foundation.sql",
+            "041_candidate_profile_drafts.sql",
+            "042_candidate_network_publication.sql",
+            "043_candidate_network_owner_status.sql",
+            "044_candidate_network_result_dedup.sql",
+            "045_candidate_network_recovery.sql",
+        ):
+            text = text.replace(f'    "{tail}",\n', "")
         manifest.write_text(
-            manifest.read_text()
-            .replace('    "040_candidate_owned_foundation.sql",\n', "")
-            .replace("len(MIGRATIONS) != 40", "len(MIGRATIONS) != 39")
-            .replace("contain 40 unique ordered entries", "contain 39 unique ordered entries")
+            text.replace("len(MIGRATIONS) != 45", "len(MIGRATIONS) != 39").replace(
+                "contain 45 unique ordered entries", "contain 39 unique ordered entries"
+            )
         )
         baseline = subprocess.run(
             [sys.executable, "scripts/init_railway_db.py"],
@@ -264,7 +274,7 @@ def test_full_release_path_and_foundation_receiver(tmp_path, upgrade):
     )
     assert replay.returncode == 0, replay.stdout + replay.stderr
     with psycopg.connect(owner_dsn) as conn:
-        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone() == (40,)
+        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone() == (45,)
     command = {
         "schemaVersion": 1,
         "commandId": str(uuid4()),
